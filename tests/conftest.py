@@ -11,6 +11,11 @@ from open_ems.services.readiness import reset as readiness_reset
 from open_ems.storage.database import close_database, get_connection, init_database
 
 
+@pytest.fixture(autouse=True)
+def _set_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SECRET_KEY", "test-secret-key-32-chars-xxxxxxxxxx")
+
+
 @pytest.fixture
 def tmp_db_path(tmp_path: pathlib.Path) -> str:
     """Temporary SQLite file path for tests that need an on-disk DB."""

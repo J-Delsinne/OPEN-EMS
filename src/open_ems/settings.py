@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     ntp_host: str | None = None
     ntp_drift_threshold_seconds: float = Field(default=2.0, gt=0.0)
     port: int = 8443
+    secret_key: str
     tls_cert_path: str | None = None
     tls_key_path: str | None = None
 
@@ -28,5 +29,5 @@ _settings: Settings | None = None
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
-        _settings = Settings()
+        _settings = Settings()  # type: ignore[call-arg]
     return _settings

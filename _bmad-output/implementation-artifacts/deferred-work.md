@@ -53,6 +53,12 @@
 - **`mypy` not checking `tests/`** [`.github/workflows/ci.yml`:33] — type errors in test helpers/conftest.py are not caught; extend mypy scope to `tests/` in a future quality hardening pass
 - **No pytest coverage threshold** [`.github/workflows/ci.yml`:35] — `pytest` exits 0 with zero tests collected; add `--cov` and `--cov-fail-under` when coverage reporting is set up
 
+## Deferred from: code review of 1-7-establish-central-configuration-system-with-pydantic-settings (2026-05-02)
+
+- **`secret_key` uses `str` instead of `SecretStr`** [`src/open_ems/settings.py`] — value will appear in repr/model_dump/logs; address when `SECRET_KEY` is first consumed in auth (Epic 2)
+- **`_settings` singleton stays `None` after `ValidationError`** [`src/open_ems/settings.py`] — future non-lifespan callers would retry and re-raise; pre-existing singleton pattern; benign while SystemExit terminates the process before retry
+- **Structlog lazy binding may produce non-JSON format for startup error log** [`src/open_ems/web/app.py`] — `configure_logging` called inside the except block may fire after structlog already cached its pre-config processor chain; pre-existing ordering hazard noted in Story 1-2 review
+
 ## Deferred from: code review of 1-5-add-systemd-native-deployment-with-watchdog-integration (2026-05-01)
 
 - **Silent exception swallowing in `sd_notify` masks notification failures** [`src/open_ems/services/readiness.py:33`] — Pre-existing design decision from Story 1.3; `sd_notify` deliberately swallows all errors because the notification socket is optional (not present outside systemd). Revisit if observability requirements demand notification failure visibility.

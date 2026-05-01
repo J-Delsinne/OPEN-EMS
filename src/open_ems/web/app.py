@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
+from pydantic import ValidationError
 
 from open_ems.logging_config import configure_logging
 from open_ems.services.readiness import mark_ready, sd_notify
@@ -33,7 +34,25 @@ def _run_alembic_upgrade(db_url: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        configure_logging("INFO")
+        errors = exc.errors()
+        missing = [str(err["loc"][0]) for err in errors if err["type"] == "missing" and err["loc"]]
+        invalid = [
+            f"{err['loc'][0] if err['loc'] else '(root)'}: {err['msg']}"
+            for err in errors
+            if err["type"] != "missing"
+        ]
+        logger.error(
+            "startup_failed",
+            reason="invalid_config",
+            missing_fields=missing,
+            invalid_fields=invalid,
+            component="startup",
+        )
+        raise SystemExit(1) from exc
 
     # Step 1: Configure logging — all subsequent logs must be JSON
     configure_logging(settings.log_level)
