@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     ntp_host: str | None = None
     ntp_drift_threshold_seconds: float = Field(default=2.0, gt=0.0)
     port: int = 8443
-    secret_key: str
+    secret_key: SecretStr
+    initial_admin_password: SecretStr | None = None
     tls_cert_path: str | None = None
     tls_key_path: str | None = None
 

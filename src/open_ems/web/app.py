@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from open_ems.logging_config import configure_logging
 from open_ems.services.readiness import mark_ready, sd_notify
@@ -15,11 +15,50 @@ from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
+from open_ems.storage.repositories.user_repo import UserRepo, hash_password
 from open_ems.web.routes.health import router as health_router
 
 logger = structlog.get_logger(__name__)
 
-_PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+async def _bootstrap_admin_if_needed(
+    user_repo: UserRepo, initial_password: SecretStr | None
+) -> None:
+    """Create the initial admin user if the users table is empty."""
+    if await user_repo.count() > 0:
+        return
+    if initial_password is None:
+        logger.error(
+            "startup_failed",
+            reason="INITIAL_ADMIN_PASSWORD required when no users exist",
+            component="startup",
+        )
+        raise SystemExit(1) from None
+    hashed = hash_password(initial_password.get_secret_value())
+    await user_repo.create(
+        username="admin",
+        hashed_password=hashed,
+        role="installer",
+        must_change_password=True,
+    )
+    logger.info(
+        "admin_bootstrapped",
+        username="admin",
+        must_change_password=True,
+        component="startup",
+    )
+
+
+def _locate_project_root() -> pathlib.Path:
+    """Walk parent directories to find alembic.ini (project root marker)."""
+    here = pathlib.Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "alembic.ini").exists():
+            return parent
+    raise RuntimeError(
+        "Cannot locate project root: alembic.ini not found in any parent directory. "
+        "Verify the package is installed from the correct source tree."
+    )
 
 
 def _run_alembic_upgrade(db_url: str) -> None:
@@ -27,7 +66,8 @@ def _run_alembic_upgrade(db_url: str) -> None:
     from alembic import command as alembic_command
     from alembic.config import Config
 
-    cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    project_root = _locate_project_root()
+    cfg = Config(str(project_root / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", db_url)
     alembic_command.upgrade(cfg, "head")
 
@@ -79,6 +119,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Step 4: Open database connection
     await init_database(settings.db_path)
+
+    # Step 5b: Admin bootstrap — create initial admin if no users exist
+    await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
 
     # Step 5: Mark system ready (sends sd_notify READY=1 internally)
     mark_ready()

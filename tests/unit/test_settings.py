@@ -48,4 +48,4 @@ def test_secret_key_required(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_secret_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SECRET_KEY", "my-production-secret")
     s = Settings(_env_file=None)
-    assert s.secret_key == "my-production-secret"
+    assert s.secret_key.get_secret_value() == "my-production-secret"

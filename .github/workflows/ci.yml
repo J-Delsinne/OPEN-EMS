@@ -38,7 +38,7 @@ jobs:
       - name: Type check — mypy
         run: uv run python -m mypy src/
 
-      - name: Test — pytest
+      - name: Test — pytest + coverage (fail under 75%)
         run: uv run python -m pytest tests/
 
       - name: Migration validation — alembic upgrade head
