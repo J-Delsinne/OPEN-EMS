@@ -28,7 +28,7 @@ def sd_notify(message: str) -> None:
     try:
         abstract = notify_socket.startswith("@")
         addr = ("\0" + notify_socket[1:]) if abstract else notify_socket
-        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock: 
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
             sock.sendto(message.encode(), addr)
     except Exception:  # noqa: BLE001
         pass
