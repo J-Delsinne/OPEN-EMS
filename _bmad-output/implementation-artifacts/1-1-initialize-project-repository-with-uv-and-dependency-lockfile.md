@@ -68,6 +68,20 @@ So that every site runs the identical dependency set with no version drift betwe
   - [x] Confirm `uv.lock` exists and is NOT listed in `.gitignore`
   - [x] Stage all files; `uv.lock` must be included in the commit
 
+### Review Findings
+
+- [ ] [Review][Patch] `SECRET_KEY=changeme` in .env.example is an insecure literal placeholder [`.env.example`:9]
+- [ ] [Review][Patch] `asyncio_default_fixture_loop_scope` not set — pytest-asyncio 1.x will warn (and eventually error) when async tests are added [`pyproject.toml`:71]
+- [x] [Review][Defer] Unbounded `>=` version constraints on all deps — lockfile mitigates for now [`pyproject.toml`:14-26] — deferred, pre-existing
+- [x] [Review][Defer] `pytest-asyncio` future major-version risk — lockfile protects until `uv lock --upgrade` [`pyproject.toml`:36] — deferred, pre-existing
+- [x] [Review][Defer] `.python-version` (3.14) gitignored — deployment Python version uncontrolled on Pi [`gitignore`:19] — deferred, deployment concern
+- [x] [Review][Defer] `cryptography>=47.0.0` may require Rust toolchain on 32-bit Pi OS (armv7l/musl) — deferred, deployment concern
+- [x] [Review][Defer] `tailer==0.4.1` (2015, sdist-only) transitively pulled by dsmr-parser — Python 3.14 compat unverified — deferred, third-party
+- [x] [Review][Defer] `dlms-cosem==21.3.2` (2021) pulled by dsmr-parser — Python 3.14 compat unverified — deferred, third-party
+- [x] [Review][Defer] `pymodbus` uncapped + fully mypy-ignored — future version drift risk — deferred, lockfile mitigates
+- [x] [Review][Defer] `hatchling` not pinned as explicit dep — uv manages via build-system lockfile — deferred, low risk
+- [x] [Review][Defer] `__version__` hardcoded in `__init__.py` and `pyproject.toml` — will drift on version bumps — deferred, acceptable for v0.1.0
+
 ## Dev Notes
 
 ### Critical Context — Read First
