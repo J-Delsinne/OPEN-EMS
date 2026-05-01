@@ -8,9 +8,7 @@ import structlog
 from structlog.types import EventDict, WrappedLogger
 
 
-def _add_component(
-    logger: WrappedLogger, method_name: str, event_dict: EventDict
-) -> EventDict:
+def _add_component(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:
     """Map logger name to 'component' field if not explicitly set.
 
     Handles two cases:

@@ -42,10 +42,12 @@ def generate_cert(
         key_size=2048,
     )
     now = datetime.datetime.now(datetime.UTC)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, hostname),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "OPEN-EMS"),
-    ])
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "OPEN-EMS"),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -55,12 +57,14 @@ def generate_cert(
         .not_valid_before(now)
         .not_valid_after(now + datetime.timedelta(days=validity_days))
         .add_extension(
-            x509.SubjectAlternativeName([
-                x509.DNSName(hostname),
-                x509.DNSName("localhost"),
-                x509.IPAddress(lan_ip_addr),
-                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
-            ]),
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName(hostname),
+                    x509.DNSName("localhost"),
+                    x509.IPAddress(lan_ip_addr),
+                    x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+                ]
+            ),
             critical=False,
         )
         .add_extension(

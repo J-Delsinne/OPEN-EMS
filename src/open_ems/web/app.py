@@ -69,6 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _watchdog_task: asyncio.Task[None] | None = None
     interval = get_watchdog_interval()
     if interval is not None:
+
         def _on_watchdog_done(t: asyncio.Task[None]) -> None:
             if not t.cancelled():
                 exc = t.exception()

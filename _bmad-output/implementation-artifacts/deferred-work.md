@@ -42,6 +42,17 @@
 - **`generate-tls.sh` `dirname "$0"` unreliable if script is symlinked** [`scripts/generate-tls.sh:3`] — Known bash limitation; add marker-file check if symlink-based invocation becomes a deployment pattern
 - **`test_cert_valid_period` asserts `>= 364` rather than `>= 365`** [`tests/unit/tools/test_cert_gen.py`] — One-day slack unexplained; functionally correct but weak assertion; clarify intent
 
+## Deferred from: code review of 1-6-configure-github-actions-ci-pipeline-with-migration-validation (2026-05-01)
+
+- **Stale SQLite DB from prior pytest run may exist when alembic step runs** [`.github/workflows/ci.yml`:38] — `alembic upgrade head` on an already-upgraded DB is a no-op; low risk; revisit if tests ever create and migrate the DB explicitly
+- **Dockerfile uses floating `ghcr.io/astral-sh/uv:latest` tag** [`Dockerfile`] — uv version drift between quality job and Docker build; pin to a specific uv version when hardening release reproducibility
+- **GHCR image name uppercase latent risk** [`.github/workflows/ci.yml`:70] — `github.repository` may contain uppercase; GHCR requires lowercase; not an issue for this all-lowercase repo; add `.toLowerCase()` filter if repo is ever renamed with uppercase
+- **GITHUB_TOKEN `packages:write` may be blocked at org level** [`.github/workflows/ci.yml`:47-48] — org-level Actions policy can override the declared permission; verify org settings before first tagged release
+- **GHA cache 10 GB eviction on large multi-arch builds** [`.github/workflows/ci.yml`:84-85] — `cache-to: type=gha,mode=max` evicts silently when the per-repo cache limit is reached; monitor build times after a few releases
+- **No `environment` gate on release job** [`.github/workflows/ci.yml`:41] — any `v*` tag triggers Docker release without human checkpoint; add a GitHub environment with required reviewers if stricter release governance is needed
+- **`mypy` not checking `tests/`** [`.github/workflows/ci.yml`:33] — type errors in test helpers/conftest.py are not caught; extend mypy scope to `tests/` in a future quality hardening pass
+- **No pytest coverage threshold** [`.github/workflows/ci.yml`:35] — `pytest` exits 0 with zero tests collected; add `--cov` and `--cov-fail-under` when coverage reporting is set up
+
 ## Deferred from: code review of 1-5-add-systemd-native-deployment-with-watchdog-integration (2026-05-01)
 
 - **Silent exception swallowing in `sd_notify` masks notification failures** [`src/open_ems/services/readiness.py:33`] — Pre-existing design decision from Story 1.3; `sd_notify` deliberately swallows all errors because the notification socket is optional (not present outside systemd). Revisit if observability requirements demand notification failure visibility.
