@@ -1,6 +1,6 @@
 # Story 1.1: Initialize project repository with uv and dependency lockfile
 
-Status: review
+Status: done
 
 ## Story
 
@@ -70,8 +70,8 @@ So that every site runs the identical dependency set with no version drift betwe
 
 ### Review Findings
 
-- [ ] [Review][Patch] `SECRET_KEY=changeme` in .env.example is an insecure literal placeholder [`.env.example`:9]
-- [ ] [Review][Patch] `asyncio_default_fixture_loop_scope` not set — pytest-asyncio 1.x will warn (and eventually error) when async tests are added [`pyproject.toml`:71]
+- [x] [Review][Patch] `SECRET_KEY=changeme` in .env.example is an insecure literal placeholder [`.env.example`:9]
+- [x] [Review][Patch] `asyncio_default_fixture_loop_scope` not set — pytest-asyncio 1.x will warn (and eventually error) when async tests are added [`pyproject.toml`:71]
 - [x] [Review][Defer] Unbounded `>=` version constraints on all deps — lockfile mitigates for now [`pyproject.toml`:14-26] — deferred, pre-existing
 - [x] [Review][Defer] `pytest-asyncio` future major-version risk — lockfile protects until `uv lock --upgrade` [`pyproject.toml`:36] — deferred, pre-existing
 - [x] [Review][Defer] `.python-version` (3.14) gitignored — deployment Python version uncontrolled on Pi [`gitignore`:19] — deferred, deployment concern

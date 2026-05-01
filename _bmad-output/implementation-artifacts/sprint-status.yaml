@@ -45,7 +45,7 @@ development_status:
 
   # ─── Epic 1: Platform Foundation ───────────────────────────────────────────
   epic-1: in-progress
-  1-1-initialize-project-repository-with-uv-and-dependency-lockfile: review
+  1-1-initialize-project-repository-with-uv-and-dependency-lockfile: done
   1-2-bootstrap-fastapi-application-with-sqlite-alembic-migrations-and-structured-logging: backlog
   1-3-implement-health-endpoints-and-startup-sequence-with-ntp-check: backlog
   1-4-add-docker-compose-deployment-with-offline-tls-certificate-generation: backlog
