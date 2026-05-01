@@ -1,0 +1,32 @@
+services:
+  open-ems:
+    build: .
+    env_file: .env
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./certs:/app/certs:ro
+      - open_ems_data:/app/data
+    environment:
+      DB_PATH: /app/data/open_ems.db
+      TLS_CERT_PATH: /app/certs/cert.pem
+      TLS_KEY_PATH: /app/certs/key.pem
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request, ssl;
+          ctx = ssl.create_default_context();
+          ctx.check_hostname = False;
+          ctx.verify_mode = ssl.CERT_NONE;
+          urllib.request.urlopen('https://localhost:8443/health/ready', context=ctx, timeout=8)
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  open_ems_data:

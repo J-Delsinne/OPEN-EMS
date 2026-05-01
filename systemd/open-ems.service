@@ -1,0 +1,23 @@
+[Unit]
+Description=OPEN-EMS Energy Management System
+Documentation=https://github.com/jdelsinne/open-ems
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+User=open-ems
+Group=open-ems
+WorkingDirectory=/opt/open-ems
+EnvironmentFile=/etc/open-ems/open-ems.env
+ExecStart=/opt/open-ems/.venv/bin/python -m open_ems.main
+Restart=on-failure
+RestartSec=5s
+WatchdogSec=30s
+NotifyAccess=main
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=open-ems
+
+[Install]
+WantedBy=multi-user.target

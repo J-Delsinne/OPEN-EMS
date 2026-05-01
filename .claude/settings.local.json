@@ -15,7 +15,32 @@
       "PowerShell(Set-Location \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\"; python -m uv run mypy src/ 2>&1; Write-Output \"Exit code: $LASTEXITCODE\")",
       "PowerShell(Set-Location \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\"; python -m uv run pytest 2>&1; Write-Output \"Exit code: $LASTEXITCODE\")",
       "PowerShell(python3 \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\\\\_bmad\\\\scripts\\\\resolve_customization.py\" --skill \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\\\\.claude\\\\skills\\\\bmad-dev-story\" --key workflow.on_complete 2>&1)",
-      "Read(//dev/**)"
+      "Read(//dev/**)",
+      "Bash(python -m uv run mypy src/)",
+      "Bash(python -m uv run alembic heads)",
+      "Bash(python -m uv run alembic upgrade head)",
+      "Bash(python -m uv run alembic current)",
+      "Bash(ls open_ems.db)",
+      "Bash(python -m uv run pytest tests/ -v)",
+      "Bash(python -m uv run ruff check .)",
+      "Bash(python -m uv lock --check)",
+      "Bash(python -m uv run pytest --collect-only -q)",
+      "Bash(python -m pytest --collect-only -q)",
+      "Bash(python -m pytest tests/unit/services/test_readiness.py -v)",
+      "Bash(python -m mypy src/)",
+      "Bash(python -m pytest tests/unit/services/test_watchdog.py -v)",
+      "Bash(python -m ruff check .)",
+      "Bash(python -m ruff check . --fix)",
+      "Bash(python -m pytest tests/unit/services/test_watchdog.py -q)",
+      "Bash(python -m pytest tests/unit/ -q)",
+      "Bash(git update-index *)",
+      "Bash(git add *)",
+      "Bash(python -m pytest -v)",
+      "Bash(echo \"---EXIT:$?---\")",
+      "Bash(python -m uv run ruff check src/open_ems/tools/cert_gen.py src/open_ems/main.py tests/unit/test_settings.py)",
+      "Bash(where uv *)",
+      "Bash(where python *)",
+      "PowerShell($uvPath = Get-ChildItem -Path \"$env:USERPROFILE\\\\.cargo\\\\bin\", \"$env:USERPROFILE\\\\.local\\\\bin\", \"C:\\\\Users\\\\jorda\\\\AppData\\\\Local\\\\Programs\\\\uv\", \"C:\\\\Users\\\\jorda\\\\AppData\\\\Roaming\\\\uv\\\\bin\" -Filter \"uv.exe\" -ErrorAction SilentlyContinue | Select-Object -First 1; $uvPath.FullName)"
     ]
   }
 }
