@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-ems"
+version = "0.1.0"
+description = "Local energy management system for residential solar/battery/EV installations"
+readme = "README.md"
+authors = [
+    { name = "Jdelsinne", email = "jordan-m89@hotmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "alembic>=1.18.4",
+    "cryptography>=47.0.0",
+    "dsmr-parser>=1.6.0",
+    "fastapi>=0.136.1",
+    "ocpp>=2.1.0",
+    "pydantic>=2.13.3",
+    "pydantic-settings>=2.14.0",
+    "pymodbus>=3.13.0",
+    "structlog>=25.5.0",
+    "uvicorn[standard]>=0.46.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/open_ems"]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.2",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.12",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [
+    ".agents",
+    ".claude",
+    "_bmad",
+    "_bmad-output",
+    "docs",
+    ".venv",
+]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = [
+    "dsmr_parser.*",
+    "pymodbus.*",
+    "ocpp.*",
+    "aiosqlite.*",
+    "alembic.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

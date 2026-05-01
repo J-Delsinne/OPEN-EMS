@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPEN-EMS · UX Design Directions</title>
+<style>
+  :root {
+    --color-accent:         #0891b2;
+    --color-accent-hover:   #0e7490;
+    --color-accent-subtle:  #ecfeff;
+    --color-pass:           #16a34a;
+    --color-pass-bg:        #f0fdf4;
+    --color-warn:           #d97706;
+    --color-warn-bg:        #fffbeb;
+    --color-fail:           #dc2626;
+    --color-fail-bg:        #fef2f2;
+    --color-degraded:       #475569;
+    --color-degraded-bg:    #f1f5f9;
+    --color-degraded-border:#cbd5e1;
+    --color-surface:        #f8fafc;
+    --color-card:           #fafaf9;
+    --color-card-w:         #ffffff;
+    --color-border:         #e2e8f0;
+    --color-border-s:       #f1f5f9;
+    --color-text-1:         #0f172a;
+    --color-text-2:         #475569;
+    --color-text-3:         #94a3b8;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --font-mono: ui-monospace, 'Cascadia Code', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: var(--font-sans); background: #0f172a; color: var(--color-text-1); }
+
+  /* ── Page layout ── */
+  .page-header {
+    background: #0f172a; padding: 24px 32px; border-bottom: 1px solid #1e293b;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .logo { color: var(--color-accent); font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
+  .logo span { color: #94a3b8; font-weight: 400; font-size: 14px; margin-left: 8px; }
+  .dir-tabs {
+    display: flex; gap: 0; border-bottom: 1px solid #1e293b;
+    background: #0f172a; padding: 0 32px; overflow-x: auto;
+  }
+  .dir-tab {
+    padding: 12px 20px; color: #64748b; font-size: 13px; font-weight: 500;
+    cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
+    transition: color 0.15s;
+  }
+  .dir-tab:hover { color: #94a3b8; }
+  .dir-tab.active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+
+  .direction { display: none; padding: 32px; gap: 32px; }
+  .direction.active { display: grid; grid-template-columns: 390px 1fr; min-height: calc(100vh - 120px); }
+  @media (max-width: 900px) { .direction.active { grid-template-columns: 1fr; } }
+
+  /* ── Shared frame labels ── */
+  .frame-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px;
+    color: #64748b; margin-bottom: 12px;
+  }
+  .dir-rationale {
+    grid-column: 1 / -1; background: #1e293b; border-radius: 10px; padding: 20px 24px;
+    border-left: 3px solid var(--color-accent);
+  }
+  .dir-rationale h3 { color: var(--color-accent); font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+  .dir-rationale p { color: #94a3b8; font-size: 13px; line-height: 1.6; }
+  .dir-rationale ul { color: #94a3b8; font-size: 13px; line-height: 1.8; padding-left: 20px; margin-top: 4px; }
+
+  /* ════════════════════════════════════════════
+     DIRECTION 1 — "Calm Autopilot"
+     Homeowner: large battery hero, stacked natural-language cards
+     Installer: left sidebar + Stripe-style content
+  ════════════════════════════════════════════ */
+
+  /* Mobile phone frame */
+  .phone-frame {
+    background: #1e293b; border-radius: 40px; padding: 8px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5); width: 375px;
+  }
+  .phone-screen { background: var(--color-surface); border-radius: 32px; overflow: hidden; min-height: 700px; }
+
+  /* Homeowner shared nav */
+  .hw-nav {
+    background: var(--color-card-w); border-bottom: 1px solid var(--color-border);
+    padding: 16px 20px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .hw-nav-logo { font-size: 15px; font-weight: 700; color: var(--color-text-1); }
+  .hw-nav-role { font-size: 12px; color: var(--color-text-3); }
+  .hw-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+
+  /* Status line */
+  .hw-status-ok { display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+    background: var(--color-card); border-radius: 10px; border: 1px solid var(--color-border); }
+  .hw-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-pass); flex-shrink: 0; }
+  .hw-status-dot.degraded { background: var(--color-degraded); }
+  .hw-status-text { font-size: 13px; color: var(--color-text-2); }
+  .hw-status-strategy { font-size: 13px; font-weight: 600; color: var(--color-text-1); }
+  .hw-degraded-note { font-size: 12px; color: var(--color-degraded); margin-top: 2px; }
+
+  /* Battery hero */
+  .hw-battery-card {
+    background: var(--color-card); border-radius: 12px; border: 1px solid var(--color-border);
+    padding: 20px; display: flex; align-items: center; gap: 16px;
+  }
+  .hw-battery-circle {
+    width: 72px; height: 72px; border-radius: 50%; flex-shrink: 0;
+    background: conic-gradient(var(--color-pass) 0% 81%, var(--color-border) 81% 100%);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: inset 0 0 0 10px var(--color-card);
+    position: relative;
+  }
+  .hw-battery-pct { font-size: 18px; font-weight: 700; color: var(--color-text-1); }
+  .hw-battery-info h4 { font-size: 14px; font-weight: 600; color: var(--color-text-1); }
+  .hw-battery-info p { font-size: 12px; color: var(--color-text-2); margin-top: 2px; }
+
+  /* Metric cards */
+  .hw-metric-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .hw-metric {
+    background: var(--color-card); border-radius: 10px; border: 1px solid var(--color-border);
+    padding: 14px 16px;
+  }
+  .hw-metric-label { font-size: 11px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: 0.5px; }
+  .hw-metric-value { font-size: 20px; font-weight: 700; color: var(--color-text-1); margin-top: 2px; }
+  .hw-metric-value.producing { color: var(--color-pass); }
+  .hw-metric-sub { font-size: 11px; color: var(--color-text-2); margin-top: 2px; }
+
+  /* EV card */
+  .hw-ev-card {
+    background: var(--color-card); border-radius: 12px; border: 1px solid var(--color-border); padding: 16px;
+  }
+  .hw-ev-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+  .hw-ev-title { font-size: 14px; font-weight: 600; color: var(--color-text-1); }
+  .hw-ev-time { font-size: 12px; color: var(--color-text-2); }
+  .hw-ev-btn {
+    width: 100%; padding: 14px; border-radius: 8px; border: none; cursor: pointer;
+    font-size: 14px; font-weight: 600; font-family: var(--font-sans);
+    background: var(--color-accent); color: #fff; transition: background 0.15s;
+  }
+  .hw-ev-btn:hover { background: var(--color-accent-hover); }
+  .hw-ev-btn.starting { background: var(--color-accent); opacity: 0.8; }
+  .hw-ev-btn.confirmed { background: var(--color-pass); }
+  .hw-ev-btn.fallback { background: #64748b; }
+  .hw-ev-notice { font-size: 11px; color: var(--color-text-2); margin-top: 8px; line-height: 1.5; }
+
+  /* Strategy selector */
+  .hw-strategy-card {
+    background: var(--color-card); border-radius: 12px; border: 1px solid var(--color-border); padding: 16px;
+  }
+  .hw-strategy-label { font-size: 11px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+  .hw-strategy-opts { display: flex; flex-direction: column; gap: 6px; }
+  .hw-strategy-opt {
+    padding: 10px 12px; border-radius: 8px; font-size: 13px; cursor: pointer;
+    border: 1.5px solid var(--color-border); background: var(--color-card-w); color: var(--color-text-2);
+  }
+  .hw-strategy-opt.active {
+    border-color: var(--color-accent); background: var(--color-accent-subtle);
+    color: var(--color-accent); font-weight: 600;
+  }
+  .hw-strategy-desc { font-size: 11px; color: var(--color-text-3); margin-top: 2px; }
+
+  /* Desktop frame */
+  .desktop-frame {
+    background: #1e293b; border-radius: 16px; padding: 6px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5); width: 100%; max-width: 860px;
+  }
+  .desktop-screen { background: var(--color-surface); border-radius: 10px; overflow: hidden; min-height: 600px; display: flex; flex-direction: column; }
+
+  /* Installer layout: sidebar + content */
+  .ins-shell { display: flex; flex: 1; }
+  .ins-sidebar {
+    width: 200px; background: #0f172a; flex-shrink: 0; padding: 16px 0; display: flex; flex-direction: column;
+  }
+  .ins-sidebar-logo { padding: 0 16px 16px; border-bottom: 1px solid #1e293b; margin-bottom: 8px; }
+  .ins-sidebar-logo span { font-size: 15px; font-weight: 700; color: #e2e8f0; }
+  .ins-sidebar-logo small { display: block; font-size: 11px; color: #475569; margin-top: 2px; }
+  .ins-nav-item {
+    padding: 9px 16px; font-size: 13px; color: #64748b; cursor: pointer;
+    display: flex; align-items: center; gap: 8px; border-left: 2px solid transparent;
+  }
+  .ins-nav-item:hover { color: #94a3b8; }
+  .ins-nav-item.active { color: #e2e8f0; border-left-color: var(--color-accent); background: rgba(8,145,178,0.08); }
+  .ins-nav-icon { width: 16px; text-align: center; }
+  .ins-content { flex: 1; padding: 20px; overflow: auto; }
+  .ins-topbar {
+    background: var(--color-card-w); border-bottom: 1px solid var(--color-border);
+    padding: 12px 20px; display: flex; align-items: center; justify-content: space-between;
+  }
+  .ins-topbar-title { font-size: 15px; font-weight: 600; color: var(--color-text-1); }
+  .ins-status-pill {
+    font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 20px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .ins-status-pill.ok { background: var(--color-pass-bg); color: var(--color-pass); }
+  .ins-status-pill.degraded { background: var(--color-degraded-bg); color: var(--color-degraded); }
+
+  /* Installer cards */
+  .ins-card-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .ins-card {
+    background: var(--color-card-w); border: 1px solid var(--color-border); border-radius: 8px; padding: 14px;
+  }
+  .ins-card-label { font-size: 11px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: 0.5px; }
+  .ins-card-value { font-size: 22px; font-weight: 700; color: var(--color-text-1); margin-top: 4px; }
+  .ins-card-sub { font-size: 12px; color: var(--color-text-2); margin-top: 2px; }
+
+  /* Device list */
+  .ins-device-list { background: var(--color-card-w); border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; margin-bottom: 16px; }
+  .ins-device-list-header { padding: 10px 14px; border-bottom: 1px solid var(--color-border); font-size: 12px; font-weight: 600; color: var(--color-text-2); display: flex; gap: 12px; }
+  .ins-device-row { padding: 10px 14px; border-bottom: 1px solid var(--color-border-s); display: flex; align-items: center; gap: 12px; }
+  .ins-device-row:last-child { border-bottom: none; }
+  .ins-device-badge { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .ins-device-badge.ok { background: var(--color-pass); }
+  .ins-device-badge.warn { background: var(--color-warn); }
+  .ins-device-name { font-size: 13px; font-weight: 500; color: var(--color-text-1); flex: 1; }
+  .ins-device-role { font-size: 12px; color: var(--color-text-2); }
+  .ins-device-status { font-size: 12px; color: var(--color-text-3); font-family: var(--font-mono); }
+
+  /* Event log */
+  .ins-log { background: var(--color-card-w); border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; }
+  .ins-log-header { padding: 10px 14px; border-bottom: 1px solid var(--color-border); font-size: 12px; font-weight: 600; color: var(--color-text-2); display: flex; justify-content: space-between; align-items: center; }
+  .ins-log-header a { font-size: 11px; color: var(--color-accent); text-decoration: none; }
+  .ins-log-row { padding: 10px 14px; border-bottom: 1px solid var(--color-border-s); display: flex; align-items: flex-start; gap: 10px; }
+  .ins-log-row:last-child { border-bottom: none; }
+  .ins-log-time { font-size: 11px; color: var(--color-text-3); font-family: var(--font-mono); flex-shrink: 0; width: 42px; }
+  .ins-log-type { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px; flex-shrink: 0; }
+  .ins-log-type.decision { background: var(--color-accent-subtle); color: var(--color-accent); }
+  .ins-log-type.constraint { background: #fefce8; color: #854d0e; }
+  .ins-log-type.recovery { background: var(--color-pass-bg); color: var(--color-pass); }
+  .ins-log-desc { font-size: 12px; color: var(--color-text-1); line-height: 1.4; }
+
+  /* Validation result */
+  .val-header { padding: 14px 16px; border-bottom: 1px solid var(--color-border); display: flex; align-items: center; justify-content: space-between; }
+  .val-headline { font-size: 14px; font-weight: 700; }
+  .val-headline.pass { color: var(--color-pass); }
+  .val-headline.warn { color: var(--color-warn); }
+  .val-headline.fail { color: var(--color-fail); }
+  .val-row { padding: 10px 16px; border-bottom: 1px solid var(--color-border-s); display: flex; align-items: flex-start; gap: 10px; }
+  .val-row:last-child { border-bottom: none; }
+  .val-icon { flex-shrink: 0; width: 18px; text-align: center; font-size: 13px; }
+  .val-check-name { font-size: 13px; font-weight: 500; color: var(--color-text-1); }
+  .val-check-desc { font-size: 12px; color: var(--color-text-2); margin-top: 1px; }
+  .val-check-action { font-size: 11px; color: var(--color-warn); margin-top: 3px; }
+  .val-btn { margin: 12px 16px; padding: 10px 16px; background: var(--color-accent); color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: var(--font-sans); }
+
+  /* Degraded banner (homeowner) */
+  .hw-degraded-card {
+    background: var(--color-degraded-bg); border-radius: 10px;
+    border: 1px solid var(--color-degraded-border); border-left: 3px solid var(--color-degraded);
+    padding: 12px 14px;
+  }
+  .hw-degraded-title { font-size: 13px; font-weight: 600; color: var(--color-degraded); }
+  .hw-degraded-body { font-size: 12px; color: var(--color-text-2); margin-top: 4px; line-height: 1.5; }
+
+  /* ── Direction 2 specific ── */
+  .hw-headline-status { padding: 24px 20px 0; }
+  .hw-headline-text { font-size: 22px; font-weight: 700; color: var(--color-text-1); line-height: 1.3; }
+  .hw-headline-sub { font-size: 13px; color: var(--color-text-2); margin-top: 6px; }
+  .hw-compact-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 16px 20px; }
+  .hw-compact-m { background: var(--color-card); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px; text-align: center; }
+  .hw-compact-val { font-size: 16px; font-weight: 700; color: var(--color-text-1); }
+  .hw-compact-val.pos { color: var(--color-pass); }
+  .hw-compact-lbl { font-size: 10px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; }
+
+  /* ── Direction 3 specific — Ultra-minimal ── */
+  .hw-ultra { padding: 32px 24px; display: flex; flex-direction: column; gap: 20px; }
+  .hw-ultra-status { font-size: 15px; color: var(--color-text-2); display: flex; align-items: center; gap: 8px; }
+  .hw-ultra-batt { font-size: 56px; font-weight: 800; color: var(--color-text-1); line-height: 1; }
+  .hw-ultra-batt span { font-size: 24px; font-weight: 500; color: var(--color-text-3); }
+  .hw-ultra-row { display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px solid var(--color-border); }
+  .hw-ultra-item { text-align: center; }
+  .hw-ultra-v { font-size: 18px; font-weight: 700; color: var(--color-text-1); }
+  .hw-ultra-l { font-size: 11px; color: var(--color-text-3); margin-top: 2px; }
+  .hw-ultra-ev { background: var(--color-card); border: 1px solid var(--color-border); border-radius: 10px; padding: 16px; }
+  .hw-ultra-ev p { font-size: 13px; color: var(--color-text-2); margin-bottom: 12px; }
+  .hw-ultra-btn { width: 100%; padding: 16px; background: var(--color-accent); color: #fff; border: none; border-radius: 8px; font-size: 15px; font-weight: 700; cursor: pointer; font-family: var(--font-sans); }
+
+  /* ── Direction 4 — Card Grid ── */
+  .hw-grid { padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .hw-g-card { background: var(--color-card); border: 1px solid var(--color-border); border-radius: 12px; padding: 16px; }
+  .hw-g-card.ev-card { grid-column: 1 / -1; }
+  .hw-g-icon { font-size: 20px; margin-bottom: 8px; }
+  .hw-g-val { font-size: 24px; font-weight: 700; color: var(--color-text-1); }
+  .hw-g-val.green { color: var(--color-pass); }
+  .hw-g-lbl { font-size: 12px; color: var(--color-text-2); margin-top: 4px; }
+
+  /* ── Direction 5 — Text-first ── */
+  .hw-text { padding: 20px; display: flex; flex-direction: column; gap: 0; }
+  .hw-text-block { padding: 16px 0; border-bottom: 1px solid var(--color-border); }
+  .hw-text-block:last-child { border-bottom: none; }
+  .hw-text-key { font-size: 12px; color: var(--color-text-3); text-transform: uppercase; letter-spacing: 0.6px; }
+  .hw-text-val { font-size: 20px; font-weight: 700; color: var(--color-text-1); margin-top: 4px; }
+  .hw-text-note { font-size: 13px; color: var(--color-text-2); margin-top: 4px; }
+  .hw-text-btn { margin-top: 10px; padding: 12px 16px; background: var(--color-accent); color: #fff; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; font-family: var(--font-sans); }
+
+  /* ── Direction 6 — Split/Pro ── */
+  .hw-pro { padding: 20px; }
+  .hw-pro-top { background: #0f172a; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .hw-pro-top-label { font-size: 10px; color: #475569; text-transform: uppercase; letter-spacing: 0.6px; }
+  .hw-pro-top-val { font-size: 28px; font-weight: 800; color: #e2e8f0; margin-top: 2px; }
+  .hw-pro-top-sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .hw-pro-row { display: flex; gap: 10px; margin-bottom: 14px; }
+  .hw-pro-m { flex: 1; background: var(--color-card); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; }
+  .hw-pro-m-v { font-size: 18px; font-weight: 700; color: var(--color-text-1); }
+  .hw-pro-m-v.g { color: var(--color-pass); }
+  .hw-pro-m-l { font-size: 11px; color: var(--color-text-3); margin-top: 2px; }
+
+  /* Top-nav installer layout (for direction 2) */
+  .ins-topnav { background: #0f172a; padding: 12px 20px; display: flex; align-items: center; gap: 24px; }
+  .ins-topnav-logo { font-size: 15px; font-weight: 700; color: #e2e8f0; }
+  .ins-topnav-links { display: flex; gap: 0; }
+  .ins-topnav-link { padding: 8px 14px; font-size: 13px; color: #64748b; cursor: pointer; border-bottom: 2px solid transparent; }
+  .ins-topnav-link.active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+  .ins-topnav-status { margin-left: auto; }
+
+  /* Section headers */
+  .ins-section-h { font-size: 13px; font-weight: 600; color: var(--color-text-2); margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+<div class="page-header">
+  <div class="logo">OPEN-EMS <span>UX Design Directions · v1</span></div>
+</div>
+
+<div class="dir-tabs">
+  <div class="dir-tab active" onclick="showDir(1, this)">Direction 1 · Calm Autopilot</div>
+  <div class="dir-tab" onclick="showDir(2, this)">Direction 2 · Status-First</div>
+  <div class="dir-tab" onclick="showDir(3, this)">Direction 3 · Ultra-Minimal</div>
+  <div class="dir-tab" onclick="showDir(4, this)">Direction 4 · Card Grid</div>
+  <div class="dir-tab" onclick="showDir(5, this)">Direction 5 · Text-First</div>
+  <div class="dir-tab" onclick="showDir(6, this)">Direction 6 · Pro Register</div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIRECTION 1 — Calm Autopilot
+════════════════════════════════════ -->
+<div id="dir-1" class="direction active">
+  <div>
+    <div class="frame-label">Homeowner · Mobile</div>
+    <div class="phone-frame">
+      <div class="phone-screen">
+        <div class="hw-nav">
+          <div class="hw-nav-logo">OPEN-EMS</div>
+          <div class="hw-nav-role">Marc's Home</div>
+        </div>
+        <div class="hw-body">
+          <!-- Normal state status -->
+          <div class="hw-status-ok">
+            <div class="hw-status-dot"></div>
+            <div>
+              <div class="hw-status-strategy">Running normally</div>
+              <div class="hw-status-text">Minimize Cost · active</div>
+            </div>
+          </div>
+          <!-- Battery card -->
+          <div class="hw-battery-card">
+            <div class="hw-battery-circle">
+              <span class="hw-battery-pct">81%</span>
+            </div>
+            <div class="hw-battery-info">
+              <h4>Battery</h4>
+              <p>Charging from solar</p>
+              <p style="font-size:11px;color:var(--color-text-3);margin-top:4px">Reserve floor: 20%</p>
+            </div>
+          </div>
+          <!-- Metrics -->
+          <div class="hw-metric-row">
+            <div class="hw-metric">
+              <div class="hw-metric-label">Solar</div>
+              <div class="hw-metric-value producing">2.1 kW</div>
+              <div class="hw-metric-sub">Producing now</div>
+            </div>
+            <div class="hw-metric">
+              <div class="hw-metric-label">Grid</div>
+              <div class="hw-metric-value">0 W</div>
+              <div class="hw-metric-sub">Not drawing</div>
+            </div>
+          </div>
+          <!-- EV card — normal state -->
+          <div class="hw-ev-card">
+            <div class="hw-ev-header">
+              <div class="hw-ev-title">EV Charging</div>
+              <div class="hw-ev-time">Tonight · 22:30</div>
+            </div>
+            <button class="hw-ev-btn">Charge EV now</button>
+            <div class="hw-ev-notice">Peak limit stays active during manual charging.</div>
+          </div>
+          <!-- Strategy -->
+          <div class="hw-strategy-card">
+            <div class="hw-strategy-label">Energy Strategy</div>
+            <div class="hw-strategy-opts">
+              <div class="hw-strategy-opt active">Minimize Cost <div class="hw-strategy-desc">Uses cheap-rate hours and solar</div></div>
+              <div class="hw-strategy-opt">Maximize Self-Consumption <div class="hw-strategy-desc">Prioritises your own solar</div></div>
+              <div class="hw-strategy-opt">Prioritise EV <div class="hw-strategy-desc">Keeps car ready first</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="frame-label">Installer · Desktop Dashboard</div>
+    <div class="desktop-frame">
+      <div class="desktop-screen">
+        <div class="ins-topbar">
+          <div class="ins-topbar-title">Dashboard · Ghent Installation</div>
+          <div class="ins-status-pill ok">● System healthy · 21 days uptime</div>
+        </div>
+        <div class="ins-shell">
+          <div class="ins-sidebar">
+            <div class="ins-sidebar-logo">
+              <span>OPEN-EMS</span>
+              <small>Installer view</small>
+            </div>
+            <div class="ins-nav-item active"><span class="ins-nav-icon">▪</span> Dashboard</div>
+            <div class="ins-nav-item"><span class="ins-nav-icon">◌</span> Devices</div>
+            <div class="ins-nav-item"><span class="ins-nav-icon">≡</span> Event Log</div>
+            <div class="ins-nav-item"><span class="ins-nav-icon">⚙</span> Settings</div>
+          </div>
+          <div class="ins-content">
+            <div class="ins-card-grid">
+              <div class="ins-card">
+                <div class="ins-card-label">Peak this month</div>
+                <div class="ins-card-value">3.2 kW</div>
+                <div class="ins-card-sub">Limit: 5.0 kW · 36% headroom</div>
+              </div>
+              <div class="ins-card">
+                <div class="ins-card-label">Battery SOC</div>
+                <div class="ins-card-value">81%</div>
+                <div class="ins-card-sub">Charging · floor 20%</div>
+              </div>
+              <div class="ins-card">
+                <div class="ins-card-label">Grid draw</div>
+                <div class="ins-card-value">0 W</div>
+                <div class="ins-card-sub">PV covering load</div>
+              </div>
+            </div>
+            <div class="ins-section-h">Connected Devices</div>
+            <div class="ins-device-list">
+              <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name">Fronius Gen24</div><div class="ins-device-role">Inverter</div><div class="ins-device-status">2.1 kW</div></div>
+              <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name">BYD HVM</div><div class="ins-device-role">Battery</div><div class="ins-device-status">81% · charging</div></div>
+              <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name">Wallbox Pulsar</div><div class="ins-device-role">EV Charger</div><div class="ins-device-status">Idle · sched 22:30</div></div>
+              <div class="ins-device-row"><div class="ins-device-badge warn"></div><div class="ins-device-name">DSMR Meter</div><div class="ins-device-role">Grid Meter</div><div class="ins-device-status">40s stale · reconnecting</div></div>
+            </div>
+            <div class="ins-section-h" style="margin-top:14px">Recent Events</div>
+            <div class="ins-log">
+              <div class="ins-log-header">Event log <a href="#">View all →</a></div>
+              <div class="ins-log-row"><div class="ins-log-time">14:22</div><div class="ins-log-type decision">Decision</div><div class="ins-log-desc">Battery discharged 3 kW to absorb EV load — peak window 14:15–14:30, grid draw held at 1.8 kW.</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">12:04</div><div class="ins-log-type constraint">Constraint</div><div class="ins-log-desc">EV charge rate reduced 11 → 7 kW — projected 15-min avg approaching 4.9 kW peak limit.</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">08:31</div><div class="ins-log-type recovery">Recovery</div><div class="ins-log-desc">Meter reconnected after 40s disconnect — control loop resumed, conservative mode cleared.</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px">
+      <div class="frame-label">Installer · Deployment Validation</div>
+      <div class="desktop-frame" style="max-width:500px">
+        <div class="desktop-screen">
+          <div class="ins-log" style="border:none">
+            <div class="val-header">
+              <div class="val-headline pass">✓ System is ready</div>
+              <button class="val-btn" style="margin:0">Complete handoff</button>
+            </div>
+            <div class="val-row"><div class="val-icon" style="color:var(--color-pass)">✓</div><div><div class="val-check-name">Device connectivity</div><div class="val-check-desc">All 4 devices responding</div></div></div>
+            <div class="val-row"><div class="val-icon" style="color:var(--color-pass)">✓</div><div><div class="val-check-name">Role assignment</div><div class="val-check-desc">All required roles assigned</div></div></div>
+            <div class="val-row"><div class="val-icon" style="color:var(--color-pass)">✓</div><div><div class="val-check-name">Constraint completeness</div><div class="val-check-desc">Peak limit 5.0 kW · Reserve floor 20%</div></div></div>
+            <div class="val-row"><div class="val-icon" style="color:var(--color-warn)">⚠</div><div><div class="val-check-name">Inverter capability</div><div class="val-check-desc">Solar forecast accuracy reduced — firmware v3.11</div><div class="val-check-action">→ Update inverter firmware to v3.14+ when convenient</div></div></div>
+            <div class="val-row"><div class="val-icon" style="color:var(--color-pass)">✓</div><div><div class="val-check-name">Control readiness</div><div class="val-check-desc">All devices responding to capability probe</div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dir-rationale">
+    <h3>Direction 1 · Calm Autopilot — Design Rationale</h3>
+    <p>The homeowner view is a vertical card stack: status line → battery hero → metrics → EV action → strategy. Information is layered in urgency order. The battery circle provides an at-a-glance reading without requiring the homeowner to parse a number. The EV override button is the sole primary action: full-width, 52px, accent color, always in the same position. Degraded mode (not shown in this state) replaces the status line with the slate-colored calm card.</p>
+    <p style="margin-top:8px">The installer view follows the Stripe/Linear model: dark sidebar navigation, clean content area, three stat cards at the top (peak, battery, grid), device list with connection badges, event log with type badges. The deployment validation uses Vercel-style per-check rows. All log entries use plain-language descriptions, never error codes.</p>
+    <ul style="margin-top:8px">
+      <li><strong>Homeowner strengths:</strong> hierarchical, scannable, nothing hidden, EV action always visible</li>
+      <li><strong>Installer strengths:</strong> professional density, structured, event log is primary diagnostic surface</li>
+      <li><strong>Trade-off:</strong> battery circle requires CSS ring; could simplify to a progress bar (see Dir 5)</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIRECTION 2 — Status-First
+════════════════════════════════════ -->
+<div id="dir-2" class="direction">
+  <div>
+    <div class="frame-label">Homeowner · Mobile — Status-First</div>
+    <div class="phone-frame">
+      <div class="phone-screen">
+        <div class="hw-nav">
+          <div class="hw-nav-logo">OPEN-EMS</div>
+          <div class="hw-nav-role">Marc's Home</div>
+        </div>
+        <div class="hw-headline-status">
+          <div class="hw-headline-text">Your home is<br>running smoothly.</div>
+          <div class="hw-headline-sub">Minimize Cost · solar covering all loads</div>
+        </div>
+        <div class="hw-compact-metrics">
+          <div class="hw-compact-m"><div class="hw-compact-val pos">81%</div><div class="hw-compact-lbl">Battery</div></div>
+          <div class="hw-compact-m"><div class="hw-compact-val pos">2.1</div><div class="hw-compact-lbl">Solar kW</div></div>
+          <div class="hw-compact-m"><div class="hw-compact-val">0</div><div class="hw-compact-lbl">Grid W</div></div>
+        </div>
+        <div class="hw-body" style="padding-top:0">
+          <div class="hw-ev-card">
+            <div class="hw-ev-header">
+              <div>
+                <div class="hw-ev-title">EV · Seat Tavascan</div>
+                <div class="hw-ev-time">Scheduled tonight at 22:30</div>
+              </div>
+            </div>
+            <button class="hw-ev-btn">Charge EV now</button>
+            <div class="hw-ev-notice">Peak limit stays active. Charge rate adjusts automatically.</div>
+          </div>
+          <!-- Degraded state example -->
+          <div class="hw-degraded-card">
+            <div class="hw-degraded-title">Running with limited functionality</div>
+            <div class="hw-degraded-body">Solar optimization is reduced — the system continues managing your battery and EV charging normally.</div>
+          </div>
+          <div class="hw-strategy-card">
+            <div class="hw-strategy-label">Your energy strategy</div>
+            <div class="hw-strategy-opts">
+              <div class="hw-strategy-opt active">Minimize Cost</div>
+              <div class="hw-strategy-opt">Maximize Self-Consumption</div>
+              <div class="hw-strategy-opt">Prioritise EV</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="frame-label">Installer · Desktop — Top-Nav Layout</div>
+    <div class="desktop-frame">
+      <div class="desktop-screen">
+        <div class="ins-topnav">
+          <span class="ins-topnav-logo">OPEN-EMS</span>
+          <div class="ins-topnav-links">
+            <div class="ins-topnav-link active">Dashboard</div>
+            <div class="ins-topnav-link">Devices</div>
+            <div class="ins-topnav-link">Event Log</div>
+            <div class="ins-topnav-link">Setup</div>
+            <div class="ins-topnav-link">Settings</div>
+          </div>
+          <div class="ins-topnav-status"><div class="ins-status-pill ok">● Healthy</div></div>
+        </div>
+        <div style="padding:20px">
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
+            <div>
+              <div class="ins-section-h">System status — Ghent · Marc Dhondt</div>
+              <div class="ins-card-grid" style="grid-template-columns:1fr 1fr 1fr">
+                <div class="ins-card"><div class="ins-card-label">Peak / limit</div><div class="ins-card-value">3.2 <span style="font-size:14px;color:var(--color-text-3)">/ 5.0 kW</span></div><div class="ins-card-sub">36% headroom</div></div>
+                <div class="ins-card"><div class="ins-card-label">Uptime</div><div class="ins-card-value">21d</div><div class="ins-card-sub">No forced restarts</div></div>
+                <div class="ins-card"><div class="ins-card-label">Events 7d</div><div class="ins-card-value">47</div><div class="ins-card-sub">2 flagged · reviewed</div></div>
+              </div>
+              <div class="ins-section-h" style="margin-top:14px">Event Log</div>
+              <div class="ins-log">
+                <div class="ins-log-header">Last 24 hours <a href="#">Full log →</a></div>
+                <div class="ins-log-row"><div class="ins-log-time">14:22</div><div class="ins-log-type decision">Decision</div><div class="ins-log-desc">Battery discharged 3 kW — peak window intervention, grid held at 1.8 kW.</div></div>
+                <div class="ins-log-row"><div class="ins-log-time">12:04</div><div class="ins-log-type constraint">Constraint</div><div class="ins-log-desc">EV rate reduced 11→7 kW — projected peak approaching limit.</div></div>
+                <div class="ins-log-row"><div class="ins-log-time">08:31</div><div class="ins-log-type recovery">Recovery</div><div class="ins-log-desc">Meter reconnected after 40s — conservative mode cleared.</div></div>
+              </div>
+            </div>
+            <div>
+              <div class="ins-section-h">Devices</div>
+              <div class="ins-device-list">
+                <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name" style="font-size:12px">Fronius Gen24</div><div class="ins-device-status">2.1 kW</div></div>
+                <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name" style="font-size:12px">BYD HVM</div><div class="ins-device-status">81%</div></div>
+                <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name" style="font-size:12px">Wallbox Pulsar</div><div class="ins-device-status">Idle</div></div>
+                <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name" style="font-size:12px">DSMR Meter</div><div class="ins-device-status">Live</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dir-rationale">
+    <h3>Direction 2 · Status-First — Design Rationale</h3>
+    <p>The homeowner view opens with a full-width sentence: "Your home is running smoothly." This is the defining message of the autopilot experience — made explicit and primary. Compact metrics sit below in a three-column row; the EV card and strategy follow. Degraded mode replaces the headline sentence and adds the calm slate card below metrics — never intrusive, never alarming.</p>
+    <p style="margin-top:8px">The installer uses a top navigation bar instead of a left sidebar — better for narrower screens and makes the nav feel less like a settings panel. Content is split into a 2/1 column layout: event log + stats on the left, device list on the right. More compact than Direction 1.</p>
+    <ul style="margin-top:8px">
+      <li><strong>Homeowner strengths:</strong> sentence-format status is immediately reassuring; minimal cognitive load</li>
+      <li><strong>Installer strengths:</strong> top nav saves horizontal space; device list always visible beside content</li>
+      <li><strong>Trade-off:</strong> headline sentence needs careful copy for all states (degraded, error, override active)</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIRECTION 3 — Ultra-Minimal
+════════════════════════════════════ -->
+<div id="dir-3" class="direction">
+  <div>
+    <div class="frame-label">Homeowner · Mobile — Ultra-Minimal</div>
+    <div class="phone-frame">
+      <div class="phone-screen">
+        <div class="hw-nav">
+          <div class="hw-nav-logo">OPEN-EMS</div>
+          <div class="hw-nav-role">Marc's Home</div>
+        </div>
+        <div class="hw-ultra">
+          <div class="hw-ultra-status">
+            <div class="hw-status-dot"></div> Running normally · Minimize Cost
+          </div>
+          <div>
+            <div style="font-size:12px;color:var(--color-text-3);margin-bottom:4px">Battery</div>
+            <div class="hw-ultra-batt">81<span>%</span></div>
+            <div style="font-size:13px;color:var(--color-text-2);margin-top:4px">Charging from solar</div>
+          </div>
+          <div class="hw-ultra-row">
+            <div class="hw-ultra-item"><div class="hw-ultra-v" style="color:var(--color-pass)">2.1 kW</div><div class="hw-ultra-l">Solar</div></div>
+            <div class="hw-ultra-item"><div class="hw-ultra-v">0 W</div><div class="hw-ultra-l">Grid</div></div>
+            <div class="hw-ultra-item"><div class="hw-ultra-v">22:30</div><div class="hw-ultra-l">EV tonight</div></div>
+          </div>
+          <div class="hw-ultra-ev">
+            <p>EV is scheduled for tonight. Need it sooner?</p>
+            <button class="hw-ultra-btn">Charge EV now</button>
+            <div class="hw-ev-notice" style="margin-top:8px">Peak limit stays active during manual charging.</div>
+          </div>
+          <div>
+            <div style="font-size:12px;color:var(--color-text-3);margin-bottom:8px">Strategy</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <div style="padding:6px 12px;background:var(--color-accent-subtle);color:var(--color-accent);border-radius:20px;font-size:12px;font-weight:600">Minimize Cost</div>
+              <div style="padding:6px 12px;background:var(--color-card);border:1px solid var(--color-border);color:var(--color-text-2);border-radius:20px;font-size:12px">Max Self-Consumption</div>
+              <div style="padding:6px 12px;background:var(--color-card);border:1px solid var(--color-border);color:var(--color-text-2);border-radius:20px;font-size:12px">Prioritise EV</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="frame-label">Installer · Desktop — High-Density Table Layout</div>
+    <div class="desktop-frame">
+      <div class="desktop-screen">
+        <div class="ins-topbar">
+          <div class="ins-topbar-title">OPEN-EMS · Ghent</div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <div class="ins-status-pill ok">● Healthy</div>
+          </div>
+        </div>
+        <div class="ins-shell">
+          <div class="ins-sidebar">
+            <div class="ins-sidebar-logo"><span>Installer</span></div>
+            <div class="ins-nav-item active">Dashboard</div>
+            <div class="ins-nav-item">Devices</div>
+            <div class="ins-nav-item">Event Log</div>
+            <div class="ins-nav-item">Settings</div>
+          </div>
+          <div class="ins-content">
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px">
+              <div class="ins-card" style="padding:10px"><div class="ins-card-label">Peak</div><div class="ins-card-value" style="font-size:18px">3.2 kW</div><div class="ins-card-sub">/ 5.0 kW limit</div></div>
+              <div class="ins-card" style="padding:10px"><div class="ins-card-label">Battery</div><div class="ins-card-value" style="font-size:18px">81%</div><div class="ins-card-sub">charging</div></div>
+              <div class="ins-card" style="padding:10px"><div class="ins-card-label">Solar</div><div class="ins-card-value" style="font-size:18px">2.1 kW</div><div class="ins-card-sub">producing</div></div>
+              <div class="ins-card" style="padding:10px"><div class="ins-card-label">Grid</div><div class="ins-card-value" style="font-size:18px">0 W</div><div class="ins-card-sub">not drawing</div></div>
+            </div>
+            <div class="ins-device-list" style="margin-bottom:12px">
+              <div class="ins-device-list-header"><span>Device</span><span>Role</span><span>Status</span><span>Value</span></div>
+              <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name">Fronius Gen24 · v1.16</div><div class="ins-device-role">Inverter</div><div class="ins-device-status">2.1 kW PV</div></div>
+              <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name">BYD HVM · 22 kWh</div><div class="ins-device-role">Battery</div><div class="ins-device-status">81% · charging 3 kW</div></div>
+              <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name">Wallbox Pulsar Plus</div><div class="ins-device-role">EV Charger</div><div class="ins-device-status">Idle · sched 22:30</div></div>
+              <div class="ins-device-row"><div class="ins-device-badge ok"></div><div class="ins-device-name">DSMR P1 Meter</div><div class="ins-device-role">Grid Meter</div><div class="ins-device-status">0.4 kW import</div></div>
+            </div>
+            <div class="ins-log">
+              <div class="ins-log-header">Events <a href="#">All 47 →</a></div>
+              <div class="ins-log-row"><div class="ins-log-time">14:22</div><div class="ins-log-type decision">Decision</div><div class="ins-log-desc">Battery discharged 3 kW — peak window, grid held at 1.8 kW.</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">12:04</div><div class="ins-log-type constraint">Constraint</div><div class="ins-log-desc">EV rate reduced 11→7 kW — peak projection near limit.</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dir-rationale">
+    <h3>Direction 3 · Ultra-Minimal — Design Rationale</h3>
+    <p>The homeowner view strips everything to the essential: a large battery percentage as the hero number, a three-metric row, and the EV action. Strategy selection uses pill-style toggle chips instead of a card — much lighter. This direction assumes the homeowner's mental model is simpler than Direction 1 suggests: they primarily want to know the battery and when the EV charges. Everything else is secondary.</p>
+    <p style="margin-top:8px">The installer view moves to four stat cards and a denser table for devices. Useful for experienced installers who know what they're looking at and prefer maximum information density. Less friendly for first-time setup.</p>
+    <ul style="margin-top:8px">
+      <li><strong>Homeowner strengths:</strong> fastest possible glance time; no visual noise; feels like a utility tool (positive for some users)</li>
+      <li><strong>Installer strengths:</strong> maximum information density; expert-friendly</li>
+      <li><strong>Trade-off:</strong> removes battery circle (simpler implementation); large number may feel clinical to some homeowners</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIRECTION 4 — Card Grid
+════════════════════════════════════ -->
+<div id="dir-4" class="direction">
+  <div>
+    <div class="frame-label">Homeowner · Mobile — Card Grid</div>
+    <div class="phone-frame">
+      <div class="phone-screen">
+        <div class="hw-nav">
+          <div class="hw-nav-logo">OPEN-EMS</div>
+          <div class="hw-nav-role">Marc's Home</div>
+        </div>
+        <div class="hw-body">
+          <div class="hw-status-ok">
+            <div class="hw-status-dot"></div>
+            <div><div class="hw-status-strategy">Running normally · Minimize Cost</div></div>
+          </div>
+          <div class="hw-grid" style="padding:0">
+            <div class="hw-g-card">
+              <div class="hw-g-icon">🔋</div>
+              <div class="hw-g-val">81%</div>
+              <div class="hw-g-lbl">Battery · charging</div>
+            </div>
+            <div class="hw-g-card">
+              <div class="hw-g-icon">☀️</div>
+              <div class="hw-g-val green">2.1 kW</div>
+              <div class="hw-g-lbl">Solar · producing</div>
+            </div>
+            <div class="hw-g-card">
+              <div class="hw-g-icon">⚡</div>
+              <div class="hw-g-val">0 W</div>
+              <div class="hw-g-lbl">Grid · not drawing</div>
+            </div>
+            <div class="hw-g-card">
+              <div class="hw-g-icon">📅</div>
+              <div class="hw-g-val" style="font-size:18px">22:30</div>
+              <div class="hw-g-lbl">EV · tonight</div>
+            </div>
+            <div class="hw-g-card ev-card">
+              <button class="hw-ev-btn">Charge EV now</button>
+              <div class="hw-ev-notice" style="margin-top:8px">Peak limit stays active during manual charging.</div>
+            </div>
+          </div>
+          <div class="hw-strategy-card">
+            <div class="hw-strategy-label">Strategy</div>
+            <div class="hw-strategy-opts">
+              <div class="hw-strategy-opt active">Minimize Cost</div>
+              <div class="hw-strategy-opt">Maximize Self-Consumption</div>
+              <div class="hw-strategy-opt">Prioritise EV</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="frame-label">Installer · Desktop — Card-Based Setup Flow</div>
+    <div class="desktop-frame">
+      <div class="desktop-screen">
+        <div class="ins-topbar">
+          <div class="ins-topbar-title">Device Setup · Step 2 of 4 — Role Assignment</div>
+          <div class="ins-status-pill ok">4 devices discovered</div>
+        </div>
+        <div class="ins-shell">
+          <div class="ins-sidebar">
+            <div class="ins-sidebar-logo"><span>Setup Flow</span></div>
+            <div class="ins-nav-item" style="color:#94a3b8">✓ Device Discovery</div>
+            <div class="ins-nav-item active">◉ Role Assignment</div>
+            <div class="ins-nav-item" style="color:#475569">○ Constraints</div>
+            <div class="ins-nav-item" style="color:#475569">○ Validation</div>
+          </div>
+          <div class="ins-content">
+            <div class="ins-section-h">Assign a role to each discovered device</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div class="ins-card">
+                <div style="font-size:12px;font-weight:600;color:var(--color-text-1)">Fronius Gen24</div>
+                <div style="font-size:11px;color:var(--color-text-3);margin:2px 0 10px;font-family:var(--font-mono)">192.168.1.42 · Modbus TCP</div>
+                <select style="width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;font-size:13px;background:var(--color-card-w)">
+                  <option selected>Inverter</option><option>Battery</option><option>EV Charger</option><option>Grid Meter</option>
+                </select>
+                <div style="margin-top:8px;font-size:11px;color:var(--color-pass)">✓ Full capability detected</div>
+              </div>
+              <div class="ins-card">
+                <div style="font-size:12px;font-weight:600;color:var(--color-text-1)">BYD HVM</div>
+                <div style="font-size:11px;color:var(--color-text-3);margin:2px 0 10px;font-family:var(--font-mono)">192.168.1.43 · Modbus TCP</div>
+                <select style="width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;font-size:13px;background:var(--color-card-w)">
+                  <option>Inverter</option><option selected>Battery</option><option>EV Charger</option><option>Grid Meter</option>
+                </select>
+                <div style="margin-top:8px;font-size:11px;color:var(--color-pass)">✓ Full capability detected</div>
+              </div>
+              <div class="ins-card">
+                <div style="font-size:12px;font-weight:600;color:var(--color-text-1)">Wallbox Pulsar Plus</div>
+                <div style="font-size:11px;color:var(--color-text-3);margin:2px 0 10px;font-family:var(--font-mono)">192.168.1.44 · OCPP 1.6</div>
+                <select style="width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;font-size:13px;background:var(--color-card-w)">
+                  <option>Inverter</option><option>Battery</option><option selected>EV Charger</option><option>Grid Meter</option>
+                </select>
+                <div style="margin-top:8px;font-size:11px;color:var(--color-pass)">✓ Dynamic rate control supported</div>
+              </div>
+              <div class="ins-card">
+                <div style="font-size:12px;font-weight:600;color:var(--color-text-1)">DSMR P1 Meter</div>
+                <div style="font-size:11px;color:var(--color-text-3);margin:2px 0 10px;font-family:var(--font-mono)">/dev/ttyUSB0 · DSMR P1</div>
+                <select style="width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;font-size:13px;background:var(--color-card-w)">
+                  <option>Inverter</option><option>Battery</option><option>EV Charger</option><option selected>Grid Meter</option>
+                </select>
+                <div style="margin-top:8px;font-size:11px;color:var(--color-pass)">✓ Real-time data confirmed</div>
+              </div>
+            </div>
+            <div style="margin-top:16px;display:flex;justify-content:flex-end">
+              <button class="val-btn">Continue to Constraints →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dir-rationale">
+    <h3>Direction 4 · Card Grid — Design Rationale</h3>
+    <p>The homeowner view uses a 2×2 card grid for the four metrics — each card has an emoji icon, a large value, and a plain-language label. The EV override card spans full width below the grid. This layout works particularly well at larger mobile sizes and on tablets. Icons add immediate scannability without technical language.</p>
+    <p style="margin-top:8px">The installer view shows the role assignment step of the setup flow — making the setup flow itself a first-class UI context rather than showing only the dashboard. Card-based assignment with inline capability detection. Progress stepper in the sidebar shows where the installer is in the flow. This is the clearest representation of the sequential setup experience.</p>
+    <ul style="margin-top:8px">
+      <li><strong>Homeowner strengths:</strong> grid layout is familiar (widget-style); icons aid quick identification; EV action prominent</li>
+      <li><strong>Installer strengths:</strong> best representation of setup flow UX; role assignment is visual and structured</li>
+      <li><strong>Trade-off:</strong> emoji icons may feel informal for some; grid may not render as well on very small phones</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIRECTION 5 — Text-First
+════════════════════════════════════ -->
+<div id="dir-5" class="direction">
+  <div>
+    <div class="frame-label">Homeowner · Mobile — Text-First</div>
+    <div class="phone-frame">
+      <div class="phone-screen">
+        <div class="hw-nav">
+          <div class="hw-nav-logo">OPEN-EMS</div>
+          <div class="hw-nav-role">Marc's Home</div>
+        </div>
+        <div class="hw-text">
+          <div class="hw-text-block">
+            <div class="hw-text-key">System</div>
+            <div class="hw-text-val">Running normally</div>
+            <div class="hw-text-note">Minimize Cost · solar covering all loads</div>
+          </div>
+          <div class="hw-text-block">
+            <div class="hw-text-key">Battery</div>
+            <div class="hw-text-val">81% charged</div>
+            <div class="hw-text-note">Charging from solar · reserve 20%</div>
+          </div>
+          <div class="hw-text-block">
+            <div class="hw-text-key">Solar</div>
+            <div class="hw-text-val" style="color:var(--color-pass)">Producing 2.1 kW</div>
+            <div class="hw-text-note">Covering house and charging battery</div>
+          </div>
+          <div class="hw-text-block">
+            <div class="hw-text-key">Grid</div>
+            <div class="hw-text-val">Not drawing</div>
+            <div class="hw-text-note">0 W · running on own energy</div>
+          </div>
+          <div class="hw-text-block">
+            <div class="hw-text-key">EV Charging</div>
+            <div class="hw-text-val">Tonight at 22:30</div>
+            <div class="hw-text-note">Scheduled automatically</div>
+            <button class="hw-text-btn">Charge EV now</button>
+            <div class="hw-ev-notice" style="margin-top:8px">Peak limit stays active during manual charging.</div>
+          </div>
+          <div class="hw-text-block">
+            <div class="hw-text-key">Strategy</div>
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">
+              <div class="hw-strategy-opt active">Minimize Cost</div>
+              <div class="hw-strategy-opt">Maximize Self-Consumption</div>
+              <div class="hw-strategy-opt">Prioritise EV</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="frame-label">Installer · Desktop — Constraint Configuration</div>
+    <div class="desktop-frame">
+      <div class="desktop-screen">
+        <div class="ins-topbar">
+          <div class="ins-topbar-title">Constraint Configuration · Step 3 of 4</div>
+        </div>
+        <div class="ins-shell">
+          <div class="ins-sidebar">
+            <div class="ins-sidebar-logo"><span>Setup Flow</span></div>
+            <div class="ins-nav-item" style="color:#94a3b8">✓ Device Discovery</div>
+            <div class="ins-nav-item" style="color:#94a3b8">✓ Role Assignment</div>
+            <div class="ins-nav-item active">◉ Constraints</div>
+            <div class="ins-nav-item" style="color:#475569">○ Validation</div>
+          </div>
+          <div class="ins-content">
+            <div style="max-width:520px">
+              <div class="ins-section-h">Define safety boundaries for this installation</div>
+              <div style="display:flex;flex-direction:column;gap:16px">
+                <div class="ins-card">
+                  <div style="font-size:13px;font-weight:600;color:var(--color-text-1);margin-bottom:4px">Peak consumption limit</div>
+                  <div style="font-size:12px;color:var(--color-text-2);margin-bottom:10px">Maximum 15-minute average grid draw. Flanders capaciteitstarief threshold.</div>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <input type="number" value="5.0" style="width:100px;padding:8px;border:1.5px solid var(--color-accent);border-radius:6px;font-size:14px;font-family:var(--font-mono);text-align:right">
+                    <span style="font-size:13px;color:var(--color-text-2)">kW</span>
+                  </div>
+                  <div style="margin-top:6px;font-size:11px;color:var(--color-pass)">✓ Valid range</div>
+                </div>
+                <div class="ins-card">
+                  <div style="font-size:13px;font-weight:600;color:var(--color-text-1);margin-bottom:4px">Battery reserve floor</div>
+                  <div style="font-size:12px;color:var(--color-text-2);margin-bottom:10px">Minimum SOC the system will never discharge below.</div>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <input type="number" value="20" style="width:100px;padding:8px;border:1.5px solid var(--color-border);border-radius:6px;font-size:14px;font-family:var(--font-mono);text-align:right">
+                    <span style="font-size:13px;color:var(--color-text-2)">%</span>
+                  </div>
+                </div>
+                <div class="ins-card">
+                  <div style="font-size:13px;font-weight:600;color:var(--color-text-1);margin-bottom:4px">Preferred EV charging window</div>
+                  <div style="font-size:12px;color:var(--color-text-2);margin-bottom:10px">Preferred time range. Homeowner can override; peak limit always applies.</div>
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <input type="time" value="22:00" style="padding:8px;border:1.5px solid var(--color-border);border-radius:6px;font-size:13px;font-family:var(--font-mono)">
+                    <span style="color:var(--color-text-3)">→</span>
+                    <input type="time" value="06:00" style="padding:8px;border:1.5px solid var(--color-border);border-radius:6px;font-size:13px;font-family:var(--font-mono)">
+                  </div>
+                </div>
+                <div class="ins-card">
+                  <div style="font-size:13px;font-weight:600;color:var(--color-text-1);margin-bottom:4px">Default homeowner strategy</div>
+                  <div style="font-size:12px;color:var(--color-text-2);margin-bottom:10px">Homeowner can change this at any time.</div>
+                  <select style="width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;font-size:13px;background:var(--color-card-w)">
+                    <option selected>Minimize Cost</option><option>Maximize Self-Consumption</option><option>Prioritise EV</option>
+                  </select>
+                </div>
+              </div>
+              <div style="margin-top:16px;display:flex;justify-content:flex-end">
+                <button class="val-btn">Run Validation →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dir-rationale">
+    <h3>Direction 5 · Text-First — Design Rationale</h3>
+    <p>The homeowner view uses pure text sections separated by dividers — no circles, no icons, no charts. Each section answers a question in plain English: "System: Running normally / Battery: 81% charged / Solar: Producing 2.1 kW." This is the most accessible and translation-friendly approach. It works perfectly on screen readers and at any font size. The EV button lives directly below the EV section — no card wrapper needed.</p>
+    <p style="margin-top:8px">The installer view shows the constraint configuration form — the most critical data-entry step in the setup flow. Inline validation (active border on the focused field, green confirmation on valid input), clear field descriptions, and a logical sequence. This direction prioritises functional clarity over visual design.</p>
+    <ul style="margin-top:8px">
+      <li><strong>Homeowner strengths:</strong> maximum accessibility; no visual noise; language is the design</li>
+      <li><strong>Installer strengths:</strong> constraint form is the most realistic depiction of critical data entry</li>
+      <li><strong>Trade-off:</strong> may feel austere to some homeowners; no visual hierarchy signals beyond font weight</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════
+     DIRECTION 6 — Pro Register
+════════════════════════════════════ -->
+<div id="dir-6" class="direction">
+  <div>
+    <div class="frame-label">Homeowner · Mobile — Pro Register</div>
+    <div class="phone-frame">
+      <div class="phone-screen">
+        <div class="hw-nav">
+          <div class="hw-nav-logo">OPEN-EMS</div>
+          <div class="hw-nav-role">Marc's Home</div>
+        </div>
+        <div class="hw-pro">
+          <div class="hw-pro-top">
+            <div class="hw-pro-top-label">System</div>
+            <div class="hw-pro-top-val">Running normally</div>
+            <div class="hw-pro-top-sub">Minimize Cost · 21 days continuous</div>
+          </div>
+          <div class="hw-pro-row">
+            <div class="hw-pro-m"><div class="hw-pro-m-v">81%</div><div class="hw-pro-m-l">Battery</div></div>
+            <div class="hw-pro-m"><div class="hw-pro-m-v g">2.1 kW</div><div class="hw-pro-m-l">Solar</div></div>
+            <div class="hw-pro-m"><div class="hw-pro-m-v">0 W</div><div class="hw-pro-m-l">Grid</div></div>
+          </div>
+          <div class="hw-ev-card">
+            <div class="hw-ev-header">
+              <div>
+                <div class="hw-ev-title">EV · Scheduled tonight at 22:30</div>
+                <div class="hw-ev-time">Seat Tavascan · 31% → estimated 82% by 06:00</div>
+              </div>
+            </div>
+            <button class="hw-ev-btn">Charge EV now</button>
+            <div class="hw-ev-notice">Peak limit stays active. Charge rate adjusts automatically if needed.</div>
+          </div>
+          <div class="hw-strategy-card">
+            <div class="hw-strategy-label">Energy Strategy</div>
+            <div class="hw-strategy-opts">
+              <div class="hw-strategy-opt active">Minimize Cost <div class="hw-strategy-desc">Off-peak hours + solar surplus</div></div>
+              <div class="hw-strategy-opt">Maximize Self-Consumption <div class="hw-strategy-desc">Use your own solar first</div></div>
+              <div class="hw-strategy-opt">Prioritise EV <div class="hw-strategy-desc">Keep car charged, always</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="frame-label">Installer · Desktop — Full Event Log View</div>
+    <div class="desktop-frame">
+      <div class="desktop-screen">
+        <div class="ins-topbar">
+          <div class="ins-topbar-title">Event Log · Ghent · Last 7 days</div>
+          <div style="display:flex;gap:8px">
+            <select style="padding:6px 10px;border:1px solid var(--color-border);border-radius:6px;font-size:12px;background:var(--color-card-w)"><option>All types</option><option>Decision</option><option>Constraint</option><option>Recovery</option></select>
+            <input type="text" placeholder="Search events…" style="padding:6px 10px;border:1px solid var(--color-border);border-radius:6px;font-size:12px;width:160px">
+          </div>
+        </div>
+        <div class="ins-shell">
+          <div class="ins-sidebar">
+            <div class="ins-sidebar-logo"><span>OPEN-EMS</span><small>Installer</small></div>
+            <div class="ins-nav-item">Dashboard</div>
+            <div class="ins-nav-item">Devices</div>
+            <div class="ins-nav-item active">Event Log</div>
+            <div class="ins-nav-item">Settings</div>
+          </div>
+          <div class="ins-content">
+            <div style="font-size:12px;color:var(--color-text-3);margin-bottom:10px">47 events · 2 flagged for review · All constraint events retained</div>
+            <div class="ins-log">
+              <div class="ins-log-row"><div class="ins-log-time">14:22</div><div class="ins-log-type decision">Decision</div><div class="ins-log-desc">Battery discharged 3 kW to absorb EV charging load — 15-min window 14:15–14:30, grid draw held at 1.8 kW (limit 5.0 kW).</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">12:04</div><div class="ins-log-type constraint">Constraint</div><div class="ins-log-desc">EV charge rate reduced 11 kW → 7 kW — projected 15-min avg 4.9 kW approaching 5.0 kW limit. Homeowner override active.</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">10:15</div><div class="ins-log-type decision">Decision</div><div class="ins-log-desc">EV session started — 22:30 scheduled window, SOC 31%, target 80% by 06:00. Charge rate 11 kW.</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">09:42</div><div class="ins-log-type decision">Decision</div><div class="ins-log-desc">Battery charge rate reduced 5 kW → 2 kW — solar production dropped to 1.1 kW, grid draw optimisation active.</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">08:31</div><div class="ins-log-type recovery">Recovery</div><div class="ins-log-desc">DSMR meter reconnected after 40s disconnect — conservative mode cleared, control loop resumed. No constraint violations during outage.</div></div>
+              <div class="ins-log-row"><div class="ins-log-time">08:30</div><div class="ins-log-type" style="background:#fef2f2;color:var(--color-fail)">Degraded</div><div class="ins-log-desc">DSMR meter connection lost — conservative mode activated, no new load commands issued. Grid draw unknown.</div></div>
+              <div class="ins-log-row" style="background:#fafaf9"><div class="ins-log-time" style="color:var(--color-text-3)">Note</div><div class="ins-log-type" style="background:#f1f5f9;color:#475569">Installer</div><div class="ins-log-desc" style="color:var(--color-text-2);font-style:italic">Huawei firmware v3.11 noted — update to v3.14+ planned for 2026-05-08. Lien.</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dir-rationale">
+    <h3>Direction 6 · Pro Register — Design Rationale</h3>
+    <p>The homeowner view uses a dark top panel for the system headline — giving the status display a distinctive visual anchor. This approach contrasts strongly with the rest of the light UI, making the primary status unmissable. Metrics sit in a compact three-column row below. The EV card includes estimated SOC at end of charging session, giving the homeowner useful contextual information without technical detail.</p>
+    <p style="margin-top:8px">The installer view showcases the full event log with filtering, search, and the installer note entry. This is the primary remote check-in tool — the log must be scannable, filterable, and include all event types including degraded mode entries. The installer note row shows how Lien would document the Huawei firmware situation for future reference.</p>
+    <ul style="margin-top:8px">
+      <li><strong>Homeowner strengths:</strong> dark hero panel is visually distinctive and instantly legible; EV estimated SOC adds real value</li>
+      <li><strong>Installer strengths:</strong> full event log with search/filter is the most complete view of the installer's primary remote tool</li>
+      <li><strong>Trade-off:</strong> dark hero panel requires careful contrast checking; estimated SOC data requires battery + charger integration to be accurate</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+function showDir(n, el) {
+  document.querySelectorAll('.direction').forEach(d => d.classList.remove('active'));
+  document.querySelectorAll('.dir-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('dir-' + n).classList.add('active');
+  el.classList.add('active');
+}
+</script>
+</body>
+</html>

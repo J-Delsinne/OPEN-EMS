@@ -1,0 +1,14 @@
+# BMAD Workflow Status
+# Tracks completed workflow outputs for OPEN-EMS
+# Updated automatically by workflow completion steps
+
+project_name: OPEN-EMS
+last_updated: '2026-05-01'
+
+workflow_status:
+  create-ux-design:
+    status: complete
+    output: "_bmad-output/planning-artifacts/ux-design-specification.md"
+    completed_at: '2026-05-01'
+    supporting_assets:
+      - "_bmad-output/planning-artifacts/ux-design-directions.html"

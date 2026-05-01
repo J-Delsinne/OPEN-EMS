@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\\\\_bmad-output\\\\planning-artifacts\" -Recurse)",
+      "Bash(Select-Object FullName, Length, LastWriteTime)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(uv *)",
+      "PowerShell(uv *)",
+      "PowerShell(pip *)",
+      "PowerShell(python -m pip --version 2>&1)",
+      "PowerShell(python -m pip install uv 2>&1)",
+      "PowerShell(python -m uv --version 2>&1)",
+      "PowerShell(Set-Location \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\"; python -m uv run ruff check . 2>&1; Write-Output \"Exit code: $LASTEXITCODE\")",
+      "PowerShell(Set-Location \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\"; python -m uv run mypy src/ 2>&1; Write-Output \"Exit code: $LASTEXITCODE\")",
+      "PowerShell(Set-Location \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\"; python -m uv run pytest 2>&1; Write-Output \"Exit code: $LASTEXITCODE\")",
+      "PowerShell(python3 \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\\\\_bmad\\\\scripts\\\\resolve_customization.py\" --skill \"C:\\\\Users\\\\jorda\\\\Documents\\\\VS-Code\\\\OPEN-EMS\\\\.claude\\\\skills\\\\bmad-dev-story\" --key workflow.on_complete 2>&1)",
+      "Read(//dev/**)"
+    ]
+  }
+}
