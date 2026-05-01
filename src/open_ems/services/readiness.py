@@ -23,12 +23,13 @@ def reset() -> None:
 
 def sd_notify(message: str) -> None:
     notify_socket = os.environ.get("NOTIFY_SOCKET")
-    if not notify_socket or not hasattr(socket, "AF_UNIX"):
+    af_unix: int | None = getattr(socket, "AF_UNIX", None)
+    if not notify_socket or af_unix is None:
         return
     try:
         abstract = notify_socket.startswith("@")
         addr = ("\0" + notify_socket[1:]) if abstract else notify_socket
-        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:  # type: ignore[attr-defined]
+        with socket.socket(af_unix, socket.SOCK_DGRAM) as sock:
             sock.sendto(message.encode(), addr)
     except Exception:  # noqa: BLE001
         pass
