@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     alembic_ini_path: str | None = None
     tls_cert_path: str | None = None
     tls_key_path: str | None = None
+    installer_session_timeout_hours: int = Field(default=4, gt=0)
+    homeowner_session_timeout_days: int = Field(default=30, gt=0)
+    trusted_proxy_ips: list[str] = []
 
 
 _settings: Settings | None = None

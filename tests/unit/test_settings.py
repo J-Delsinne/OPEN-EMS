@@ -49,3 +49,25 @@ def test_secret_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SECRET_KEY", "my-production-secret")
     s = Settings(_env_file=None)
     assert s.secret_key.get_secret_value() == "my-production-secret"
+
+
+def test_installer_session_timeout_default() -> None:
+    s = Settings(_env_file=None)
+    assert s.installer_session_timeout_hours == 4
+
+
+def test_homeowner_session_timeout_default() -> None:
+    s = Settings(_env_file=None)
+    assert s.homeowner_session_timeout_days == 30
+
+
+def test_installer_session_timeout_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INSTALLER_SESSION_TIMEOUT_HOURS", "8")
+    s = Settings(_env_file=None)
+    assert s.installer_session_timeout_hours == 8
+
+
+def test_homeowner_session_timeout_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOMEOWNER_SESSION_TIMEOUT_DAYS", "7")
+    s = Settings(_env_file=None)
+    assert s.homeowner_session_timeout_days == 7

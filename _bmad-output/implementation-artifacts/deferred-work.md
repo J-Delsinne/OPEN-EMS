@@ -68,6 +68,14 @@
 - **`socket.AF_UNIX` not available on Windows; `# type: ignore` hides portability gap** [`src/open_ems/services/readiness.py:31`] — Pre-existing from Story 1.3; intentional — deployment target is Linux only. No action needed unless Windows support is ever added.
 - **`WATCHDOG_USEC` read once at startup; dynamic interval extension via systemd not supported** [`src/open_ems/services/watchdog.py:17`] — systemd can dynamically extend the watchdog timeout at runtime; the current implementation ignores `sd_notify("EXTEND_TIMEOUT_USEC=...")`. Epic 8 scope (Story 8.4: watchdog hardening and stall-recovery).
 
+## Deferred from: code review of 2-2-implement-login-form-hardened-session-creation-and-brute-force-protection (2026-05-02)
+
+- **`update_last_active` raises `ValueError` on missing session — no caller yet** [`src/open_ems/storage/repositories/session_repo.py:78-83`] — Story 2.5 will call this on every authenticated request; at that point the caller must catch or the unhandled exception produces a 500; assess whether to raise a domain-specific exception or return a sentinel
+- **`get_by_token_hash` does not filter by `expires_at`** [`src/open_ems/storage/repositories/session_repo.py:46-53`] — Expired token rows are returnable; session validation in Story 2.5 must explicitly check `expires_at` after fetching the row
+- **No expired session cleanup from `sessions` table** [`migrations/versions/0003_add_sessions_table.py`] — Rows accumulate indefinitely; Story 2.5 will add the bulk prune `DELETE FROM sessions WHERE expires_at < ?` using the `ix_sessions_expires_at` index already in place
+- **No rollback in `session_repo.create()` if `commit()` fails after `execute()`** [`src/open_ems/storage/repositories/session_repo.py:38-43`] — Partial write inconsistency on commit failure; pre-existing limitation of aiosqlite singleton pattern; revisit if connection reliability becomes a concern
+- **Single shared aiosqlite connection — no pooling** — All concurrent auth requests serialise on one connection; pre-existing architecture decision; revisit at scale or if latency under concurrent login becomes measurable
+
 ## Deferred from: code review of 2-1-define-user-model-upgradeable-credential-storage-and-safe-admin-bootstrap (2026-05-02)
 
 - **`UserRepo()` hard-coded in lifespan with no dependency injection** [`src/open_ems/web/app.py:124`] — Works correctly today; ties lifespan integration testing to the live `get_connection()` singleton; revisit when writing lifespan-level integration tests.

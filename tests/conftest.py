@@ -9,6 +9,7 @@ import pytest_asyncio
 
 from open_ems.services.readiness import reset as readiness_reset
 from open_ems.storage.database import close_database, get_connection, init_database
+from open_ems.storage.repositories.session_repo import SessionRepo
 from open_ems.storage.repositories.user_repo import UserRepo
 
 # Single source of truth for the users table schema used in unit tests.
@@ -21,6 +22,20 @@ CREATE_USERS_TABLE_DDL = """
         hashed_password TEXT NOT NULL,
         must_change_password INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL
+    )
+"""
+
+# Single source of truth for the sessions table schema used in unit tests.
+# Must stay in sync with migrations/versions/0003_add_sessions_table.py.
+CREATE_SESSIONS_TABLE_DDL = """
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        last_active_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
 """
 
@@ -52,6 +67,18 @@ async def user_repo(tmp_db_path: str) -> AsyncGenerator[UserRepo, None]:
     await conn.execute(CREATE_USERS_TABLE_DDL)
     await conn.commit()
     yield UserRepo()
+    await close_database()
+
+
+@pytest_asyncio.fixture
+async def session_repo(tmp_db_path: str) -> AsyncGenerator[SessionRepo, None]:
+    """Empty SessionRepo backed by a fresh SQLite DB with users + sessions tables."""
+    await init_database(tmp_db_path)
+    conn = get_connection()
+    await conn.execute(CREATE_USERS_TABLE_DDL)
+    await conn.execute(CREATE_SESSIONS_TABLE_DDL)
+    await conn.commit()
+    yield SessionRepo()
     await close_database()
 
 

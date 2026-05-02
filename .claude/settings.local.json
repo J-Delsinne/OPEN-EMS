@@ -40,7 +40,17 @@
       "Bash(python -m uv run ruff check src/open_ems/tools/cert_gen.py src/open_ems/main.py tests/unit/test_settings.py)",
       "Bash(where uv *)",
       "Bash(where python *)",
-      "PowerShell($uvPath = Get-ChildItem -Path \"$env:USERPROFILE\\\\.cargo\\\\bin\", \"$env:USERPROFILE\\\\.local\\\\bin\", \"C:\\\\Users\\\\jorda\\\\AppData\\\\Local\\\\Programs\\\\uv\", \"C:\\\\Users\\\\jorda\\\\AppData\\\\Roaming\\\\uv\\\\bin\" -Filter \"uv.exe\" -ErrorAction SilentlyContinue | Select-Object -First 1; $uvPath.FullName)"
+      "PowerShell($uvPath = Get-ChildItem -Path \"$env:USERPROFILE\\\\.cargo\\\\bin\", \"$env:USERPROFILE\\\\.local\\\\bin\", \"C:\\\\Users\\\\jorda\\\\AppData\\\\Local\\\\Programs\\\\uv\", \"C:\\\\Users\\\\jorda\\\\AppData\\\\Roaming\\\\uv\\\\bin\" -Filter \"uv.exe\" -ErrorAction SilentlyContinue | Select-Object -First 1; $uvPath.FullName)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -m pytest tests/unit/test_settings.py -q)",
+      "Bash(python -m pytest tests/integration/test_migrations.py -q)",
+      "Bash(python -m pytest tests/unit/storage/repositories/test_session_repo.py -v --no-cov)",
+      "Bash(python -m pytest tests/unit/services/test_rate_limiter.py -v --no-cov)",
+      "Bash(python -m pytest tests/unit/web/test_auth_routes.py -v --no-cov)",
+      "Bash(python -c \"import starlette; print\\(starlette.__version__\\)\")",
+      "Bash(python -c \"import jinja2; print\\(jinja2.__version__\\)\")",
+      "Bash(python -m ruff format --check .)",
+      "Bash(python -m ruff format .)"
     ]
   }
 }
