@@ -17,6 +17,7 @@ from open_ems.storage.repositories.session_repo import (
     hash_token,
 )
 from open_ems.storage.repositories.user_repo import UserRepo, verify_password
+from open_ems.web.csrf import generate_csrf_token
 
 logger = structlog.get_logger(__name__)
 
@@ -140,10 +141,12 @@ async def login_submit(
 
     raw_token = generate_session_token()
     token_hash_value = hash_token(raw_token)
+    csrf_tok = generate_csrf_token()
     await session_repo.create(
         user_id=user_id,
         token_hash=token_hash_value,
         expires_at=expires_at,
+        csrf_token=csrf_tok,
     )
 
     rate_limiter.reset_for_key(username=username)

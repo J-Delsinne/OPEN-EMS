@@ -17,6 +17,7 @@ from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
+from open_ems.web.csrf import CsrfMiddleware
 from open_ems.web.routes.auth import router as auth_router
 from open_ems.web.routes.health import router as health_router
 from open_ems.web.routes.homeowner import router as homeowner_router
@@ -176,4 +177,5 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(installer_router)
     app.include_router(homeowner_router)
+    app.add_middleware(CsrfMiddleware)  # Runs first on every request
     return app

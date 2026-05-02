@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!--
+    CSRF-AC2: HTMX automatically includes the CSRF token from this meta tag in every
+              state-changing request via the htmx:configRequest listener below.
+    CSRF-AC1: Every state-changing form in an authenticated template must include:
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  -->
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}OPEN-EMS{% endblock %}</title>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  {% block content %}{% endblock %}
+
+  <!--
+    HTMX: For offline / production deployments, download htmx.min.js and serve it locally:
+      1. Download: https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js
+      2. Place at:  src/open_ems/web/static/htmx.min.js
+      3. Mount StaticFiles in app.py and replace this script tag with:
+             <script src="/static/htmx.min.js" defer></script>
+    The htmx:configRequest listener below activates automatically once HTMX is loaded.
+  -->
+  <script src="https://unpkg.com/htmx.org@1.9.12" crossorigin="anonymous"></script>
+
+  <!-- CSRF-AC2: Inject the per-session CSRF token into every HTMX state-changing request. -->
+  <script>
+    document.addEventListener("htmx:configRequest", function (event) {
+      var token = document.querySelector('meta[name="csrf-token"]');
+      if (token) {
+        event.detail.headers["X-CSRF-Token"] = token.content;
+      }
+    });
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -31,14 +31,16 @@ class SessionRepo:
         user_id: str,
         token_hash: str,
         expires_at: datetime,
+        csrf_token: str,
     ) -> str:
         """Create a session. Returns the new session ID (UUID4 string)."""
         session_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         await self._conn.execute(
-            "INSERT INTO sessions (id, user_id, token_hash, created_at, last_active_at, expires_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, user_id, token_hash, now, now, expires_at.isoformat()),
+            "INSERT INTO sessions"
+            " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, user_id, token_hash, now, now, expires_at.isoformat(), csrf_token),
         )
         await self._conn.commit()
         return session_id
@@ -46,7 +48,7 @@ class SessionRepo:
     async def get_by_token_hash(self, token_hash: str) -> aiosqlite.Row | None:
         """Fetch session by token hash. Returns None if not found."""
         async with self._conn.execute(
-            "SELECT id, user_id, token_hash, created_at, last_active_at, expires_at"
+            "SELECT id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token"
             " FROM sessions WHERE token_hash = ?",
             (token_hash,),
         ) as cursor:

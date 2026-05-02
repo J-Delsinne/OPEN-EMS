@@ -24,6 +24,7 @@ class AuthenticatedUser:
     username: str
     role: str
     session_id: str
+    csrf_token: str
 
 
 InstallerUser = AuthenticatedUser
@@ -59,6 +60,7 @@ async def _resolve_session(request: Request) -> AuthenticatedUser | None:
         username=str(user_row["username"]),
         role=str(user_row["role"]),
         session_id=str(session_row["id"]),
+        csrf_token=str(session_row["csrf_token"]),
     )
 
 

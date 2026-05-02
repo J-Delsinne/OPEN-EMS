@@ -65,6 +65,7 @@ async def test_create_returns_id(session_repo: SessionRepo, user_id: str) -> Non
         user_id=user_id,
         token_hash=hash_token(generate_session_token()),
         expires_at=_expires(),
+        csrf_token="tok1",
     )
     assert sid and isinstance(sid, str)
 
@@ -72,7 +73,9 @@ async def test_create_returns_id(session_repo: SessionRepo, user_id: str) -> Non
 async def test_get_by_token_hash_found(session_repo: SessionRepo, user_id: str) -> None:
     raw = generate_session_token()
     th = hash_token(raw)
-    await session_repo.create(user_id=user_id, token_hash=th, expires_at=_expires())
+    await session_repo.create(
+        user_id=user_id, token_hash=th, expires_at=_expires(), csrf_token="tok2"
+    )
     row = await session_repo.get_by_token_hash(th)
     assert row is not None
     assert row["user_id"] == user_id
@@ -85,14 +88,20 @@ async def test_get_by_token_hash_not_found(session_repo: SessionRepo) -> None:
 
 async def test_token_hash_unique_constraint(session_repo: SessionRepo, user_id: str) -> None:
     th = hash_token(generate_session_token())
-    await session_repo.create(user_id=user_id, token_hash=th, expires_at=_expires())
+    await session_repo.create(
+        user_id=user_id, token_hash=th, expires_at=_expires(), csrf_token="tok3"
+    )
     with pytest.raises(aiosqlite.IntegrityError):
-        await session_repo.create(user_id=user_id, token_hash=th, expires_at=_expires())
+        await session_repo.create(
+            user_id=user_id, token_hash=th, expires_at=_expires(), csrf_token="tok3"
+        )
 
 
 async def test_delete_by_id(session_repo: SessionRepo, user_id: str) -> None:
     th = hash_token(generate_session_token())
-    sid = await session_repo.create(user_id=user_id, token_hash=th, expires_at=_expires())
+    sid = await session_repo.create(
+        user_id=user_id, token_hash=th, expires_at=_expires(), csrf_token="tok4"
+    )
     await session_repo.delete_by_id(sid)
     assert await session_repo.get_by_token_hash(th) is None
 
@@ -107,9 +116,15 @@ async def test_delete_all_for_user(session_repo: SessionRepo, user_id: str) -> N
     th1 = hash_token(generate_session_token())
     th2 = hash_token(generate_session_token())
     th_other = hash_token(generate_session_token())
-    await session_repo.create(user_id=user_id, token_hash=th1, expires_at=_expires())
-    await session_repo.create(user_id=user_id, token_hash=th2, expires_at=_expires())
-    await session_repo.create(user_id=other_id, token_hash=th_other, expires_at=_expires())
+    await session_repo.create(
+        user_id=user_id, token_hash=th1, expires_at=_expires(), csrf_token="tok5"
+    )
+    await session_repo.create(
+        user_id=user_id, token_hash=th2, expires_at=_expires(), csrf_token="tok6"
+    )
+    await session_repo.create(
+        user_id=other_id, token_hash=th_other, expires_at=_expires(), csrf_token="tok7"
+    )
 
     await session_repo.delete_all_for_user(user_id)
 
@@ -120,7 +135,9 @@ async def test_delete_all_for_user(session_repo: SessionRepo, user_id: str) -> N
 
 async def test_update_last_active(session_repo: SessionRepo, user_id: str) -> None:
     th = hash_token(generate_session_token())
-    sid = await session_repo.create(user_id=user_id, token_hash=th, expires_at=_expires())
+    sid = await session_repo.create(
+        user_id=user_id, token_hash=th, expires_at=_expires(), csrf_token="tok8"
+    )
     row_before = await session_repo.get_by_token_hash(th)
     assert row_before is not None
     old_ts = row_before["last_active_at"]

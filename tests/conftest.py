@@ -26,7 +26,8 @@ CREATE_USERS_TABLE_DDL = """
 """
 
 # Single source of truth for the sessions table schema used in unit tests.
-# Must stay in sync with migrations/versions/0003_add_sessions_table.py.
+# Must stay in sync with migrations/versions/0003_add_sessions_table.py
+# and migrations/versions/0004_add_csrf_token_to_sessions.py.
 CREATE_SESSIONS_TABLE_DDL = """
     CREATE TABLE sessions (
         id TEXT PRIMARY KEY NOT NULL,
@@ -35,6 +36,7 @@ CREATE_SESSIONS_TABLE_DDL = """
         created_at TEXT NOT NULL,
         last_active_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
+        csrf_token TEXT NOT NULL DEFAULT '',
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
 """

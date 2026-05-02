@@ -84,7 +84,10 @@
 - **AC5: No raw-SQL boundary enforcement via linting or CI grep** — Repo pattern is stated in the spec but unenforceable without tooling; enforce via `ruff` custom rule or grep-in-CI in a future quality hardening pass.
 - **CI migration validation step has no `SECRET_KEY` env var** [`.github/workflows/ci.yml:44`] — Pre-existing from 1.6; if `alembic/env.py` calls `get_settings()`, the migration CI step will crash on secrets validation rather than migration errors; investigate when hardening CI environment variables.
 
-## Deferred from: code review of 2-3-implement-role-based-routing-with-differentiated-browser-and-api-enforcement (2026-05-02)
+## Deferred from: code review of 2-4-implement-csrf-protection-on-state-changing-routes (2026-05-02)
+
+- **`request.body()` in middleware may conflict with downstream body readers in some Starlette versions** [`src/open_ems/web/csrf.py:60`] — Body is cached in `request._body` which Starlette's `Request.body()` uses on subsequent reads; low risk for current use case; revisit if switching from BaseHTTPMiddleware to pure ASGI middleware
+- **Expired sessions trigger CSRF 403 instead of session-expired error** [`src/open_ems/web/csrf.py:47`] — `get_by_token_hash` has no `expires_at` filter; expired but un-purged session rows satisfy `session_row is not None`, causing CSRF enforcement to fire and return 403 before the route handler can return a meaningful expired-session response; deferred to Story 2-5 (session expiry and cleanup)
 
 - **Expired sessions authenticate indefinitely** [`src/open_ems/web/dependencies.py:42-53`] — `_resolve_session` never reads `expires_at`; explicitly deferred to Story 2.5 per Dev Notes and Story 2.2 review findings
 - **No exception handling in `_resolve_session` for DB failures** [`src/open_ems/web/dependencies.py:42-53`] — `get_connection()` raises `RuntimeError` if DB not initialized; unreachable in normal app flow but unhandled at the dependency level; revisit if exception taxonomy is ever hardened

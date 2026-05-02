@@ -68,6 +68,7 @@ async def _create_session(role: str) -> str:
         user_id=user_id,
         token_hash=hash_token(raw_token),
         expires_at=expires_at,
+        csrf_token="test-csrf-token",
     )
     return raw_token
 
