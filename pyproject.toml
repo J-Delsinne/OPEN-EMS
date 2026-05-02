@@ -26,6 +26,7 @@ dependencies = [
     "python-multipart>=0.0.12",
     "structlog>=25.5.0",
     "uvicorn[standard]>=0.46.0",
+    "tzdata>=2026.2",
 ]
 
 [tool.hatch.build.targets.wheel]

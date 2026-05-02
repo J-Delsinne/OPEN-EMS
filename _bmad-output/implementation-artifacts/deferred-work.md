@@ -107,3 +107,9 @@
 ## Deferred from: code review of 3-3-implement-ocpp-16-central-system-adapter (2026-05-02)
 
 - **`OCPPCentralSystem.register()` silently overwrites existing adapter** [`src/open_ems/adapters/ocpp/central_system.py:274-278`] — No guard or warning if `register()` is called twice for the same `charge_point_id`; the first adapter (and its state/in-flight connections) is silently discarded. Pre-existing design choice; no story requirement to guard it; revisit if multi-registration scenarios arise in Epic 4 or production debugging.
+
+## Deferred from: code review of 3-4-implement-dsmr-p1-adapter-with-raw-telegram-parsing-and-staleness-timestamping (2026-05-02)
+
+- **Serial baudrate hardcoded at 115200 for all DSMR versions** [`src/open_ems/adapters/dsmr/p1.py:_SerialSource.open()`] — DSMR v2.2 and v4 specify 9600 baud per the DSMR standard, but the story spec says "use V5 settings as base"; this follows the spec. Address if v2.2/v4 serial support must be accurate in a future story.
+- **`serial_asyncio_fast` `ImportError` propagates as non-`OSError` and kills `_read_loop` permanently** [`src/open_ems/adapters/dsmr/p1.py:_SerialSource.open()`] — `serial_asyncio_fast` is a transitive dep of `dsmr-parser` so normally always installed; failure would only occur in malformed venv scenarios; address if explicit ImportError handling is needed.
+- **`_connected` flag written both inside and outside `_lock`** [`src/open_ems/adapters/dsmr/p1.py`] — Flag is not currently exposed externally nor read in `get_raw_state()`; inconsistent locking discipline is a latent issue if the flag is ever surfaced via a status method.
