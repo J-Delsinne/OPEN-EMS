@@ -19,6 +19,8 @@ from open_ems.storage.database import close_database, init_database
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
 from open_ems.web.routes.auth import router as auth_router
 from open_ems.web.routes.health import router as health_router
+from open_ems.web.routes.homeowner import router as homeowner_router
+from open_ems.web.routes.installer import router as installer_router
 
 logger = structlog.get_logger(__name__)
 
@@ -172,4 +174,6 @@ def create_app() -> FastAPI:
     app = FastAPI(title="OPEN-EMS", lifespan=lifespan)
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(installer_router)
+    app.include_router(homeowner_router)
     return app

@@ -74,6 +74,20 @@ async def test_get_by_username_not_found(user_repo: UserRepo) -> None:
     assert row is None
 
 
+async def test_get_by_id_returns_row(user_repo: UserRepo) -> None:
+    uid = await user_repo.create("admin", hash_password("secret"), "installer")
+    row = await user_repo.get_by_id(uid)
+    assert row is not None
+    assert str(row["id"]) == uid
+    assert str(row["username"]) == "admin"
+    assert str(row["role"]) == "installer"
+
+
+async def test_get_by_id_unknown_returns_none(user_repo: UserRepo) -> None:
+    row = await user_repo.get_by_id("nonexistent-id")
+    assert row is None
+
+
 async def test_must_change_password_default_true(user_repo: UserRepo) -> None:
     await user_repo.create("admin", hash_password("secret"), "installer")
     row = await user_repo.get_by_username("admin")

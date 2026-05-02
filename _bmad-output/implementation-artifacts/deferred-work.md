@@ -83,3 +83,10 @@
 - **`server_default="1"` string DDL for INTEGER column** [`migrations/versions/0002_add_users_table.py:31`] — Semantically correct in SQLite; diverges from stricter dialects; SQLite-only project, no action needed unless DB backend changes.
 - **AC5: No raw-SQL boundary enforcement via linting or CI grep** — Repo pattern is stated in the spec but unenforceable without tooling; enforce via `ruff` custom rule or grep-in-CI in a future quality hardening pass.
 - **CI migration validation step has no `SECRET_KEY` env var** [`.github/workflows/ci.yml:44`] — Pre-existing from 1.6; if `alembic/env.py` calls `get_settings()`, the migration CI step will crash on secrets validation rather than migration errors; investigate when hardening CI environment variables.
+
+## Deferred from: code review of 2-3-implement-role-based-routing-with-differentiated-browser-and-api-enforcement (2026-05-02)
+
+- **Expired sessions authenticate indefinitely** [`src/open_ems/web/dependencies.py:42-53`] — `_resolve_session` never reads `expires_at`; explicitly deferred to Story 2.5 per Dev Notes and Story 2.2 review findings
+- **No exception handling in `_resolve_session` for DB failures** [`src/open_ems/web/dependencies.py:42-53`] — `get_connection()` raises `RuntimeError` if DB not initialized; unreachable in normal app flow but unhandled at the dependency level; revisit if exception taxonomy is ever hardened
+- **`_is_htmx_or_api` treats all non-HTMX as browser** [`src/open_ems/web/dependencies.py:32-35`] — Minor deviation from AC3's strict positive-browser-detection wording (`Accept: text/html` AND no `HX-Request`); Dev Notes explicitly specify the inverse-logic implementation; API clients not sending `Accept: application/json` get a redirect instead of 401; benign in practice
+- **`InstallerUser`/`HomeownerUser` type aliases provide no compile-time role enforcement** [`src/open_ems/web/dependencies.py:28-29`] — Simple name aliases (`= AuthenticatedUser`); `NewType` would make mismatched dependencies detectable by mypy; spec-mandated design; revisit as a quality improvement before Epic 10/11

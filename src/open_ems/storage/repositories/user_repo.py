@@ -90,6 +90,15 @@ class UserRepo:
         ) as cursor:
             return await cursor.fetchone()
 
+    async def get_by_id(self, user_id: str) -> aiosqlite.Row | None:
+        """Fetch user row by user ID. Returns None if not found."""
+        async with self._conn.execute(
+            "SELECT id, username, role, hashed_password, must_change_password, created_at"
+            " FROM users WHERE id = ?",
+            (user_id,),
+        ) as cursor:
+            return await cursor.fetchone()
+
     async def update_password(self, user_id: str, hashed_password: str) -> None:
         """Replace hashed_password and clear must_change_password flag.
 
