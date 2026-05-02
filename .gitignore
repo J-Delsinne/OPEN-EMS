@@ -48,3 +48,6 @@ certs/
 .idea/
 *.swp
 *.swo
+
+# AI tool local settings (machine-specific, may contain personal config)
+.claude/settings.local.json

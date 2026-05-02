@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-02 (story 2-1 review)'
+last_updated: '2026-05-02 (story 2-1 code review complete)'
 project: OPEN-EMS
 project_key: NOKEY
 tracking_system: file-system
@@ -56,7 +56,7 @@ development_status:
 
   # ─── Epic 2: Authentication and Access Control ─────────────────────────────
   epic-2: in-progress
-  2-1-define-user-model-upgradeable-credential-storage-and-safe-admin-bootstrap: review
+  2-1-define-user-model-upgradeable-credential-storage-and-safe-admin-bootstrap: done
   2-2-implement-login-form-hardened-session-creation-and-brute-force-protection: backlog
   2-3-implement-role-based-routing-with-differentiated-browser-and-api-enforcement: backlog
   2-4-implement-csrf-protection-on-state-changing-routes: backlog

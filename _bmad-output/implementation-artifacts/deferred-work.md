@@ -67,3 +67,11 @@
 - **f-string event name `f"clock_{clock_status}"` defeats log aggregation** [`src/open_ems/web/app.py:55`] — Pre-existing from Story 1.3; dynamic event keys prevent grouping in structured log systems. Fix in Story 1.7 (central configuration / logging hardening).
 - **`socket.AF_UNIX` not available on Windows; `# type: ignore` hides portability gap** [`src/open_ems/services/readiness.py:31`] — Pre-existing from Story 1.3; intentional — deployment target is Linux only. No action needed unless Windows support is ever added.
 - **`WATCHDOG_USEC` read once at startup; dynamic interval extension via systemd not supported** [`src/open_ems/services/watchdog.py:17`] — systemd can dynamically extend the watchdog timeout at runtime; the current implementation ignores `sd_notify("EXTEND_TIMEOUT_USEC=...")`. Epic 8 scope (Story 8.4: watchdog hardening and stall-recovery).
+
+## Deferred from: code review of 2-1-define-user-model-upgradeable-credential-storage-and-safe-admin-bootstrap (2026-05-02)
+
+- **`UserRepo()` hard-coded in lifespan with no dependency injection** [`src/open_ems/web/app.py:124`] — Works correctly today; ties lifespan integration testing to the live `get_connection()` singleton; revisit when writing lifespan-level integration tests.
+- **`INITIAL_ADMIN_PASSWORD` persists in process memory via pydantic singleton** [`src/open_ems/settings.py:27`] — `SecretStr` prevents repr/log leakage; clearing the field post-bootstrap is non-standard pydantic; acceptable risk for embedded single-process deployment.
+- **`server_default="1"` string DDL for INTEGER column** [`migrations/versions/0002_add_users_table.py:31`] — Semantically correct in SQLite; diverges from stricter dialects; SQLite-only project, no action needed unless DB backend changes.
+- **AC5: No raw-SQL boundary enforcement via linting or CI grep** — Repo pattern is stated in the spec but unenforceable without tooling; enforce via `ruff` custom rule or grep-in-CI in a future quality hardening pass.
+- **CI migration validation step has no `SECRET_KEY` env var** [`.github/workflows/ci.yml:44`] — Pre-existing from 1.6; if `alembic/env.py` calls `get_settings()`, the migration CI step will crash on secrets validation rather than migration errors; investigate when hardening CI environment variables.

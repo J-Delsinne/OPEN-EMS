@@ -1,6 +1,6 @@
 # Story 2.1: Define user model, upgradeable credential storage, and safe admin bootstrap
 
-Status: review
+Status: done
 
 ## Story
 
@@ -551,9 +551,39 @@ Key deviation from spec: `bcrypt` used directly instead of passlib CryptContext 
 - `tests/unit/web/test_bootstrap.py` (created — 4 bootstrap tests)
 - `tests/unit/test_settings.py` (modified — SecretStr get_secret_value() assertion)
 
+### Review Findings
+
+**Decision-needed:**
+- [x] [Review][Patch] Add `ALEMBIC_INI_PATH: str | None = None` to Settings; `_run_alembic_upgrade` uses it when set, falls back to `_locate_project_root()` for dev/editable installs — keeps auto-migration on startup while making wheel/package deploys production-safe [src/open_ems/web/app.py:52-61, src/open_ems/settings.py]
+- [x] [Review][Patch] Add `_HASHERS` PHC-prefix dispatch to `verify_password` — `"$2b$"` maps to bcrypt verifier; unknown prefixes return `False`; preserves the algorithm upgrade path without a rewrite when argon2 is added [src/open_ems/storage/repositories/user_repo.py:17-19]
+
+**Patch:**
+- [x] [Review][Patch] Cursor leak in `count()` and `get_by_username()` — neither uses `async with self._conn.execute(...) as cursor:` [src/open_ems/storage/repositories/user_repo.py:27-30, 51-58]
+- [x] [Review][Patch] `verify_password()` raises `ValueError` on malformed hash instead of returning `False` — future login endpoints get an unhandled 500 instead of a 401 [src/open_ems/storage/repositories/user_repo.py:17-19]
+- [x] [Review][Patch] Bootstrap TOCTOU race — two concurrent startups both observe `count()==0` and one crashes with uncaught `IntegrityError` on duplicate `admin` insert; catch and swallow the unique-violation [src/open_ems/web/app.py:22-52]
+- [x] [Review][Patch] `update_password()` silent no-op on non-existent `user_id` — 0 rows affected, no exception, caller cannot detect the failure [src/open_ems/storage/repositories/user_repo.py:53-59]
+- [x] [Review][Patch] `create()` accepts invalid `role` string — DB CHECK raises opaque `IntegrityError` with no distinction from uniqueness violation; add Python-level validation [src/open_ems/storage/repositories/user_repo.py:32-49]
+- [x] [Review][Patch] `_CREATE_USERS_TABLE` DDL duplicated verbatim in two test files — schema drift risk; move to `conftest.py` [tests/unit/storage/repositories/test_user_repo.py:12-21, tests/unit/web/test_bootstrap.py:13-22]
+- [x] [Review][Patch] `SystemExit(1)` in bootstrap escapes the `lifespan` generator before `yield` — `close_database()` is never called on first-run failure; wrap init sequence in `try/finally` [src/open_ems/web/app.py:120-157]
+- [x] [Review][Patch] bcrypt silently truncates passwords > 72 bytes — two passwords differing only after byte 72 verify as equal; add a max-length guard or prominent docstring [src/open_ems/storage/repositories/user_repo.py:11-13]
+- [x] [Review][Patch] Test gap: `test_bootstrap_skips_when_users_exist` only checks `count()==1`; a regression that overwrites the existing hash would not be caught [tests/unit/web/test_bootstrap.py:57-61]
+- [x] [Review][Patch] Test gap: `test_bootstrap_creates_admin_user` does not assert stored hash starts with `$2b$` (AC2 PHC format) [tests/unit/web/test_bootstrap.py:43-50]
+- [x] [Review][Patch] Test gap: `test_update_password_clears_flag` does not assert the new hash is PHC format (AC3 partial) [tests/unit/storage/repositories/test_user_repo.py]
+- [x] [Review][Patch] `update_password()` docstring missing caller-hashes contract — callers must pass a pre-hashed value; a future caller passing plaintext will store it unhashed silently [src/open_ems/storage/repositories/user_repo.py:53]
+- [x] [Review][Patch] Test gap: no test captures log output to verify `INITIAL_ADMIN_PASSWORD` never appears in any log line (AC2 secret-never-logged) [tests/unit/web/test_bootstrap.py]
+- [x] [Review][Patch] Test gap: `test_bootstrap_exits_when_no_password` does not assert structured log fields `reason` and `component` mandated by AC1 [tests/unit/web/test_bootstrap.py:33-36]
+
+**Deferred:**
+- [x] [Review][Defer] `UserRepo()` constructed directly in lifespan with no DI — works today but ties lifespan tests to the live `get_connection()` singleton [src/open_ems/web/app.py:124] — deferred, pre-existing pattern
+- [x] [Review][Defer] `INITIAL_ADMIN_PASSWORD` remains in process memory after bootstrap — `SecretStr` prevents repr/log leakage; clearing pydantic field post-bootstrap is non-standard [src/open_ems/settings.py:27] — deferred, acceptable for embedded system
+- [x] [Review][Defer] `server_default="1"` string DDL for INTEGER column — semantically correct in SQLite, diverges on other dialects [migrations/versions/0002_add_users_table.py:31] — deferred, SQLite-only project
+- [x] [Review][Defer] AC5 raw-SQL boundary enforcement — no linting rule or grep-based CI check prevents future callers from bypassing the repo [src/open_ems/storage/repositories/user_repo.py] — deferred, enforcement tooling beyond story scope
+- [x] [Review][Defer] CI migration step has no `SECRET_KEY` env var — pre-existing from 1.7; if `alembic/env.py` calls `get_settings()`, migration CI step will crash on secrets validation [.github/workflows/ci.yml:44] — deferred, pre-existing
+
 ## Change Log
 
 | Date | Change |
 |---|---|
 | 2026-05-02 | Implemented Story 2.1: user model, bcrypt credential storage, safe admin bootstrap. bcrypt used directly (passlib incompatible with bcrypt 5.x). 74 tests pass, 78% coverage. |
+| 2026-05-02 | Code review complete. 16 patches applied: ALEMBIC_INI_PATH settings override, _HASHERS dispatch for verify_password, cursor leak fixes, TOCTOU race guard, update_password rowcount check, role validation, DDL deduplication into conftest, SystemExit try/finally, bcrypt 72-byte guard, 5 test-gap fixes. 79 tests pass, 78% coverage. |
 

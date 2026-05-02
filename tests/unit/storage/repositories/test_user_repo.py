@@ -1,34 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-
 import aiosqlite
 import pytest
-import pytest_asyncio
 
-from open_ems.storage.database import close_database, get_connection, init_database
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password, verify_password
-
-_CREATE_USERS_TABLE = """
-    CREATE TABLE users (
-        id TEXT PRIMARY KEY NOT NULL,
-        username TEXT NOT NULL UNIQUE,
-        role TEXT NOT NULL CHECK (role IN ('installer', 'homeowner')),
-        hashed_password TEXT NOT NULL,
-        must_change_password INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL
-    )
-"""
-
-
-@pytest_asyncio.fixture
-async def user_repo(tmp_db_path: str) -> AsyncGenerator[UserRepo, None]:
-    await init_database(tmp_db_path)
-    conn = get_connection()
-    await conn.execute(_CREATE_USERS_TABLE)
-    await conn.commit()
-    yield UserRepo()
-    await close_database()
 
 
 async def test_count_empty(user_repo: UserRepo) -> None:
@@ -50,6 +25,11 @@ async def test_username_unique_constraint(user_repo: UserRepo) -> None:
     await user_repo.create("admin", hash_password("secret"), "installer")
     with pytest.raises(aiosqlite.IntegrityError):
         await user_repo.create("admin", hash_password("other"), "installer")
+
+
+async def test_create_invalid_role(user_repo: UserRepo) -> None:
+    with pytest.raises(ValueError, match="Invalid role"):
+        await user_repo.create("admin", hash_password("secret"), "superuser")
 
 
 async def test_hash_not_plaintext(user_repo: UserRepo) -> None:
@@ -76,6 +56,10 @@ async def test_verify_password_correct(user_repo: UserRepo) -> None:
 async def test_verify_password_wrong(user_repo: UserRepo) -> None:
     hashed = hash_password("correct_password")
     assert verify_password("wrong", hashed) is False
+
+
+async def test_verify_password_malformed_hash_returns_false(user_repo: UserRepo) -> None:
+    assert verify_password("any", "not-a-valid-hash") is False
 
 
 async def test_get_by_username_found(user_repo: UserRepo) -> None:
@@ -111,7 +95,14 @@ async def test_update_password_changes_hash(user_repo: UserRepo) -> None:
 
 async def test_update_password_clears_flag(user_repo: UserRepo) -> None:
     uid = await user_repo.create("admin", hash_password("old"), "installer")
-    await user_repo.update_password(uid, hash_password("new"))
+    new_hash = hash_password("new")
+    await user_repo.update_password(uid, new_hash)
     row = await user_repo.get_by_username("admin")
     assert row is not None
     assert row["must_change_password"] == 0
+    assert row["hashed_password"].startswith("$2b$")
+
+
+async def test_update_password_nonexistent_user(user_repo: UserRepo) -> None:
+    with pytest.raises(ValueError, match="No user found"):
+        await user_repo.update_password("nonexistent-id", hash_password("new"))

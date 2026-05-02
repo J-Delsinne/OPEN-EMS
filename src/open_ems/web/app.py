@@ -5,6 +5,7 @@ import pathlib
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import aiosqlite
 import structlog
 from fastapi import FastAPI
 from pydantic import SecretStr, ValidationError
@@ -35,12 +36,15 @@ async def _bootstrap_admin_if_needed(
         )
         raise SystemExit(1) from None
     hashed = hash_password(initial_password.get_secret_value())
-    await user_repo.create(
-        username="admin",
-        hashed_password=hashed,
-        role="installer",
-        must_change_password=True,
-    )
+    try:
+        await user_repo.create(
+            username="admin",
+            hashed_password=hashed,
+            role="installer",
+            must_change_password=True,
+        )
+    except aiosqlite.IntegrityError:
+        return  # Concurrent startup already created the admin
     logger.info(
         "admin_bootstrapped",
         username="admin",
@@ -61,13 +65,16 @@ def _locate_project_root() -> pathlib.Path:
     )
 
 
-def _run_alembic_upgrade(db_url: str) -> None:
+def _run_alembic_upgrade(db_url: str, alembic_ini_path: str | None = None) -> None:
     """Synchronous Alembic upgrade — must run in a thread from the async lifespan."""
     from alembic import command as alembic_command
     from alembic.config import Config
 
-    project_root = _locate_project_root()
-    cfg = Config(str(project_root / "alembic.ini"))
+    if alembic_ini_path is not None:
+        cfg = Config(alembic_ini_path)
+    else:
+        project_root = _locate_project_root()
+        cfg = Config(str(project_root / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", db_url)
     alembic_command.upgrade(cfg, "head")
 
@@ -100,7 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Step 2: Run Alembic migrations — fatal on failure (exits with code 1)
     db_url = f"sqlite:///{settings.db_path}"
     try:
-        await asyncio.to_thread(_run_alembic_upgrade, db_url)
+        await asyncio.to_thread(_run_alembic_upgrade, db_url, settings.alembic_ini_path)
         logger.info("migrations_applied", component="startup")
     except Exception:
         logger.error("migration_failed", exc_info=True, component="startup")
@@ -120,41 +127,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Step 4: Open database connection
     await init_database(settings.db_path)
 
-    # Step 5b: Admin bootstrap — create initial admin if no users exist
-    await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
-
-    # Step 5: Mark system ready (sends sd_notify READY=1 internally)
-    mark_ready()
-    logger.info("system_ready", component="startup")
-
-    # Step 6: Start watchdog heartbeat (active only when WATCHDOG_USEC is set by systemd)
     _watchdog_task: asyncio.Task[None] | None = None
-    interval = get_watchdog_interval()
-    if interval is not None:
+    try:
+        # Step 5b: Admin bootstrap — create initial admin if no users exist
+        await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
 
-        def _on_watchdog_done(t: asyncio.Task[None]) -> None:
-            if not t.cancelled():
-                exc = t.exception()
-                if exc is not None:
-                    logger.error("watchdog_task_died", exc_info=exc, component="watchdog")
+        # Step 5: Mark system ready (sends sd_notify READY=1 internally)
+        mark_ready()
+        logger.info("system_ready", component="startup")
 
-        _watchdog_task = asyncio.create_task(watchdog_task(interval))
-        _watchdog_task.add_done_callback(_on_watchdog_done)
-        logger.info("watchdog_started", interval_seconds=round(interval, 3), component="startup")
+        # Step 6: Start watchdog heartbeat (active only when WATCHDOG_USEC is set by systemd)
+        interval = get_watchdog_interval()
+        if interval is not None:
 
-    yield  # Application serves requests here
+            def _on_watchdog_done(t: asyncio.Task[None]) -> None:
+                if not t.cancelled():
+                    exc = t.exception()
+                    if exc is not None:
+                        logger.error("watchdog_task_died", exc_info=exc, component="watchdog")
 
-    # Shutdown: signal stopping so systemd resets the watchdog timer during WAL checkpoint
-    sd_notify("STOPPING=1")
+            _watchdog_task = asyncio.create_task(watchdog_task(interval))
+            _watchdog_task.add_done_callback(_on_watchdog_done)
+            logger.info(
+                "watchdog_started", interval_seconds=round(interval, 3), component="startup"
+            )
 
-    if _watchdog_task is not None:
-        _watchdog_task.cancel()
-        try:
-            await _watchdog_task
-        except asyncio.CancelledError:
-            pass
+        yield  # Application serves requests here
 
-    await close_database()
+        # Shutdown: signal stopping so systemd resets the watchdog timer during WAL checkpoint
+        sd_notify("STOPPING=1")
+
+        if _watchdog_task is not None:
+            _watchdog_task.cancel()
+            try:
+                await _watchdog_task
+            except asyncio.CancelledError:
+                pass
+    finally:
+        await close_database()
 
 
 def create_app() -> FastAPI:

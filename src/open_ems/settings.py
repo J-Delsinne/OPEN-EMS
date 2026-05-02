@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     port: int = 8443
     secret_key: SecretStr
     initial_admin_password: SecretStr | None = None
+    alembic_ini_path: str | None = None
     tls_cert_path: str | None = None
     tls_key_path: str | None = None
 
