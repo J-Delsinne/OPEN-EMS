@@ -103,3 +103,7 @@
 - **Unrecognised role silently gets homeowner session timeout** [`src/open_ems/web/dependencies.py:85-88`] — `else` branch applies homeowner timeout to any non-installer role value; only installer/homeowner exist today; pre-existing design concern not caused by this diff
 - **`SessionRepo()` instantiated inside background task with implicit global connection** [`src/open_ems/web/app.py:89`] — pre-existing pattern across all request handlers; low risk with single-process asyncio model; revisit if connection lifecycle is ever refactored
 - **`touch()` accepts a naive `datetime` for `new_expires_at` without validation** [`src/open_ems/storage/repositories/session_repo.py:touch`] — all callers pass tz-aware datetimes today; a future caller passing a naive datetime would store a tz-naive string, breaking lexicographic comparisons; add a tzinfo assertion when defensive hardening is desired
+
+## Deferred from: code review of 3-3-implement-ocpp-16-central-system-adapter (2026-05-02)
+
+- **`OCPPCentralSystem.register()` silently overwrites existing adapter** [`src/open_ems/adapters/ocpp/central_system.py:274-278`] — No guard or warning if `register()` is called twice for the same `charge_point_id`; the first adapter (and its state/in-flight connections) is silently discarded. Pre-existing design choice; no story requirement to guard it; revisit if multi-registration scenarios arise in Epic 4 or production debugging.
