@@ -88,8 +88,9 @@ class _InternalChargePoint(_BaseChargePoint):  # type: ignore[misc]
 
     @on(Action.heartbeat)  # type: ignore[untyped-decorator]
     def on_heartbeat(self, **kwargs: Any) -> Any:
-        self._state.last_heartbeat_at = datetime.now(UTC)
-        return call_result.Heartbeat(current_time=datetime.now(UTC).isoformat())
+        now = datetime.now(UTC)
+        self._state.last_heartbeat_at = now
+        return call_result.Heartbeat(current_time=now.isoformat())
 
     @on(Action.status_notification)  # type: ignore[untyped-decorator]
     def on_status_notification(

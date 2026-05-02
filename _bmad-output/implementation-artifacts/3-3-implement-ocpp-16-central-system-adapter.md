@@ -1,6 +1,6 @@
 # Story 3.3: Implement OCPP 1.6 Central System adapter
 
-Status: in-progress
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -119,15 +119,17 @@ so that the system can communicate with EV chargers using the charger-initiates-
 
 ### Review Follow-ups (AI)
 
-- [ ] [Review][Decision] Heartbeat staleness does not emit `adapter_disconnected` log — AC3 says log is emitted "when disconnect is first detected"; current code only logs on physical WebSocket close, not on heartbeat timeout. Decision: should heartbeat timeout also trigger the log? [`central_system.py` `get_raw_state()` L176-179]
-- [ ] [Review][Decision] `last_call_error` not cleared after subsequent successful command — after a CALLERROR, `last_call_error` persists in state even when a later command succeeds. Consumers see both `last_call_result` and `last_call_error` as non-None with no ordering information. Decision: should `last_call_error` be reset to `None` on a new successful command (and vice versa)? [`central_system.py` `send_raw_command()` L251-252]
-- [ ] [Review][Patch] `except Exception: pass` swallows programming errors silently — violates AC5 / Dev Notes anti-pattern "programming bugs must NOT be swallowed". Fix: log the exception at warning level before ignoring, or narrow catch to `ConnectionError | OSError`. [`central_system.py` L159-160]
-- [ ] [Review][Patch] `on_heartbeat` captures `datetime.now(UTC)` twice — stored `last_heartbeat_at` and the `currentTime` returned to charger are from different instants. Fix: capture once, reuse. [`central_system.py` L116-117]
+- [x] [Review][Decision] Heartbeat staleness does not emit `adapter_disconnected` log — Decision: keep as-is; heartbeat timeout is a distinct liveness condition from physical disconnect. [`central_system.py` `get_raw_state()` L176-179]
+- [x] [Review][Decision] `last_call_error` not cleared after subsequent successful command — Decision: no change; each field reflects the most recent of that event type independently. [`central_system.py` `send_raw_command()` L251-252]
+- [x] [Review][Patch] `except Exception: pass` swallows programming errors silently — Fixed: now logs `event="adapter_connection_error"` with exception type and detail. [`central_system.py` L159-160]
+- [x] [Review][Patch] `on_heartbeat` captures `datetime.now(UTC)` twice — Fixed: captured once, reused for both `last_heartbeat_at` and CALLRESULT. [`central_system.py` L116-117]
 - [x] [Review][Defer] `OCPPCentralSystem.register()` silently overwrites existing adapter — no guard or warning if called twice for the same `charge_point_id`. Pre-existing design choice; no story requirement to guard it. [`central_system.py` L274-278] — deferred, pre-existing
-  - [x] Run `uv run python -m ruff check .`
-  - [x] Run `uv run python -m ruff format --check .`
-  - [x] Run `uv run python -m mypy src/`
-  - [x] Run `uv run python -m pytest tests/`
+
+### Review Follow-ups (Senior Dev — 2026-05-02)
+
+- [x] [Review][Patch] `finally` unconditionally clears `self._handler`, killing concurrent reconnect — Fixed: guarded with `if self._handler is handler`. [`central_system.py` L136-138]
+- [x] [Review][Patch] `dataclasses.asdict(result)` raises `TypeError` uncaught for non-dataclass return — Fixed: wrapped in `try/except TypeError` with structured warning log. [`central_system.py` L226]
+- [x] [Review][Patch] `handle_charger` auto-creates adapter silently — Fixed: raises `KeyError` for unknown `charge_point_id`; callers must pre-register. [`central_system.py` L259-268]
 
 ## Dev Notes
 
