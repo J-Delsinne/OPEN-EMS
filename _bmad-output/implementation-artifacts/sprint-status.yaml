@@ -64,8 +64,8 @@ development_status:
   epic-2-retrospective: done
 
   # ─── Epic 3: Protocol Adapters ─────────────────────────────────────────────
-  epic-3: backlog
-  3-1-define-protocol-adapter-contract-and-raw-protocol-types: backlog
+  epic-3: in-progress
+  3-1-define-protocol-adapter-contract-and-raw-protocol-types: done
   3-2-implement-modbus-tcp-adapter-with-connection-management-and-timeout-enforcement: backlog
   3-3-implement-ocpp-16-central-system-adapter: backlog
   3-4-implement-dsmr-p1-adapter-with-raw-telegram-parsing-and-staleness-timestamping: backlog
