@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 import structlog
-from fastapi import Request
+from fastapi import Request, Response
 from fastapi.exceptions import HTTPException
 
 from open_ems.settings import get_settings
@@ -19,6 +19,42 @@ _ROLE_HOME: dict[str, str] = {
     "installer": "/installer/dashboard",
     "homeowner": "/homeowner/dashboard",
 }
+
+
+def _parse_expires_at(raw_expires: str) -> datetime | None:
+    try:
+        expires_at = datetime.fromisoformat(raw_expires)
+    except ValueError:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at
+
+
+def _expired_session_cookie_header() -> str:
+    return f"{_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=strict"
+
+
+def _auth_required_headers(request: Request) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if getattr(request.state, "session_expired", False):
+        headers["Set-Cookie"] = _expired_session_cookie_header()
+    return headers
+
+
+def _renew_session_cookie(request: Request, response: Response) -> None:
+    raw_token = getattr(request.state, "session_token", None)
+    max_age = getattr(request.state, "session_max_age", None)
+    if isinstance(raw_token, str) and isinstance(max_age, int):
+        response.set_cookie(
+            key=_COOKIE_NAME,
+            value=raw_token,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            path="/",
+            max_age=max_age,
+        )
 
 
 @dataclass
@@ -58,13 +94,10 @@ async def _resolve_session(request: Request) -> AuthenticatedUser | None:
     if session_row is None:
         return None
 
-    raw_expires = str(session_row["expires_at"])
-    expires_at = datetime.fromisoformat(raw_expires)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=UTC)
+    expires_at = _parse_expires_at(str(session_row["expires_at"]))
     now = datetime.now(UTC)
 
-    if now > expires_at:
+    if expires_at is None or now > expires_at:
         await session_repo.delete_by_id(str(session_row["id"]))
         user_row = await UserRepo().get_by_id(str(session_row["user_id"]))
         logger.info(
@@ -95,6 +128,8 @@ async def _resolve_session(request: Request) -> AuthenticatedUser | None:
         return None
 
     await session_repo.delete_expired_for_user(str(session_row["user_id"]))
+    request.state.session_token = raw_token
+    request.state.session_max_age = int(timeout.total_seconds())
 
     return AuthenticatedUser(
         user_id=str(user_row["id"]),
@@ -105,16 +140,18 @@ async def _resolve_session(request: Request) -> AuthenticatedUser | None:
     )
 
 
-async def require_installer(request: Request) -> InstallerUser:
+async def require_installer(request: Request, response: Response) -> InstallerUser:
     user = await _resolve_session(request)
     if user is None:
         if _is_htmx_or_api(request):
-            raise HTTPException(status_code=401, detail="Authentication required")
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required",
+                headers=_auth_required_headers(request),
+            )
         headers: dict[str, str] = {"Location": f"/login?next={_next_url(request)}"}
         if getattr(request.state, "session_expired", False):
-            headers["Set-Cookie"] = (
-                f"{_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=strict"
-            )
+            headers["Set-Cookie"] = _expired_session_cookie_header()
         raise HTTPException(status_code=302, headers=headers)
     if user.role != "installer":
         if _is_htmx_or_api(request):
@@ -130,19 +167,22 @@ async def require_installer(request: Request) -> InstallerUser:
             status_code=302,
             headers={"Location": _ROLE_HOME.get(user.role, "/")},
         )
+    _renew_session_cookie(request, response)
     return user
 
 
-async def require_homeowner(request: Request) -> HomeownerUser:
+async def require_homeowner(request: Request, response: Response) -> HomeownerUser:
     user = await _resolve_session(request)
     if user is None:
         if _is_htmx_or_api(request):
-            raise HTTPException(status_code=401, detail="Authentication required")
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required",
+                headers=_auth_required_headers(request),
+            )
         headers: dict[str, str] = {"Location": f"/login?next={_next_url(request)}"}
         if getattr(request.state, "session_expired", False):
-            headers["Set-Cookie"] = (
-                f"{_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=strict"
-            )
+            headers["Set-Cookie"] = _expired_session_cookie_header()
         raise HTTPException(status_code=302, headers=headers)
     if user.role != "homeowner":
         if _is_htmx_or_api(request):
@@ -158,4 +198,5 @@ async def require_homeowner(request: Request) -> HomeownerUser:
             status_code=302,
             headers={"Location": _ROLE_HOME.get(user.role, "/")},
         )
+    _renew_session_cookie(request, response)
     return user

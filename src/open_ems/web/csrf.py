@@ -18,6 +18,16 @@ _CSRF_EXEMPT_PATHS = frozenset({"/login", "/api/stream/state"})
 _COOKIE_NAME = "session"  # must match dependencies.py
 
 
+def _parse_expires_at(raw_expires: str) -> datetime | None:
+    try:
+        expires_at = datetime.fromisoformat(raw_expires)
+    except ValueError:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at
+
+
 def generate_csrf_token() -> str:
     """Generate a cryptographically random CSRF token (64-char hex string)."""
     return secrets.token_hex(32)
@@ -50,11 +60,8 @@ class CsrfMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Expired session → skip CSRF, let route dependency handle expiry and redirect
-        raw_expires = str(session_row["expires_at"])
-        expires_at = datetime.fromisoformat(raw_expires)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        if datetime.now(UTC) > expires_at:
+        expires_at = _parse_expires_at(str(session_row["expires_at"]))
+        if expires_at is None or datetime.now(UTC) > expires_at:
             return await call_next(request)
 
         # HTMX path (primary): check header first

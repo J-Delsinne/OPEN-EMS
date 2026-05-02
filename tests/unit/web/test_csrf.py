@@ -234,3 +234,29 @@ async def test_expired_session_bypasses_csrf_check(
     # POST without CSRF token — expired session should bypass CSRF (no 403)
     resp = client.post("/state", cookies={"session": raw})
     assert resp.status_code != 403
+
+
+@pytest.mark.asyncio
+async def test_malformed_expiry_session_bypasses_csrf_check(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    """Malformed expires_at values are treated as invalid session state, not a 500."""
+    user_repo = UserRepo(get_connection())
+    user_id = await user_repo.create(
+        username="malformed_csrf_user",
+        hashed_password=hash_password("secret"),
+        role="installer",
+    )
+    raw = generate_session_token()
+    now = datetime.now(UTC).isoformat()
+    conn = get_connection()
+    session_id = str(__import__("uuid").uuid4())
+    await conn.execute(
+        "INSERT INTO sessions"
+        " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (session_id, user_id, hash_token(raw), now, now, "not-a-date", _CSRF_TOKEN),
+    )
+    await conn.commit()
+    resp = client.post("/state", cookies={"session": raw})
+    assert resp.status_code == 200

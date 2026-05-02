@@ -105,6 +105,12 @@ so that unattended devices cannot retain access indefinitely while normal multi-
 
 ### Review Findings
 
+- [x] [Review][Patch] Rolling inactivity updates the DB but not the browser cookie max-age [src/open_ems/web/dependencies.py:90]
+- [x] [Review][Patch] Expired HTMX/API sessions return 401 without clearing the stale session cookie [src/open_ems/web/dependencies.py:111]
+- [x] [Review][Patch] Malformed `expires_at` values can raise 500s in auth and CSRF paths [src/open_ems/web/dependencies.py:61]
+- [x] [Review][Patch] Logout acceptance tests bypass the production CSRF middleware [tests/unit/web/test_auth_routes.py:20]
+- [x] [Review][Patch] Homeowner expiry behavior lacks direct AC2 coverage [tests/unit/web/test_dependencies.py:226]
+- [x] [Review][Patch] Background session cleanup task startup/cadence lacks acceptance coverage [src/open_ems/web/app.py:87]
 - [x] [Review][Patch] Session cookie not cleared on expiry — AC3 requires the cookie to be cleared in the redirect response, but `_resolve_session` only deletes the DB row and returns `None`; `require_installer`/`require_homeowner` issue a 302 with no `Set-Cookie: session=; Max-Age=0` header. Browser keeps sending the dead token on every subsequent request. [dependencies.py:67-76]
 - [x] [Review][Patch] Background cleanup task runs first sweep only after 24h delay — `_session_cleanup_task` starts with `await asyncio.sleep(24 * 60 * 60)` before any cleanup, so sessions already expired at startup (or expiring in the first 24h) are never pruned by the background task until the server has been up a full day. [app.py:87-97]
 - [x] [Review][Patch] `touch()` raises unhandled `ValueError` on concurrent delete+touch race → HTTP 500 — between `get_by_token_hash` returning a valid row and `session_repo.touch()` executing its UPDATE, a concurrent logout or cleanup can delete the same session row. `touch()` raises `ValueError` on `rowcount == 0`; this is uncaught and produces a 500 for an otherwise legitimate user request. [dependencies.py:90, session_repo.py:touch]

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
 
 from open_ems.storage.repositories.user_repo import UserRepo, verify_password
-from open_ems.web.app import _bootstrap_admin_if_needed
+from open_ems.web.app import _bootstrap_admin_if_needed, _session_cleanup_task
 
 
 async def test_bootstrap_exits_when_no_password(user_repo: UserRepo) -> None:
@@ -65,3 +66,18 @@ async def test_bootstrap_skips_when_users_exist(user_repo: UserRepo) -> None:
     row_after_second = await user_repo.get_by_username("admin")
     assert row_after_second is not None
     assert row_after_second["hashed_password"] == original_hash
+
+
+async def test_session_cleanup_task_runs_cleanup_before_sleep() -> None:
+    repo = MagicMock()
+    repo.delete_all_expired = AsyncMock(return_value=2)
+    with (
+        patch("open_ems.web.app.SessionRepo", return_value=repo),
+        patch("open_ems.web.app.asyncio.sleep", new_callable=AsyncMock) as sleep_mock,
+    ):
+        sleep_mock.side_effect = asyncio.CancelledError
+        with pytest.raises(asyncio.CancelledError):
+            await _session_cleanup_task()
+
+    repo.delete_all_expired.assert_awaited_once_with()
+    sleep_mock.assert_awaited_once_with(24 * 60 * 60)

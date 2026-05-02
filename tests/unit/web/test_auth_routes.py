@@ -12,6 +12,7 @@ from open_ems.services import rate_limiter as rl
 from open_ems.storage.database import get_connection
 from open_ems.storage.repositories.session_repo import SessionRepo, hash_token
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
+from open_ems.web.csrf import CsrfMiddleware
 from open_ems.web.routes.auth import router as auth_router
 
 # ── App fixture (no lifespan — DB already initialised by session_repo fixture) ──
@@ -25,8 +26,21 @@ def auth_app(session_repo: SessionRepo) -> FastAPI:
 
 
 @pytest.fixture
+def auth_app_with_csrf(session_repo: SessionRepo) -> FastAPI:
+    app = FastAPI()
+    app.include_router(auth_router)
+    app.add_middleware(CsrfMiddleware)
+    return app
+
+
+@pytest.fixture
 def https_client(auth_app: FastAPI) -> TestClient:
     return TestClient(auth_app, base_url="https://test", follow_redirects=False)
+
+
+@pytest.fixture
+def https_client_with_csrf(auth_app_with_csrf: FastAPI) -> TestClient:
+    return TestClient(auth_app_with_csrf, base_url="https://test", follow_redirects=False)
 
 
 @pytest.fixture
@@ -302,3 +316,34 @@ async def test_logout_logs_user_id_and_role(https_client: TestClient, test_user:
     assert logout_logs
     assert "user_id" in logout_logs[0]
     assert "role" in logout_logs[0]
+
+
+async def test_logout_with_csrf_middleware_requires_token(
+    https_client_with_csrf: TestClient, test_user: str
+) -> None:
+    raw_token = await _login_and_get_token(https_client_with_csrf, test_user)
+
+    resp = https_client_with_csrf.post("/logout", cookies={"session": raw_token})
+
+    assert resp.status_code == 403
+    repo = SessionRepo(get_connection())
+    assert await repo.get_by_token_hash(hash_token(raw_token)) is not None
+
+
+async def test_logout_with_csrf_middleware_accepts_session_token(
+    https_client_with_csrf: TestClient, test_user: str
+) -> None:
+    raw_token = await _login_and_get_token(https_client_with_csrf, test_user)
+    repo = SessionRepo(get_connection())
+    row = await repo.get_by_token_hash(hash_token(raw_token))
+    assert row is not None
+
+    resp = https_client_with_csrf.post(
+        "/logout",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": str(row["csrf_token"])},
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
+    assert await repo.get_by_token_hash(hash_token(raw_token)) is None

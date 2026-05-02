@@ -223,11 +223,41 @@ async def _create_expired_session(role: str) -> str:
     return raw_token
 
 
+async def _create_malformed_expiry_session(role: str) -> str:
+    user_repo = UserRepo(get_connection())
+    user_id = await user_repo.create(
+        username=f"{role}_malformed_expiry_user",
+        hashed_password=hash_password("secret"),
+        role=role,
+    )
+    raw_token = generate_session_token()
+    now = datetime.now(UTC).isoformat()
+    conn = get_connection()
+    session_id = str(__import__("uuid").uuid4())
+    await conn.execute(
+        "INSERT INTO sessions"
+        " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (session_id, user_id, hash_token(raw_token), now, now, "not-a-date", "dummy_csrf"),
+    )
+    await conn.commit()
+    return raw_token
+
+
 def test_expired_session_returns_redirect(client: TestClient, session_repo: SessionRepo) -> None:
     import asyncio
 
     raw_token = asyncio.get_event_loop().run_until_complete(_create_expired_session("installer"))
     response = client.get("/installer/dashboard", cookies={"session": raw_token})
+    assert response.status_code == 302
+    assert "/login" in response.headers["location"]
+
+
+async def test_expired_homeowner_session_returns_redirect(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    raw_token = await _create_expired_session("homeowner")
+    response = client.get("/homeowner/dashboard", cookies={"session": raw_token})
     assert response.status_code == 302
     assert "/login" in response.headers["location"]
 
@@ -249,6 +279,17 @@ async def test_expired_session_logs_event(client: TestClient, session_repo: Sess
     assert any(log.get("event") == "session_expired" for log in logs)
 
 
+async def test_expired_homeowner_session_logs_role(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    raw_token = await _create_expired_session("homeowner")
+    with structlog.testing.capture_logs() as logs:
+        client.get("/homeowner/dashboard", cookies={"session": raw_token})
+    session_expired_logs = [log for log in logs if log.get("event") == "session_expired"]
+    assert session_expired_logs
+    assert session_expired_logs[0]["role"] == "homeowner"
+
+
 async def test_valid_session_updates_expires_at(
     client: TestClient, session_repo: SessionRepo
 ) -> None:
@@ -263,6 +304,22 @@ async def test_valid_session_updates_expires_at(
     row_after = await repo.get_by_token_hash(hash_token(raw_token))
     assert row_after is not None
     assert row_after["expires_at"] > old_expires
+
+
+async def test_valid_homeowner_session_uses_homeowner_timeout(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    raw_token = await _create_session("homeowner")
+    repo = SessionRepo(get_connection())
+
+    client.get("/homeowner/dashboard", cookies={"session": raw_token})
+
+    row_after = await repo.get_by_token_hash(hash_token(raw_token))
+    assert row_after is not None
+    expires_at = datetime.fromisoformat(str(row_after["expires_at"]))
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    assert expires_at > datetime.now(UTC) + timedelta(days=29)
 
 
 async def test_valid_session_updates_last_active_at(
@@ -327,6 +384,21 @@ async def test_expired_sessions_for_user_pruned_on_valid_request(
     assert row[0] == 0
 
 
+async def test_valid_session_renews_session_cookie(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    raw_token = await _create_session("installer")
+
+    response = client.get("/installer/dashboard", cookies={"session": raw_token})
+
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "session=" in set_cookie
+    assert "Max-Age=14400" in set_cookie
+    assert "httponly" in set_cookie.lower()
+    assert "secure" in set_cookie.lower()
+    assert "samesite=strict" in set_cookie.lower()
+
+
 def test_expired_session_clears_session_cookie(
     client: TestClient, session_repo: SessionRepo
 ) -> None:
@@ -338,6 +410,34 @@ def test_expired_session_clears_session_cookie(
     set_cookie = response.headers.get("set-cookie", "")
     assert "session=" in set_cookie
     assert "Max-Age=0" in set_cookie
+
+
+async def test_expired_htmx_session_clears_session_cookie(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    raw_token = await _create_expired_session("installer")
+    response = client.get(
+        "/installer/dashboard",
+        cookies={"session": raw_token},
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 401
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "session=" in set_cookie
+    assert "Max-Age=0" in set_cookie
+
+
+async def test_malformed_session_expiry_returns_redirect_and_deletes_session(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    raw_token = await _create_malformed_expiry_session("installer")
+
+    response = client.get("/installer/dashboard", cookies={"session": raw_token})
+
+    assert response.status_code == 302
+    assert "Max-Age=0" in response.headers.get("set-cookie", "")
+    repo = SessionRepo(get_connection())
+    assert await repo.get_by_token_hash(hash_token(raw_token)) is None
 
 
 async def test_touch_race_returns_redirect(client: TestClient, session_repo: SessionRepo) -> None:
