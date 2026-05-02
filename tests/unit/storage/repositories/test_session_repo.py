@@ -154,3 +154,128 @@ async def test_update_last_active_raises_on_missing_id(
 ) -> None:
     with pytest.raises(ValueError, match="No session found"):
         await session_repo.update_last_active("nonexistent-id")
+
+
+# ── SessionRepo.touch tests ───────────────────────────────────────────────────
+
+
+async def test_touch_updates_last_active_and_expires_at(
+    session_repo: SessionRepo, user_id: str
+) -> None:
+    th = hash_token(generate_session_token())
+    sid = await session_repo.create(
+        user_id=user_id, token_hash=th, expires_at=_expires(), csrf_token="tok-touch"
+    )
+    row_before = await session_repo.get_by_token_hash(th)
+    assert row_before is not None
+    old_last_active = row_before["last_active_at"]
+    old_expires = row_before["expires_at"]
+
+    new_exp = datetime.now(UTC) + timedelta(hours=8)
+    await session_repo.touch(sid, new_exp)
+
+    row_after = await session_repo.get_by_token_hash(th)
+    assert row_after is not None
+    assert row_after["last_active_at"] >= old_last_active
+    assert row_after["expires_at"] != old_expires
+    assert row_after["expires_at"] == new_exp.isoformat()
+
+
+async def test_touch_raises_on_missing_session(session_repo: SessionRepo) -> None:
+    with pytest.raises(ValueError, match="No session found"):
+        await session_repo.touch("nonexistent-id", datetime.now(UTC) + timedelta(hours=1))
+
+
+# ── SessionRepo.delete_expired_for_user tests ─────────────────────────────────
+
+
+async def test_delete_expired_for_user_removes_only_expired(
+    session_repo: SessionRepo, user_id: str
+) -> None:
+    past = datetime.now(UTC) - timedelta(hours=5)
+    future = datetime.now(UTC) + timedelta(hours=5)
+
+    th_expired = hash_token(generate_session_token())
+    th_valid = hash_token(generate_session_token())
+
+    await session_repo.create(
+        user_id=user_id, token_hash=th_expired, expires_at=past, csrf_token="c1"
+    )
+    await session_repo.create(
+        user_id=user_id, token_hash=th_valid, expires_at=future, csrf_token="c2"
+    )
+
+    await session_repo.delete_expired_for_user(user_id)
+
+    assert await session_repo.get_by_token_hash(th_expired) is None
+    assert await session_repo.get_by_token_hash(th_valid) is not None
+
+
+async def test_delete_expired_for_user_returns_count(
+    session_repo: SessionRepo, user_id: str
+) -> None:
+    past = datetime.now(UTC) - timedelta(hours=5)
+    for i in range(3):
+        th = hash_token(generate_session_token())
+        await session_repo.create(
+            user_id=user_id, token_hash=th, expires_at=past, csrf_token=f"c{i}"
+        )
+
+    count = await session_repo.delete_expired_for_user(user_id)
+    assert count == 3
+
+
+# ── SessionRepo.delete_all_expired tests ──────────────────────────────────────
+
+
+async def test_delete_all_expired_removes_across_users(
+    session_repo: SessionRepo, user_id: str
+) -> None:
+    other_id = await UserRepo(get_connection()).create(
+        username="other2",
+        hashed_password=hash_password("pass"),
+        role="homeowner",
+    )
+    past = datetime.now(UTC) - timedelta(hours=1)
+    th1 = hash_token(generate_session_token())
+    th2 = hash_token(generate_session_token())
+    await session_repo.create(user_id=user_id, token_hash=th1, expires_at=past, csrf_token="c1")
+    await session_repo.create(user_id=other_id, token_hash=th2, expires_at=past, csrf_token="c2")
+
+    await session_repo.delete_all_expired()
+
+    assert await session_repo.get_by_token_hash(th1) is None
+    assert await session_repo.get_by_token_hash(th2) is None
+
+
+async def test_delete_all_expired_returns_count(session_repo: SessionRepo, user_id: str) -> None:
+    past = datetime.now(UTC) - timedelta(hours=1)
+    for i in range(2):
+        th = hash_token(generate_session_token())
+        await session_repo.create(
+            user_id=user_id, token_hash=th, expires_at=past, csrf_token=f"c{i}"
+        )
+
+    count = await session_repo.delete_all_expired()
+    assert count == 2
+
+
+async def test_delete_all_expired_leaves_valid_sessions_intact(
+    session_repo: SessionRepo, user_id: str
+) -> None:
+    past = datetime.now(UTC) - timedelta(hours=1)
+    future = datetime.now(UTC) + timedelta(hours=4)
+
+    th_expired = hash_token(generate_session_token())
+    th_valid = hash_token(generate_session_token())
+    await session_repo.create(
+        user_id=user_id, token_hash=th_expired, expires_at=past, csrf_token="c1"
+    )
+    await session_repo.create(
+        user_id=user_id, token_hash=th_valid, expires_at=future, csrf_token="c2"
+    )
+
+    count = await session_repo.delete_all_expired()
+    assert count == 1
+    assert await session_repo.get_by_token_hash(th_expired) is None
+    assert await session_repo.get_by_token_hash(th_valid) is not None

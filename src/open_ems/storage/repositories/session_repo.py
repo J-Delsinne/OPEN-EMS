@@ -84,3 +84,36 @@ class SessionRepo:
             if cursor.rowcount == 0:
                 raise ValueError(f"No session found with id={session_id!r}")
         await self._conn.commit()
+
+    async def touch(self, session_id: str, new_expires_at: datetime) -> None:
+        """Update last_active_at=now and expires_at=new_expires_at to roll the inactivity window."""
+        now = datetime.now(UTC).isoformat()
+        async with self._conn.execute(
+            "UPDATE sessions SET last_active_at = ?, expires_at = ? WHERE id = ?",
+            (now, new_expires_at.isoformat(), session_id),
+        ) as cursor:
+            if cursor.rowcount == 0:
+                raise ValueError(f"No session found with id={session_id!r}")
+        await self._conn.commit()
+
+    async def delete_expired_for_user(self, user_id: str) -> int:
+        """Delete all expired sessions for a single user. Returns count deleted."""
+        now = datetime.now(UTC).isoformat()
+        async with self._conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND expires_at < ?",
+            (user_id, now),
+        ) as cursor:
+            count = cursor.rowcount
+        await self._conn.commit()
+        return count
+
+    async def delete_all_expired(self) -> int:
+        """Delete all expired sessions across all users. Returns count deleted."""
+        now = datetime.now(UTC).isoformat()
+        async with self._conn.execute(
+            "DELETE FROM sessions WHERE expires_at < ?",
+            (now,),
+        ) as cursor:
+            count = cursor.rowcount
+        await self._conn.commit()
+        return count

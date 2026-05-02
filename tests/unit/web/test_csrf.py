@@ -207,3 +207,30 @@ async def test_patch_missing_token_rejected(client: TestClient, session_repo: Se
     raw = await _make_session()
     resp = client.patch("/state", cookies={"session": raw})
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_expired_session_bypasses_csrf_check(
+    client: TestClient, session_repo: SessionRepo
+) -> None:
+    """POST with an expired session skips CSRF validation (route dependency handles redirect)."""
+    user_repo = UserRepo(get_connection())
+    user_id = await user_repo.create(
+        username="expired_csrf_user",
+        hashed_password=hash_password("secret"),
+        role="installer",
+    )
+    raw = generate_session_token()
+    past = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+    conn = get_connection()
+    session_id = str(__import__("uuid").uuid4())
+    await conn.execute(
+        "INSERT INTO sessions"
+        " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (session_id, user_id, hash_token(raw), past, past, past, _CSRF_TOKEN),
+    )
+    await conn.commit()
+    # POST without CSRF token — expired session should bypass CSRF (no 403)
+    resp = client.post("/state", cookies={"session": raw})
+    assert resp.status_code != 403

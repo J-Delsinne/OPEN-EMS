@@ -199,21 +199,25 @@ def test_post_login_rate_limited_after_threshold(https_client: TestClient, test_
     assert "Invalid username or password" in resp.text
 
 
-# ── POST /login — session fixation prevention ────────────────────────────────
+# ── POST /login — multi-device concurrency (Option A) ────────────────────────
 
 
-async def test_post_login_clears_old_sessions(
+async def test_post_login_does_not_clear_old_sessions(
     https_client: TestClient, test_user: str
 ) -> None:
+    """Option A: multiple concurrent sessions allowed.
+
+    Re-login must NOT delete existing sessions.
+    """
     resp1 = https_client.post("/login", data={"username": "admin", "password": "correcthorse"})
     token1 = resp1.cookies["session"]
 
-    # Login again — old session should be gone
+    # Login again — old session should STILL EXIST
     https_client.post("/login", data={"username": "admin", "password": "correcthorse"})
 
     repo = SessionRepo(get_connection())
     row = await repo.get_by_token_hash(hash_token(token1))
-    assert row is None
+    assert row is not None  # Old session must survive
 
 
 # ── Structured logging events ─────────────────────────────────────────────────
@@ -245,3 +249,56 @@ def test_auth_rate_limited_event_logged(https_client: TestClient, test_user: str
     with structlog.testing.capture_logs() as logs:
         https_client.post("/login", data={"username": "admin", "password": "wrong"})
     assert any(log.get("event") == "auth_rate_limited" for log in logs)
+
+
+# ── POST /logout ──────────────────────────────────────────────────────────────
+
+
+async def _login_and_get_token(https_client: TestClient, test_user: str) -> str:
+    resp = https_client.post("/login", data={"username": "admin", "password": "correcthorse"})
+    return resp.cookies["session"]
+
+
+async def test_logout_deletes_session(https_client: TestClient, test_user: str) -> None:
+    raw_token = await _login_and_get_token(https_client, test_user)
+    https_client.post("/logout", cookies={"session": raw_token})
+    repo = SessionRepo(get_connection())
+    row = await repo.get_by_token_hash(hash_token(raw_token))
+    assert row is None
+
+
+def test_logout_redirects_to_login(https_client: TestClient, test_user: str) -> None:
+    resp = https_client.post("/logout")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
+
+
+def test_logout_clears_session_cookie(https_client: TestClient, test_user: str) -> None:
+    resp = https_client.post("/logout")
+    set_cookie = resp.headers.get("set-cookie", "")
+    # Cookie cleared: empty value or max-age=0
+    assert "session=" in set_cookie
+    assert "Max-Age=0" in set_cookie or 'session=""' in set_cookie or "session=;" in set_cookie
+
+
+def test_logout_without_cookie_returns_redirect(https_client: TestClient) -> None:
+    resp = https_client.post("/logout")
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login"
+
+
+async def test_logout_logs_event(https_client: TestClient, test_user: str) -> None:
+    raw_token = await _login_and_get_token(https_client, test_user)
+    with structlog.testing.capture_logs() as logs:
+        https_client.post("/logout", cookies={"session": raw_token})
+    assert any(log.get("event") == "logout" for log in logs)
+
+
+async def test_logout_logs_user_id_and_role(https_client: TestClient, test_user: str) -> None:
+    raw_token = await _login_and_get_token(https_client, test_user)
+    with structlog.testing.capture_logs() as logs:
+        https_client.post("/logout", cookies={"session": raw_token})
+    logout_logs = [log for log in logs if log.get("event") == "logout"]
+    assert logout_logs
+    assert "user_id" in logout_logs[0]
+    assert "role" in logout_logs[0]

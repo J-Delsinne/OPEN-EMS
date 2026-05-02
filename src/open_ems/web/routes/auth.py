@@ -135,10 +135,6 @@ async def login_submit(
 
     session_repo = SessionRepo()
 
-    # AC2: Invalidate all existing sessions for this user before creating new one.
-    # NOTE: Story 2.5 will relax this to allow multiple concurrent sessions per user.
-    await session_repo.delete_all_for_user(user_id)
-
     raw_token = generate_session_token()
     token_hash_value = hash_token(raw_token)
     csrf_tok = generate_csrf_token()
@@ -169,5 +165,34 @@ async def login_submit(
         samesite="strict",
         path="/",
         max_age=max_age,
+    )
+    return response
+
+
+@router.post("/logout")
+async def logout(request: Request) -> Response:
+    raw_token = request.cookies.get(_COOKIE_NAME)
+    if raw_token:
+        session_repo = SessionRepo()
+        session_row = await session_repo.get_by_token_hash(hash_token(raw_token))
+        if session_row is not None:
+            user_id = str(session_row["user_id"])
+            session_id = str(session_row["id"])
+            user_row = await UserRepo().get_by_id(user_id)
+            role = str(user_row["role"]) if user_row else "unknown"
+            await session_repo.delete_by_id(session_id)
+            logger.info(
+                "logout",
+                component="auth",
+                user_id=user_id,
+                role=role,
+            )
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(
+        key=_COOKIE_NAME,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
     )
     return response

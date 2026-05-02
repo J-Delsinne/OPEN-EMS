@@ -17,7 +17,7 @@ _templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 @router.get("/homeowner/dashboard", response_class=HTMLResponse)
 async def homeowner_dashboard(
     request: Request,
-    _user: HomeownerUser = Depends(require_homeowner),
+    _user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
 ) -> HTMLResponse:
     return _templates.TemplateResponse(
         request,

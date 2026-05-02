@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-02 (story 2-4 done)'
+last_updated: '2026-05-02 (story 2-5 ready-for-dev)'
 project: OPEN-EMS
 project_key: NOKEY
 tracking_system: file-system
@@ -60,7 +60,7 @@ development_status:
   2-2-implement-login-form-hardened-session-creation-and-brute-force-protection: done
   2-3-implement-role-based-routing-with-differentiated-browser-and-api-enforcement: done
   2-4-implement-csrf-protection-on-state-changing-routes: done
-  2-5-implement-session-expiry-multi-device-concurrency-policy-and-logout: backlog
+  2-5-implement-session-expiry-multi-device-concurrency-policy-and-logout: review
   epic-2-retrospective: optional
 
   # ─── Epic 3: Protocol Adapters ─────────────────────────────────────────────

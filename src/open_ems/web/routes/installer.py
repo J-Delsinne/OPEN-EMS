@@ -17,7 +17,7 @@ _templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 @router.get("/installer/dashboard", response_class=HTMLResponse)
 async def installer_dashboard(
     request: Request,
-    _user: InstallerUser = Depends(require_installer),
+    _user: InstallerUser = Depends(require_installer),  # noqa: B008
 ) -> HTMLResponse:
     return _templates.TemplateResponse(
         request,

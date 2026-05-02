@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -46,6 +47,14 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         # Invalid/unknown session → exempt (route dependency handles auth)
         session_row = await SessionRepo().get_by_token_hash(hash_token(raw_token))
         if session_row is None:
+            return await call_next(request)
+
+        # Expired session → skip CSRF, let route dependency handle expiry and redirect
+        raw_expires = str(session_row["expires_at"])
+        expires_at = datetime.fromisoformat(raw_expires)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) > expires_at:
             return await call_next(request)
 
         # HTMX path (primary): check header first

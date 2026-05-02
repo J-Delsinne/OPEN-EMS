@@ -16,6 +16,7 @@ from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
+from open_ems.storage.repositories.session_repo import SessionRepo
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
 from open_ems.web.csrf import CsrfMiddleware
 from open_ems.web.routes.auth import router as auth_router
@@ -83,6 +84,17 @@ def _run_alembic_upgrade(db_url: str, alembic_ini_path: str | None = None) -> No
     alembic_command.upgrade(cfg, "head")
 
 
+async def _session_cleanup_task() -> None:
+    """Prune all expired sessions every 24 hours, starting immediately at startup."""
+    while True:
+        try:
+            count = await SessionRepo().delete_all_expired()
+            logger.info("session_cleanup", component="auth", deleted_count=count)
+        except Exception:
+            logger.error("session_cleanup_failed", exc_info=True, component="auth")
+        await asyncio.sleep(24 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
@@ -132,6 +144,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_database(settings.db_path)
 
     _watchdog_task: asyncio.Task[None] | None = None
+    _cleanup_task: asyncio.Task[None] | None = None
     try:
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
@@ -156,6 +169,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "watchdog_started", interval_seconds=round(interval, 3), component="startup"
             )
 
+        def _on_cleanup_done(t: asyncio.Task[None]) -> None:
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    logger.error("session_cleanup_task_died", exc_info=exc, component="auth")
+
+        _cleanup_task = asyncio.create_task(_session_cleanup_task())
+        _cleanup_task.add_done_callback(_on_cleanup_done)
+        logger.info("session_cleanup_task_started", component="auth")
+
         yield  # Application serves requests here
 
         # Shutdown: signal stopping so systemd resets the watchdog timer during WAL checkpoint
@@ -165,6 +188,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _watchdog_task.cancel()
             try:
                 await _watchdog_task
+            except asyncio.CancelledError:
+                pass
+
+        if _cleanup_task is not None:
+            _cleanup_task.cancel()
+            try:
+                await _cleanup_task
             except asyncio.CancelledError:
                 pass
     finally:
