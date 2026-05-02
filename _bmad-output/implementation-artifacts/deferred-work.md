@@ -94,6 +94,10 @@
 - **`_is_htmx_or_api` treats all non-HTMX as browser** [`src/open_ems/web/dependencies.py:32-35`] — Minor deviation from AC3's strict positive-browser-detection wording (`Accept: text/html` AND no `HX-Request`); Dev Notes explicitly specify the inverse-logic implementation; API clients not sending `Accept: application/json` get a redirect instead of 401; benign in practice
 - **`InstallerUser`/`HomeownerUser` type aliases provide no compile-time role enforcement** [`src/open_ems/web/dependencies.py:28-29`] — Simple name aliases (`= AuthenticatedUser`); `NewType` would make mismatched dependencies detectable by mypy; spec-mandated design; revisit as a quality improvement before Epic 10/11
 
+## Deferred from: code review of 3-2-implement-modbus-tcp-adapter-with-connection-management-and-timeout-enforcement (2026-05-02)
+
+- **`asyncio.CancelledError` propagates from adapter** [`src/open_ems/adapters/modbus/tcp.py`] — Not in `_RECOVERABLE_EXCEPTIONS`; `CancelledError` is a `BaseException` and correctly propagates for cooperative task cancellation; not a communication failure — correct Python async behavior
+
 ## Deferred from: code review of 2-5-implement-session-expiry-multi-device-concurrency-policy-and-logout (2026-05-02)
 
 - **Unrecognised role silently gets homeowner session timeout** [`src/open_ems/web/dependencies.py:85-88`] — `else` branch applies homeowner timeout to any non-installer role value; only installer/homeowner exist today; pre-existing design concern not caused by this diff
