@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-03T20:38:06+02:00'
+last_updated: '2026-05-03T22:00:00+02:00'
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -76,7 +76,7 @@ development_status:
   4-2-implement-modbus-device-normalization-with-register-maps: done
   4-3-implement-ocpp-and-dsmr-device-normalization: done
   4-4-implement-device-capability-profile-system-and-capability-gate: done
-  4-5-implement-device-discovery-and-connection-management: backlog
+  4-5-implement-device-discovery-and-connection-management: done
   epic-4-retrospective: optional
 
   # ─── Epic 5: State Aggregation and Real-Time Distribution ──────────────────

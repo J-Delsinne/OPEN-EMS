@@ -22,6 +22,9 @@ logger = structlog.get_logger(__name__)
 
 _DSMR_STALE_SECONDS: float = 60.0
 
+# Protocol reasons that indicate a transient connection loss → mapped to "reconnecting"
+_RECONNECTING_REASONS: frozenset[str] = frozenset({"dsmr_unavailable", "dsmr_stale"})
+
 # PLACEHOLDER — verify against actual P1 spec for other DSMR versions
 _OBIS_USAGE = "1-0:1.7.0"  # current_electricity_usage (kW, always >= 0)
 _OBIS_DELIVERY = "1-0:2.7.0"  # current_electricity_delivery (kW, always >= 0)
@@ -91,17 +94,18 @@ class GridMeterAdapter:
         return profile
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+        domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
         logger.warning(
             "device_degraded",
             component="adapters",
             device_id=self.device_id,
             role=DeviceRole.grid_meter.value,
-            reason=reason,
+            reason=domain_reason,
         )
         return DegradedDeviceState(
             device_id=self.device_id,
             role=DeviceRole.grid_meter,
-            reason=reason,
+            reason=domain_reason,
             occurred_at=occurred_at,
         )
 

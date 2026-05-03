@@ -216,7 +216,7 @@ async def test_protocol_degraded_state_translates_to_domain_degraded() -> None:
     assert isinstance(state, DegradedDeviceState)
     assert state.device_id == "inv-001"
     assert state.role == DeviceRole.inverter
-    assert state.reason == "modbus_timeout"
+    assert state.reason == "reconnecting"
     assert state.occurred_at == _NOW
 
 

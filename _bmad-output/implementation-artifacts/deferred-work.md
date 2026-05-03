@@ -137,6 +137,18 @@
 - **BYD register gap at address 103** [byd_hvs_v1.py, byd_hvm_v1.py] -- address 103 skipped between _REG_POWER_W=102 and _REG_DIRECTION=104 with no comment; may be a reserved/unused BYD register. Confirm when real BYD HVS/HVM Modbus spec is available.
 - **int16()/uint16() accept out-of-range inputs silently** [register_maps/utils.py] -- no 16-bit bounds enforcement; upstream Modbus protocol layer expected to deliver valid values. Add bounds check if a protocol-layer gap is found.
 
+## Deferred from: code review of 4-5-implement-device-discovery-and-connection-management (2026-05-03)
+
+- **AC3 automated reconnection test** — `connect()` behavior covered by earlier adapter unit tests; the startup orchestrator that calls Step 6 (initialize protocol adapters) belongs to Epic 8; no dedicated reconnect-on-restart test added
+- **`_RECONNECTING_REASONS` duplicated across 4 adapter modules** — code smell, not a runtime bug; sets legitimately differ per protocol; refactor to a shared utility function if the pattern grows (e.g., `adapters/_reason.py`)
+- **`probe_modbus_endpoint`: `ModbusTcpAdapterConfig` `ValidationError` propagates on bad caller args** — caller-error boundary; `DeviceProbeError` is reserved for unreachable devices, not programmer input errors [`discovery.py:76-101`]
+- **`probe_dsmr_endpoint`: invalid `dsmr_version` literal raises `DSMRAdapterConfig` `ValidationError`** — caller error; validated at construction [`discovery.py:148-154`]
+- **`register_ocpp_discovery`: empty `device_id`/`address` raises Pydantic `ValidationError`** — caller error; `NonEmptyStr` on `DeviceDiscoveryResult` is the correct guard [`discovery.py:204-232`]
+- **`_to_degraded` empty reason string raises `ValidationError` in all 4 adapters** — Epic 3 contract violation (`ProtocolDegradedState` should enforce non-empty reason); not Epic 4's responsibility
+- **Unit tests couple to live capability registry** — intentional; registry is in-process and stable; only becomes fragile if registry keys change [`test_discovery.py`]
+- **`probe_modbus_endpoint`: `adapter.close()` in `finally` may hang if TCP connection is wedged** — pre-existing `ModbusTcpAdapter` behavior; address if close() timeouts become a production issue [`discovery.py:100`]
+- **Unit test `test_probe_dsmr_success`: `patch("DSMRAdapter")` does not validate `DSMRAdapterConfig` construction** — inherent patch limitation; config validation is covered by `DSMRAdapter`'s own unit tests [`test_discovery.py`]
+
 ## Deferred from: code review of 4-3-implement-ocpp-and-dsmr-device-normalization (2026-05-03)
 
 - **`reversed()` ordering assumption for MeterValues** [`src/open_ems/adapters/ocpp/central_system.py:on_meter_values`] — latest sample taken from `reversed(meter_value)[-1]`; assumes OCPP chronological ordering of the list. OCPP 1.6 spec does not guarantee order. Acceptable for Story 4.3 scope; harden in Story 8 when production charger behaviour is observed.

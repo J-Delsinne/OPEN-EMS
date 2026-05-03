@@ -202,7 +202,7 @@ async def test_stale_data_returns_degraded() -> None:
     adapter = _make_adapter(fake)
     result = await adapter.get_state()
     assert isinstance(result, DegradedDeviceState)
-    assert result.reason == "dsmr_stale"
+    assert result.reason == "reconnecting"
 
 
 @pytest.mark.asyncio
@@ -213,7 +213,7 @@ async def test_data_just_past_60s_is_stale() -> None:
     adapter = _make_adapter(fake)
     result = await adapter.get_state()
     assert isinstance(result, DegradedDeviceState)
-    assert result.reason == "dsmr_stale"
+    assert result.reason == "reconnecting"
 
 
 @pytest.mark.asyncio
@@ -244,7 +244,7 @@ async def test_protocol_degraded_translates_to_domain_degraded(proto_reason: str
     result = await adapter.get_state()
     assert isinstance(result, DegradedDeviceState)
     assert result.role == DeviceRole.grid_meter
-    assert result.reason == proto_reason
+    assert result.reason == "reconnecting"
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +298,7 @@ async def test_structlog_device_degraded_emitted() -> None:
     assert log["component"] == "adapters"
     assert log["device_id"] == _DEVICE_ID
     assert log["role"] == DeviceRole.grid_meter.value
-    assert log["reason"] == "dsmr_unavailable"
+    assert log["reason"] == "reconnecting"
 
 
 # ---------------------------------------------------------------------------

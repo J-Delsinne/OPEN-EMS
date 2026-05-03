@@ -381,3 +381,143 @@ def test_raw_protocol_types_not_in_core() -> None:
         "ProtocolDegradedState",
     ):
         assert not hasattr(core_module, forbidden), f"{forbidden} must not be in open_ems.core"
+
+
+# ---------------------------------------------------------------------------
+# DeviceDiscoveryResult (Story 4-5)
+# ---------------------------------------------------------------------------
+
+
+def test_device_discovery_result_requires_device_id_protocol_address() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+
+    result = DeviceDiscoveryResult(
+        device_id="inv-001",
+        protocol="modbus_tcp",
+        address="192.168.1.10:502",
+    )
+    assert result.device_id == "inv-001"
+    assert result.protocol == "modbus_tcp"
+    assert result.address == "192.168.1.10:502"
+
+
+def test_device_discovery_result_default_model_is_none() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+
+    result = DeviceDiscoveryResult(
+        device_id="bat-001",
+        protocol="modbus_tcp",
+        address="10.0.0.1:502",
+    )
+    assert result.model is None
+
+
+def test_device_discovery_result_default_capability_status_is_reduced() -> None:
+    from open_ems.core.devices import CapabilityStatus, DeviceDiscoveryResult
+
+    result = DeviceDiscoveryResult(
+        device_id="bat-001",
+        protocol="modbus_tcp",
+        address="10.0.0.1:502",
+    )
+    assert result.capability_status == CapabilityStatus.reduced
+
+
+def test_device_discovery_result_accepts_all_protocols() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+
+    for protocol in ("modbus_tcp", "ocpp_1_6", "dsmr_p1"):
+        result = DeviceDiscoveryResult(
+            device_id="dev-001",
+            protocol=protocol,  # type: ignore[arg-type]
+            address="localhost",
+        )
+        assert result.protocol == protocol
+
+
+def test_device_discovery_result_rejects_unknown_protocol() -> None:
+    from pydantic import ValidationError
+
+    from open_ems.core import DeviceDiscoveryResult
+
+    with pytest.raises(ValidationError):
+        DeviceDiscoveryResult(
+            device_id="dev-001",
+            protocol="unknown_protocol",  # type: ignore[arg-type]
+            address="localhost",
+        )
+
+
+def test_device_discovery_result_rejects_empty_device_id() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+
+    with pytest.raises(ValidationError):
+        DeviceDiscoveryResult(
+            device_id="",
+            protocol="modbus_tcp",
+            address="localhost",
+        )
+
+
+def test_device_discovery_result_rejects_empty_address() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+
+    with pytest.raises(ValidationError):
+        DeviceDiscoveryResult(
+            device_id="dev-001",
+            protocol="modbus_tcp",
+            address="",
+        )
+
+
+def test_device_discovery_result_is_immutable() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+
+    result = DeviceDiscoveryResult(
+        device_id="dev-001",
+        protocol="modbus_tcp",
+        address="localhost",
+    )
+    with pytest.raises(ValidationError):
+        result.device_id = "other"  # type: ignore[misc]
+
+
+def test_device_discovery_result_rejects_extra_fields() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+
+    with pytest.raises(ValidationError):
+        DeviceDiscoveryResult(
+            device_id="dev-001",
+            protocol="modbus_tcp",
+            address="localhost",
+            extra_field="not_allowed",  # type: ignore[call-arg]
+        )
+
+
+def test_device_discovery_result_model_stored() -> None:
+    from open_ems.core import DeviceDiscoveryResult
+    from open_ems.core.devices import CapabilityStatus
+
+    result = DeviceDiscoveryResult(
+        device_id="inv-001",
+        protocol="modbus_tcp",
+        address="192.168.1.10:502",
+        model="fronius_gen24_v1",
+        capability_status=CapabilityStatus.full,
+    )
+    assert result.model == "fronius_gen24_v1"
+    assert result.capability_status == CapabilityStatus.full
+
+
+def test_device_discovery_result_rejects_empty_model() -> None:
+    from pydantic import ValidationError
+
+    from open_ems.core import DeviceDiscoveryResult
+
+    with pytest.raises(ValidationError):
+        DeviceDiscoveryResult(
+            device_id="dev-001",
+            protocol="modbus_tcp",
+            address="localhost",
+            model="",
+        )

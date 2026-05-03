@@ -23,6 +23,9 @@ _OCPP_POWER_STALE_SECONDS: float = 90.0
 
 _DomainStatus = Literal["available", "charging", "faulted", "unavailable"]
 
+# Protocol reasons that indicate a transient connection loss → mapped to "reconnecting"
+_RECONNECTING_REASONS: frozenset[str] = frozenset({"ocpp_disconnected"})
+
 _OCPP_STATUS_MAP: dict[str, tuple[_DomainStatus, bool]] = {
     "Available": ("available", False),
     "Preparing": ("available", True),
@@ -125,16 +128,17 @@ class EVChargerAdapter:
         return profile
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+        domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
         logger.warning(
             "device_degraded",
             component="adapters",
             device_id=self.device_id,
             role=DeviceRole.ev_charger.value,
-            reason=reason,
+            reason=domain_reason,
         )
         return DegradedDeviceState(
             device_id=self.device_id,
             role=DeviceRole.ev_charger,
-            reason=reason,
+            reason=domain_reason,
             occurred_at=occurred_at,
         )

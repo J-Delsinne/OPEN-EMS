@@ -36,6 +36,11 @@ Capability Enumerations
     - ``full``        : all capabilities for the device type are validated
     - ``reduced``     : partial support; one or more capabilities absent
     - ``unsupported`` : capability explicitly not supported for this model
+
+``DeviceDiscoveryResult`` — typed result from a discovery probe or OCPP registration:
+    Returned by ``DiscoveryService`` for each discovered device. Used by the
+    installer wizard (Epic 9) to present a typed list of probed or self-registered
+    devices with their protocol, address, optional model, and capability status.
 """
 
 from __future__ import annotations
@@ -232,6 +237,25 @@ class DeviceCapabilityProfile(BaseModel):
     write_capabilities: frozenset[WriteCapability] = frozenset()
     known_limitations: tuple[str, ...] = ()
     limitation_reason: str | None = None
+
+
+class DeviceDiscoveryResult(BaseModel):
+    """Typed result returned by DiscoveryService for a single discovered device.
+
+    Used by the installer wizard (Epic 9) to present a typed list of probed or
+    self-registered devices. Immutable once created.
+
+    ``capability_status`` is derived from the capability registry if a model string
+    is available; defaults to ``CapabilityStatus.reduced`` when the model is unknown.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    device_id: NonEmptyStr
+    protocol: Literal["modbus_tcp", "ocpp_1_6", "dsmr_p1"]
+    address: NonEmptyStr
+    model: NonEmptyStr | None = None
+    capability_status: CapabilityStatus = CapabilityStatus.reduced
 
 
 @runtime_checkable

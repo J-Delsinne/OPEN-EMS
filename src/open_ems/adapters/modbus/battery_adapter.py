@@ -36,6 +36,9 @@ _SUPPORTED_MODELS: dict[str, BatteryRegisterMap] = {
     "byd_hvm_v1": BydHvmV1(),
 }
 
+# Protocol reasons that indicate a transient connection loss → mapped to "reconnecting"
+_RECONNECTING_REASONS: frozenset[str] = frozenset({"modbus_timeout", "modbus_error"})
+
 
 class BatteryAdapter:
     """Domain-level battery adapter: translates RawModbusState → BatteryState.
@@ -106,16 +109,17 @@ class BatteryAdapter:
         return profile
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+        domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
         logger.warning(
             "device_degraded",
             component="adapters",
             device_id=self.device_id,
             role=DeviceRole.battery.value,
-            reason=reason,
+            reason=domain_reason,
         )
         return DegradedDeviceState(
             device_id=self.device_id,
             role=DeviceRole.battery,
-            reason=reason,
+            reason=domain_reason,
             occurred_at=occurred_at,
         )

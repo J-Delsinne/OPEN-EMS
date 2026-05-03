@@ -33,6 +33,9 @@ _SUPPORTED_MODELS: dict[str, InverterRegisterMap] = {
     "growatt_hybrid_v1": GrowattHybridV1(),
 }
 
+# Protocol reasons that indicate a transient connection loss → mapped to "reconnecting"
+_RECONNECTING_REASONS: frozenset[str] = frozenset({"modbus_timeout", "modbus_error"})
+
 
 class InverterAdapter:
     """Domain-level inverter adapter: translates RawModbusState → InverterState.
@@ -103,16 +106,17 @@ class InverterAdapter:
         return profile
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+        domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
         logger.warning(
             "device_degraded",
             component="adapters",
             device_id=self.device_id,
             role=DeviceRole.inverter.value,
-            reason=reason,
+            reason=domain_reason,
         )
         return DegradedDeviceState(
             device_id=self.device_id,
             role=DeviceRole.inverter,
-            reason=reason,
+            reason=domain_reason,
             occurred_at=occurred_at,
         )

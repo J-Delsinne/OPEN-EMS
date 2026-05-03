@@ -162,7 +162,7 @@ async def test_protocol_degraded_translates_to_domain_degraded() -> None:
     result = await adapter.get_state()
     assert isinstance(result, DegradedDeviceState)
     assert result.role == DeviceRole.ev_charger
-    assert result.reason == "ocpp_disconnected"
+    assert result.reason == "reconnecting"
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ async def test_structlog_device_degraded_emitted() -> None:
     assert log["component"] == "adapters"
     assert log["device_id"] == _DEVICE_ID
     assert log["role"] == DeviceRole.ev_charger.value
-    assert log["reason"] == "ocpp_disconnected"
+    assert log["reason"] == "reconnecting"
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +269,7 @@ async def test_disconnected_no_status_returns_ocpp_disconnected() -> None:
     adapter = _make_adapter(fake)
     result = await adapter.get_state()
     assert isinstance(result, DegradedDeviceState)
-    assert result.reason == "ocpp_disconnected"
+    assert result.reason == "reconnecting"
 
 
 # ---------------------------------------------------------------------------
