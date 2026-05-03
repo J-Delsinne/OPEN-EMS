@@ -106,7 +106,9 @@ so that the EV charger and grid meter are available to the decision engine throu
   - [ ] `get_state()`:
     - Call `await self._protocol_adapter.get_raw_state()`
     - If `ProtocolDegradedState` → log `device_degraded` and return `DegradedDeviceState(role=DeviceRole.ev_charger, ...)`
-    - If `RawOCPPState` with `last_status_notification is None` → return `DegradedDeviceState(reason="ocpp_no_status")`
+    - If `RawOCPPState` with `last_status_notification is None` → check `raw.connection_status`:
+    - `connection_status == "disconnected"` → `DegradedDeviceState(reason="ocpp_disconnected")`
+    - `connection_status == "connected"` (no status yet) → `DegradedDeviceState(reason="ocpp_no_status")`
     - Map OCPP status string to domain status + `session_active` (see OCPP Status Mapping in Dev Notes)
     - For unknown OCPP status → `DegradedDeviceState(reason=f"ocpp_unknown_status:{raw_status}")`
     - Set `current_power_kw`, `power_source`, `power_measured_at` from `raw.last_meter_values_*` (see MeterValues Mapping in Dev Notes)
@@ -236,7 +238,7 @@ The `last_status_notification["status"]` value is a raw OCPP string. Map it to d
 _OCPP_STATUS_MAP: dict[str, tuple[str, bool]] = {
     # (domain_status, session_active)
     "Available":     ("available",   False),
-    "Preparing":     ("charging",    True),
+    "Preparing":     ("available",   True),   # vehicle connected, not yet charging
     "Charging":      ("charging",    True),
     "SuspendedEVSE": ("charging",    True),
     "SuspendedEV":   ("charging",    True),
@@ -249,7 +251,7 @@ _OCPP_STATUS_MAP: dict[str, tuple[str, bool]] = {
 
 If `raw_status` is NOT in this dict → return `DegradedDeviceState(reason=f"ocpp_unknown_status:{raw_status}")`.
 
-`session_active = True` for status values where a vehicle session is in progress (Preparing through Finishing). Never infer `session_active` from any field other than the status mapping.
+`session_active = True` for status values where a vehicle is physically present ("Preparing" through "Finishing"). `status` reflects actual power delivery — "Preparing" means the vehicle is connected but charging has not started, so `status="available"`. Never infer `session_active` from any field other than the status mapping.
 
 ---
 
@@ -267,7 +269,20 @@ def on_meter_values(
 ) -> Any:
     # Find the most recent Power.Active.Import sampled value
     power_kw: float | None = None
+    measurement_ts: datetime | None = None
     for mv in reversed(meter_value):  # most recent first
+        # Extract timestamp from MeterValues payload; NEVER use now() when
+        # the payload carries a real measurement time (data integrity requirement)
+        raw_ts: str | None = mv.get("timestamp")
+        parsed_ts: datetime | None = None
+        if raw_ts:
+            try:
+                from datetime import timezone
+                from dateutil.parser import parse as parse_dt  # dateutil is a transitive dep
+                dt = parse_dt(raw_ts)
+                parsed_ts = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=UTC)
+            except (ValueError, TypeError, OverflowError):
+                parsed_ts = None
         for sv in mv.get("sampled_value", []):
             if sv.get("measurand") == "Power.Active.Import":
                 try:
@@ -275,13 +290,15 @@ def on_meter_values(
                     unit = sv.get("unit", "W")
                     # OCPP default unit for power is W; convert to kW
                     power_kw = raw_val / 1000.0 if unit != "kW" else raw_val
+                    measurement_ts = parsed_ts  # tie timestamp to this measurement
                 except (ValueError, KeyError):
                     continue
                 break
         if power_kw is not None:
             break
     if power_kw is not None:
-        self._state.last_meter_values_at = datetime.now(UTC)
+        # Use the payload timestamp; only fall back to now() if absent or unparseable
+        self._state.last_meter_values_at = measurement_ts or datetime.now(UTC)
         self._state.last_meter_values_power_kw = power_kw
     return call_result.MeterValues()
 ```
@@ -292,16 +309,19 @@ In `EVChargerAdapter.get_state()`:
 meter_at = raw.last_meter_values_at
 power_kw = raw.last_meter_values_power_kw
 if meter_at is not None and power_kw is not None:
-    current_power_kw = power_kw
+    # Negative power is physically invalid for EV charging; fail-fast visibility
+    if power_kw < 0:
+        return self._to_degraded("ocpp_invalid_power", datetime.now(UTC))
+    current_power_kw: float | None = power_kw
     power_source: Literal["meter_values"] | None = "meter_values"
-    power_measured_at = meter_at
+    power_measured_at: datetime | None = meter_at
 else:
     current_power_kw = None
     power_source = None
     power_measured_at = None
 ```
 
-`current_power_kw` MUST be `None` when MeterValues data is absent — never infer from status.
+`current_power_kw` MUST be `None` when MeterValues data is absent — never infer from status. Negative `current_power_kw` MUST return `DegradedDeviceState(reason="ocpp_invalid_power")` — never silently accept.
 
 ---
 
@@ -472,13 +492,21 @@ Per Epic 3 retro action A4: use snake_case event names consistent with existing 
 
 ---
 
-### DSMR Staleness — Two-Layer Design
+### DSMR Staleness — Domain Layer is Authoritative
 
-The DSMR staleness check occurs at two levels:
-1. **Protocol layer** (`DSMRAdapter.get_raw_state()`): returns `ProtocolDegradedState(reason="dsmr_stale")` when `received_at` is older than `stale_after_s` (default 60s, configurable)
-2. **Domain layer** (`GridMeterAdapter.get_state()`): checks `RawDSMRState.received_at` against `_DSMR_STALE_SECONDS = 60.0` — this domain check is authoritative per the epic requirement that "`received_at` from `RawDSMRState` drives this evaluation"
+**Rule:** `GridMeterAdapter` is the **only** authoritative staleness enforcer. The 60-second business rule belongs exclusively to the domain layer.
 
-If the protocol layer returns a fresh `RawDSMRState` that the domain layer then finds stale (possible if protocol `stale_after_s` is configured higher than 60s), the domain check takes precedence and returns `DegradedDeviceState(reason="dsmr_stale")`.
+**Protocol layer responsibility (existing `DSMRAdapter`):**
+- Returns `RawDSMRState` as long as data exists (regardless of age)
+- Returns `ProtocolDegradedState` only for connection failures (`dsmr_unavailable`, `dsmr_disconnected`)
+- The existing `DSMRAdapter.get_raw_state()` already returns `ProtocolDegradedState(reason="dsmr_stale")` when data is older than `stale_after_s` — this is a legacy behavior. When `GridMeterAdapter` receives this, it passes it through as `DegradedDeviceState(reason="dsmr_stale")` transparently.
+
+**Domain layer responsibility (`GridMeterAdapter.get_state()`):**
+- When `RawDSMRState` is received: check `(datetime.now(UTC) - raw.received_at).total_seconds() > _DSMR_STALE_SECONDS` — if stale, return `DegradedDeviceState(reason="dsmr_stale")`
+- The `raw.received_at` field is the authoritative measurement timestamp — always use it, never substitute `datetime.now(UTC)` for staleness evaluation
+- When `ProtocolDegradedState` is received for any reason: translate to `DegradedDeviceState` and pass through
+
+**This means:** if `DSMRAdapter` is configured with `stale_after_s=120` but the domain requires 60s, the domain check still enforces 60s correctly because it uses `raw.received_at`. Domain logic always wins.
 
 ---
 
