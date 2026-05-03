@@ -38,7 +38,10 @@ _ALL_PROFILES: dict[str, DeviceCapabilityProfile] = {
     **GRID_METER_PROFILES,
 }
 assert len(_ALL_PROFILES) == (
-    len(INVERTER_PROFILES) + len(BATTERY_PROFILES) + len(EV_CHARGER_PROFILES) + len(GRID_METER_PROFILES)
+    len(INVERTER_PROFILES)
+    + len(BATTERY_PROFILES)
+    + len(EV_CHARGER_PROFILES)
+    + len(GRID_METER_PROFILES)
 ), "Duplicate model key detected across capability profile categories"
 
 _SAFE_READ_CAPS: frozenset[ReadCapability] = frozenset({ReadCapability.state})

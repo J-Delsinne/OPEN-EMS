@@ -185,7 +185,7 @@ def test_get_profile_stores_firmware_version_in_returned_profile() -> None:
 
 
 def test_get_profile_known_model_with_any_firmware_returns_full_profile() -> None:
-    """Known model with an unrecognised firmware string must still return FULL (deferred matching)."""
+    """Known model + any firmware version must still return FULL (deferred firmware matching)."""
     profile = get_profile("dev-1", "fronius_gen24_v1", "99.99.99-unknown")
     assert profile.capability_status == CapabilityStatus.full
     assert ReadCapability.state in profile.read_capabilities
