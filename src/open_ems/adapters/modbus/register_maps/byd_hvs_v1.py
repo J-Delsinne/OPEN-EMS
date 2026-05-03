@@ -64,6 +64,3 @@ class BydHvsV1:
             operating_mode=_OPERATING_MODE_MAP.get(mode_raw, "unknown"),
             read_at=raw.read_at,
         )
-
-
-

@@ -42,6 +42,3 @@ class GrowattHybridV1:
             fault_code=str(fault_raw) if fault_raw != 0 else None,
             read_at=raw.read_at,
         )
-
-
-

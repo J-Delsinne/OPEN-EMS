@@ -44,6 +44,3 @@ class HuaweiSun2000V3:
             fault_code=str(fault_raw) if fault_raw != 0 else None,
             read_at=raw.read_at,
         )
-
-
-

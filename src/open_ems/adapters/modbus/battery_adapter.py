@@ -51,8 +51,7 @@ class BatteryAdapter:
     ) -> None:
         if model not in _SUPPORTED_MODELS:
             raise ValueError(
-                f"Unsupported battery model: {model!r}. "
-                f"Supported: {sorted(_SUPPORTED_MODELS)}"
+                f"Unsupported battery model: {model!r}. Supported: {sorted(_SUPPORTED_MODELS)}"
             )
         self.device_id = device_id  # explicit — NOT derived from protocol_adapter.config
         self._protocol_adapter = protocol_adapter

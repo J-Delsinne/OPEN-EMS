@@ -595,6 +595,8 @@ async def test_per_instance_isolation() -> None:
     ws2.close()
     await asyncio.wait_for(task1, timeout=2.0)
     await asyncio.wait_for(task2, timeout=2.0)
+
+
 # ---------------------------------------------------------------------------
 
 
