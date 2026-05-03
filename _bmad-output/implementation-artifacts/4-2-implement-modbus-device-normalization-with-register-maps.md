@@ -135,8 +135,8 @@ so that the decision engine receives normalized, energy-meaningful values regard
 
 ### Senior Developer Review (AI)
 
-- [ ] [Review] Review register map correctness against real device documentation (if available) — flag any placeholder values
-- [ ] [Review] Verify structlog event names follow A4 carry-forward: use snake_case, consistent with existing event names in `tcp.py` (`adapter_timeout`, `adapter_connection_failed`, `adapter_protocol_error`)
+- [x] [Review] Review register map correctness against real device documentation (if available) — flag any placeholder values. All five register maps carry `# PLACEHOLDER — register addresses must be verified against actual device documentation` headers and per-register `# PLACEHOLDER` inline comments. No undocumented placeholders. [fronius_gen24_v1.py, huawei_sun2000_v3.py, growatt_hybrid_v1.py, byd_hvs_v1.py, byd_hvm_v1.py]
+- [x] [Review] Verify structlog event names follow A4 carry-forward: use snake_case, consistent with existing event names in `tcp.py` (`adapter_timeout`, `adapter_connection_failed`, `adapter_protocol_error`). Both `InverterAdapter` and `BatteryAdapter` emit `"device_degraded"` — snake_case, consistent with existing `tcp.py` event names. [inverter_adapter.py:100, battery_adapter.py:103]
 
 ## Dev Notes
 
