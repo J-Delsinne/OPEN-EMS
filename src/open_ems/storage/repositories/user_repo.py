@@ -45,7 +45,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         if hashed_password.startswith(prefix):
             try:
                 return verifier(plain_password, hashed_password)
-            except Exception:
+            except ValueError:
+                # bcrypt.checkpw raises ValueError on malformed/truncated hashes.
                 return False
     return False
 

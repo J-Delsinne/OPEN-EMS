@@ -30,6 +30,14 @@ uv run mypy src/
 uv run pytest
 ```
 
+### Pre-commit hooks (local dev)
+
+```bash
+uv run pre-commit install
+```
+
+Runs ruff, mypy, and a story review-findings check before each commit.
+
 ## Deployment
 
 See `docs/installation.md` for Docker Compose and systemd deployment paths.

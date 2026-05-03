@@ -260,10 +260,23 @@ class DSMRAdapter:
                         "value": cosem_obj.value,
                         "unit": cosem_obj.unit,
                     }
-                except Exception:
+                except (AttributeError, TypeError, ValueError):
+                    # dsmr-parser CosemObject properties may be absent or malformed for some
+                    # OBIS refs; store nulls so the rest of the telegram is still usable.
+                    logger.debug(
+                        "adapter_obis_field_error",
+                        component="dsmr",
+                        device_id=self.config.device_id,
+                        obis_ref=str(obis_ref),
+                    )
                     result[str(obis_ref)] = {"value": None, "unit": None}
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — third-party telegram iteration semantics are undocumented; log and return partial dict
+            logger.warning(
+                "adapter_telegram_iteration_error",
+                component="dsmr",
+                device_id=self.config.device_id,
+                reason=str(exc),
+            )
         return result
 
     async def _read_loop(self) -> None:
@@ -280,7 +293,7 @@ class DSMRAdapter:
                     line = await transport.read_line()  # raises OSError on disconnect/EOF
                     try:
                         decoded = line.decode("ascii")
-                    except Exception:
+                    except UnicodeDecodeError:
                         continue
                     self._buffer.append(decoded)
                     for telegram_str in self._buffer.get_all():
@@ -291,7 +304,7 @@ class DSMRAdapter:
                                 self._last_telegram = fields
                                 self._received_at = datetime.now(UTC)
                                 self._connected = True
-                        except Exception as exc:  # ParseError, InvalidChecksumError, or other
+                        except Exception as exc:  # noqa: BLE001 — dsmr_parser raises ParseError, InvalidChecksumError, and undocumented internal errors; all logged at boundary
                             logger.warning(
                                 "adapter_parse_error",
                                 component="dsmr",
@@ -313,8 +326,13 @@ class DSMRAdapter:
                 if transport is not None:
                     try:
                         await transport.close()
-                    except Exception:
-                        pass
+                    except OSError as exc:
+                        logger.debug(
+                            "adapter_transport_close_error",
+                            component="dsmr",
+                            device_id=self.config.device_id,
+                            reason=str(exc),
+                        )
                     if self._transport is transport:
                         self._transport = None
 

@@ -1,0 +1,33 @@
+# Pre-commit hooks for local development quality gates.
+#
+# Install:  uv run pre-commit install
+# Run once: uv run pre-commit run --all-files
+#
+# These hooks mirror the CI quality gates (ruff, mypy, review-findings check)
+# so issues are caught before push.  CI runs ruff/mypy/pytest directly;
+# these hooks are NOT required by CI.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.12
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run python -m mypy
+        language: system
+        args: [src/]
+        pass_filenames: false
+        always_run: true
+
+      - id: no-open-review-findings
+        name: No open review findings in story files
+        entry: uv run python scripts/check_review_findings.py
+        language: system
+        pass_filenames: false
+        always_run: true

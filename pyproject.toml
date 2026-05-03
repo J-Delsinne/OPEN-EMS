@@ -55,7 +55,7 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "C4", "UP"]
+select = ["E", "W", "F", "I", "B", "BLE", "C4", "UP"]
 
 [tool.mypy]
 python_version = "3.12"

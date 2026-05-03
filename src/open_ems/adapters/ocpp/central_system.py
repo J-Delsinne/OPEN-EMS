@@ -132,10 +132,9 @@ class OCPPChargerAdapter:
         self._handler = handler
         try:
             await handler.start()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — ocpp.ChargePoint.start() propagates ConnectionClosed, ProtocolError, and any exception from a message handler; all are non-recoverable for this connection and are logged below
             logger.warning(
                 "adapter_connection_error",
-                component="ocpp",
                 device_id=self.config.device_id,
                 charge_point_id=self.config.charge_point_id,
                 reason=type(exc).__name__,
@@ -210,7 +209,7 @@ class OCPPChargerAdapter:
                 protocol_status="timeout",
                 raw_response={"error": "ocpp_timeout"},
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — ocpp.ChargePoint.call() may raise OCPPError, websocket exceptions, or unexpected protocol errors at the boundary; all are logged and returned as error results
             error_dict: dict[str, Any] = {
                 "error_code": type(exc).__name__,
                 "error_description": getattr(exc, "description", str(exc)),
