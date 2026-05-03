@@ -8,6 +8,7 @@ from typing import Any
 import structlog
 from pydantic import ValidationError
 
+from open_ems.adapters.capabilities import get_profile
 from open_ems.adapters.dsmr.p1 import DSMRAdapter
 from open_ems.adapters.protocol import ProtocolDegradedState, RawDSMRState
 from open_ems.core.devices import (
@@ -74,11 +75,20 @@ class GridMeterAdapter:
             return self._to_degraded(reason, datetime.now(UTC))
 
     async def get_capabilities(self) -> DeviceCapabilityProfile:
-        return DeviceCapabilityProfile(
+        profile = get_profile(
             device_id=self.device_id,
             model="dsmr_p1",
-            capability_status="full",
+            firmware_version=None,
         )
+        if profile.limitation_reason is not None:
+            logger.warning(
+                "capability_profile_unknown",
+                component="adapters",
+                device_id=self.device_id,
+                model="dsmr_p1",
+                firmware_version=None,
+            )
+        return profile
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
         logger.warning(

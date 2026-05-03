@@ -17,6 +17,25 @@ All energy values use physics/IEC 60050 polarity conventions:
 
 All ``read_at`` / ``received_at`` timestamps are timezone-aware UTC.
 Units are always SI with suffix in field name (``_kw``, ``_kwh``, ``_percent``).
+
+Capability Enumerations
+=======================
+``ReadCapability`` — validated read operations a device supports:
+    - ``state``  : typed domain state via ``get_state()``
+    - ``power``  : real-time power measurement (kW)
+    - ``energy`` : cumulative energy counters (kWh)
+    - ``soc``    : state-of-charge percentage (batteries only)
+
+``WriteCapability`` — validated write/control operations a device supports:
+    - ``set_charge_rate``       : set battery/EV charge power
+    - ``set_discharge_rate``    : set battery discharge power
+    - ``set_operating_mode``    : set inverter/battery operating mode
+    - ``set_ev_charge_current`` : set EV charger current limit
+
+``CapabilityStatus`` — overall profile completeness:
+    - ``full``        : all capabilities for the device type are validated
+    - ``reduced``     : partial support; one or more capabilities absent
+    - ``unsupported`` : capability explicitly not supported for this model
 """
 
 from __future__ import annotations
@@ -157,15 +176,62 @@ class DegradedDeviceState(BaseModel):
         return _require_utc(value, "occurred_at")
 
 
+class ReadCapability(enum.StrEnum):
+    """Validated read operations that a device model supports."""
+
+    state = "state"
+    power = "power"
+    energy = "energy"
+    soc = "soc"
+
+
+class WriteCapability(enum.StrEnum):
+    """Validated write/control operations that a device model supports."""
+
+    set_charge_rate = "set_charge_rate"
+    set_discharge_rate = "set_discharge_rate"
+    set_operating_mode = "set_operating_mode"
+    set_ev_charge_current = "set_ev_charge_current"
+
+
+class CapabilityStatus(enum.StrEnum):
+    """Overall completeness of a device capability profile."""
+
+    full = "full"
+    reduced = "reduced"
+    unsupported = "unsupported"
+
+
 class DeviceCapabilityProfile(BaseModel):
-    """Per-device capability profile. Expanded in Story 4.4."""
+    """Per-device capability profile with validated read/write capability sets.
+
+    Profiles are declared in ``adapters/capabilities/`` per device model and are
+    keyed by model string in the capability registry. The ``device_id`` is
+    substituted at lookup time; profiles in the registry use ``"__placeholder__"``
+    as a sentinel. The ``firmware_version`` parameter is accepted but firmware
+    range matching is deferred to a future story — all known profiles accept any
+    firmware value in Epic 4.
+
+    ``capability_status`` reflects overall completeness:
+    - ``CapabilityStatus.full``        — all validated capabilities present
+    - ``CapabilityStatus.reduced``     — partial support (e.g., unknown model)
+    - ``CapabilityStatus.unsupported`` — capability not supported for this model
+
+    Higher layers (Epic 7 decision engine, Epic 8 PolicyGuard) must only act on
+    capabilities present in ``read_capabilities`` / ``write_capabilities``.
+    Absent capabilities are never exposed (FR6b).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     device_id: NonEmptyStr
     model: str
     firmware_version: str | None = None
-    capability_status: Literal["full", "reduced", "unknown"] = "unknown"
+    capability_status: CapabilityStatus = CapabilityStatus.unsupported
+    read_capabilities: frozenset[ReadCapability] = frozenset()
+    write_capabilities: frozenset[WriteCapability] = frozenset()
+    known_limitations: tuple[str, ...] = ()
+    limitation_reason: str | None = None
 
 
 @runtime_checkable

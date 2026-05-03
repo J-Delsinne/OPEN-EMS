@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import structlog
 from pydantic import ValidationError
 
+from open_ems.adapters.capabilities import get_profile
 from open_ems.adapters.modbus.register_maps import (
     BatteryRegisterMap,
     BydHvmV1,
@@ -89,13 +90,20 @@ class BatteryAdapter:
             return self._to_degraded(reason, raw.read_at)
 
     async def get_capabilities(self) -> DeviceCapabilityProfile:
-        """Return a stub capability profile (expanded in Story 4.4)."""
-        return DeviceCapabilityProfile(
+        profile = get_profile(
             device_id=self.device_id,
             model=self._model,
             firmware_version=None,
-            capability_status="full",
         )
+        if profile.limitation_reason is not None:
+            logger.warning(
+                "capability_profile_unknown",
+                component="adapters",
+                device_id=self.device_id,
+                model=self._model,
+                firmware_version=None,
+            )
+        return profile
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
         logger.warning(

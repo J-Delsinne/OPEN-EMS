@@ -1,6 +1,13 @@
 # Deferred Work Log
 
-## Deferred from: code review of 1-1-initialize-project-repository-with-uv-and-dependency-lockfile (2026-05-01)
+## Deferred from: code review of 4-4-implement-device-capability-profile-system-and-capability-gate (2026-05-03)
+
+- **Template profiles with `device_id="__placeholder__"` in public `__all__`** — direct dict import bypasses `get_profile` and returns profiles with a fake device identity; consider removing from `__all__` or documenting the hazard explicitly.
+- **`_SUPPORTED_MODELS` and capability registry have no cross-validation** — adding a model to an adapter's `_SUPPORTED_MODELS` without adding it to the capability registry silently degrades to a REDUCED profile; a startup assertion could guard this.
+- **`model: str` on `DeviceCapabilityProfile` allows empty/whitespace** — pre-existing field; replacing with `NonEmptyStr` would be more defensive, consistent with `device_id`.
+- **`model_copy` in `get_profile()` could propagate accidental `limitation_reason` from a misconfigured template** — theoretical risk; all current templates are clean; add a no-`limitation_reason` invariant test if templates grow complex.
+
+
 
 - **Unbounded `>=` version constraints on all deps** — lockfile mitigates for locked installs; revisit if upgrading without lockfile or moving to library distribution
 - **`pytest-asyncio` future major-version risk** — lockfile protects until `uv lock --upgrade`; pin upper bound when upgrading
