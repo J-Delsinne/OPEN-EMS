@@ -8,6 +8,7 @@ import structlog
 from fastapi import Request, Response
 from fastapi.exceptions import HTTPException
 
+from open_ems.core import StateStore
 from open_ems.settings import get_settings
 from open_ems.storage.repositories.session_repo import SessionRepo, hash_token
 from open_ems.storage.repositories.user_repo import UserRepo
@@ -66,8 +67,24 @@ class AuthenticatedUser:
     csrf_token: str
 
 
+@dataclass(frozen=True)
+class StreamUser:
+    user_id: str
+    role: str
+    session_id: str
+    session_token_hash: str
+    expires_at: datetime
+
+
 InstallerUser = AuthenticatedUser
 HomeownerUser = AuthenticatedUser
+
+
+def get_state_store(request: Request) -> StateStore:
+    state_store = getattr(request.app.state, "state_store", None)
+    if not isinstance(state_store, StateStore):
+        raise HTTPException(status_code=503, detail="State store unavailable")
+    return state_store
 
 
 def _next_url(request: Request) -> str:
@@ -97,7 +114,7 @@ async def _resolve_session(request: Request) -> AuthenticatedUser | None:
     expires_at = _parse_expires_at(str(session_row["expires_at"]))
     now = datetime.now(UTC)
 
-    if expires_at is None or now > expires_at:
+    if expires_at is None or now >= expires_at:
         await session_repo.delete_by_id(str(session_row["id"]))
         user_row = await UserRepo().get_by_id(str(session_row["user_id"]))
         logger.info(
@@ -138,6 +155,67 @@ async def _resolve_session(request: Request) -> AuthenticatedUser | None:
         session_id=str(session_row["id"]),
         csrf_token=str(session_row["csrf_token"]),
     )
+
+
+async def require_stream_user(request: Request) -> StreamUser:
+    raw_token = request.cookies.get(_COOKIE_NAME)
+    if not raw_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    token_hash = hash_token(raw_token)
+    session_row = await SessionRepo().get_by_token_hash(token_hash)
+    if session_row is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    expires_at = _parse_expires_at(str(session_row["expires_at"]))
+    now = datetime.now(UTC)
+    if expires_at is None or now >= expires_at:
+        await SessionRepo().delete_by_id(str(session_row["id"]))
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+            headers={"Set-Cookie": _expired_session_cookie_header()},
+        )
+
+    user_row = await UserRepo().get_by_id(str(session_row["user_id"]))
+    if user_row is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    role = str(user_row["role"])
+    if role not in {"installer", "homeowner"}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return StreamUser(
+        user_id=str(user_row["id"]),
+        role=role,
+        session_id=str(session_row["id"]),
+        session_token_hash=token_hash,
+        expires_at=expires_at,
+    )
+
+
+async def stream_session_is_valid(
+    *,
+    session_token_hash: str,
+    session_id: str,
+    user_id: str,
+    expected_role: str,
+) -> bool:
+    session_row = await SessionRepo().get_by_token_hash(session_token_hash)
+    if (
+        session_row is None
+        or str(session_row["id"]) != session_id
+        or str(session_row["user_id"]) != user_id
+    ):
+        return False
+    expires_at = _parse_expires_at(str(session_row["expires_at"]))
+    if expires_at is None or datetime.now(UTC) >= expires_at:
+        await SessionRepo().delete_by_id(str(session_row["id"]))
+        return False
+    user_row = await UserRepo().get_by_id(str(session_row["user_id"]))
+    if user_row is None or str(user_row["role"]) != expected_role:
+        return False
+    return True
 
 
 async def require_installer(request: Request, response: Response) -> InstallerUser:

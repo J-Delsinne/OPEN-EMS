@@ -10,6 +10,7 @@ import structlog
 from fastapi import FastAPI
 from pydantic import SecretStr, ValidationError
 
+from open_ems.core import StateStore
 from open_ems.logging_config import configure_logging
 from open_ems.services.readiness import mark_ready, sd_notify
 from open_ems.services.time_sync import check_clock
@@ -23,6 +24,7 @@ from open_ems.web.routes.auth import router as auth_router
 from open_ems.web.routes.health import router as health_router
 from open_ems.web.routes.homeowner import router as homeowner_router
 from open_ems.web.routes.installer import router as installer_router
+from open_ems.web.routes.stream import router as stream_router
 
 logger = structlog.get_logger(__name__)
 
@@ -139,6 +141,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             system_clock_status=clock_status,
             component="startup",
         )
+    app.state.state_store = StateStore(system_clock_status=clock_status)
 
     # Step 4: Open database connection
     await init_database(settings.db_path)
@@ -207,5 +210,6 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(installer_router)
     app.include_router(homeowner_router)
+    app.include_router(stream_router)
     app.add_middleware(CsrfMiddleware)  # Runs first on every request
     return app
