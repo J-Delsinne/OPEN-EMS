@@ -121,3 +121,11 @@
 - **`EVChargerState` cross-field consistency not validated** [`src/open_ems/core/devices.py:EVChargerState`] — `status="available"` + `session_active=True` accepted; out of scope for Story 4.1 (structural model only); add a model validator in Story 4.3 or 4.4
 - **`DeviceAdapter.device_id: str` allows empty string** [`src/open_ems/core/devices.py:DeviceAdapter`] — intentional per spec (`str`, not `NonEmptyStr`); consider documenting the invariant in the protocol docstring in a future story
 - **mypy pre-commit hook lacks explicit `--strict` in `args`** [`.pre-commit-config.yaml:mypy hook`] — relies on `pyproject.toml` (`strict = true` confirmed); works correctly in standard usage; add `--strict` to args as belt-and-suspenders if the config is ever moved
+
+## Deferred from: code review of 4-2-implement-modbus-device-normalization-with-register-maps (2025-06-03)
+
+- **Shared singleton register map instances** [inverter_adapter.py, battery_adapter.py] -- _SUPPORTED_MODELS holds module-level singletons; currently safe (maps are stateless), but latent contamination risk if future maps accumulate per-call state. Revisit if register maps add mutable fields.
+- **Huawei _DEVICE_STATUS_MAP missing value 3** [huawei_sun2000_v3.py] -- gap between status codes 2 and 4; silently yields 'unknown'. Defer until real Huawei SUN2000 register specification is confirmed for this status code range.
+- **ValidationError reason string unbounded** -- large register dumps or long error text can appear in DegradedDeviceState.reason without truncation. Pre-existing NonEmptyStr has no max_length.
+- **BYD register gap at address 103** [byd_hvs_v1.py, byd_hvm_v1.py] -- address 103 skipped between _REG_POWER_W=102 and _REG_DIRECTION=104 with no comment; may be a reserved/unused BYD register. Confirm when real BYD HVS/HVM Modbus spec is available.
+- **int16()/uint16() accept out-of-range inputs silently** [register_maps/utils.py] -- no 16-bit bounds enforcement; upstream Modbus protocol layer expected to deliver valid values. Add bounds check if a protocol-layer gap is found.
