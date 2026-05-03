@@ -623,7 +623,9 @@ async def test_successful_command_clears_last_call_error() -> None:
 
     raw_after_error = await adapter.get_raw_state()
     assert isinstance(raw_after_error, RawOCPPState)
-    assert raw_after_error.last_call_error is not None, "last_call_error should be set after failure"
+    assert raw_after_error.last_call_error is not None, (
+        "last_call_error should be set after failure"
+    )
 
     # Step 2: send a successful command and verify last_call_error is cleared.
     async def charger_ok() -> None:
@@ -639,7 +641,9 @@ async def test_successful_command_clears_last_call_error() -> None:
     raw_after_ok = await adapter.get_raw_state()
     assert isinstance(raw_after_ok, RawOCPPState)
     assert raw_after_ok.last_call_result == {"status": "Accepted"}
-    assert raw_after_ok.last_call_error is None, "last_call_error must be cleared after a successful command"
+    assert raw_after_ok.last_call_error is None, (
+        "last_call_error must be cleared after a successful command"
+    )
 
     ws.close()
     await asyncio.wait_for(loop_task, timeout=2.0)

@@ -44,11 +44,15 @@ def _raw(registers: dict[int, int], device_id: str = "inv-001") -> RawModbusStat
     return RawModbusState(device_id=device_id, registers=registers, read_at=_NOW)
 
 
-def _degraded_protocol(device_id: str = "inv-001", reason: str = "modbus_timeout") -> ProtocolDegradedState:
+def _degraded_protocol(
+    device_id: str = "inv-001", reason: str = "modbus_timeout"
+) -> ProtocolDegradedState:
     return ProtocolDegradedState(device_id=device_id, reason=reason, occurred_at=_NOW)
 
 
-def _make_adapter(model: str, device_id: str = "inv-001") -> tuple[InverterAdapter, FakeProtocolAdapter]:
+def _make_adapter(
+    model: str, device_id: str = "inv-001"
+) -> tuple[InverterAdapter, FakeProtocolAdapter]:
     fake = FakeProtocolAdapter()
     adapter = InverterAdapter(device_id=device_id, protocol_adapter=fake, model=model)  # type: ignore[arg-type]
     return adapter, fake

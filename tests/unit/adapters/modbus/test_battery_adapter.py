@@ -44,22 +44,26 @@ def _raw(registers: dict[int, int], device_id: str = "bat-001") -> RawModbusStat
     return RawModbusState(device_id=device_id, registers=registers, read_at=_NOW)
 
 
-def _degraded_protocol(device_id: str = "bat-001", reason: str = "modbus_timeout") -> ProtocolDegradedState:
+def _degraded_protocol(
+    device_id: str = "bat-001", reason: str = "modbus_timeout"
+) -> ProtocolDegradedState:
     return ProtocolDegradedState(device_id=device_id, reason=reason, occurred_at=_NOW)
 
 
-def _make_adapter(model: str, device_id: str = "bat-001") -> tuple[BatteryAdapter, FakeProtocolAdapter]:
+def _make_adapter(
+    model: str, device_id: str = "bat-001"
+) -> tuple[BatteryAdapter, FakeProtocolAdapter]:
     fake = FakeProtocolAdapter()
     adapter = BatteryAdapter(device_id=device_id, protocol_adapter=fake, model=model)  # type: ignore[arg-type]
     return adapter, fake
 
 
 # BYD HVS registers
-_HVS_REGS_CHARGE = {100: 500, 101: 150, 102: 2000, 104: 0, 105: 0}  # soc=50%, cap=15kWh, 2kW charge
+_HVS_REGS_CHARGE = {100: 500, 101: 150, 102: 2000, 104: 0, 105: 0}  # soc=50%, cap=15kWh, 2kW
 _HVS_REGS_DISCHARGE = {100: 500, 101: 150, 102: 3000, 104: 1, 105: 0}  # soc=50%, 3kW discharge
 
 # BYD HVM registers
-_HVM_REGS_CHARGE = {200: 800, 201: 200, 202: 1500, 204: 0, 205: 0}  # soc=80%, cap=20kWh, 1.5kW charge
+_HVM_REGS_CHARGE = {200: 800, 201: 200, 202: 1500, 204: 0, 205: 0}  # soc=80%, cap=20kWh, 1.5kW
 _HVM_REGS_DISCHARGE = {200: 800, 201: 200, 202: 1500, 204: 1, 205: 0}  # soc=80%, 1.5kW discharge
 
 
