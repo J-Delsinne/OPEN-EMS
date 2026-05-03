@@ -120,7 +120,7 @@ so that the system can communicate with EV chargers using the charger-initiates-
 ### Review Follow-ups (AI)
 
 - [x] [Review][Decision] Heartbeat staleness does not emit `adapter_disconnected` log — Decision: keep as-is; heartbeat timeout is a distinct liveness condition from physical disconnect. [`central_system.py` `get_raw_state()` L176-179]
-- [x] [Review][Decision] `last_call_error` not cleared after subsequent successful command — Decision: no change; each field reflects the most recent of that event type independently. [`central_system.py` `send_raw_command()` L251-252]
+- [x] [Review][Decision→Fixed] `last_call_error` not cleared after subsequent successful command — Initially deferred (each field reflects most recent event independently). Reversed 2026-05-03: fixed by clearing `last_call_error = None` on success path (Story 3.3 C2). [`central_system.py` `send_raw_command()`]
 - [x] [Review][Patch] `except Exception: pass` swallows programming errors silently — Fixed: now logs `event="adapter_connection_error"` with exception type and detail. [`central_system.py` L159-160]
 - [x] [Review][Patch] `on_heartbeat` captures `datetime.now(UTC)` twice — Fixed: captured once, reused for both `last_heartbeat_at` and CALLRESULT. [`central_system.py` L116-117]
 - [x] [Review][Defer] `OCPPCentralSystem.register()` silently overwrites existing adapter — no guard or warning if called twice for the same `charge_point_id`. Pre-existing design choice; no story requirement to guard it. [`central_system.py` L274-278] — deferred, pre-existing
@@ -439,10 +439,10 @@ Return `protocol_status="error"` for: unknown action (class not in `ocpp.v16.cal
 
 #### Action Items
 
-- [ ] [High] Heartbeat staleness should emit `adapter_disconnected` log — AC3 violation in spirit (decision needed on scope)
-- [ ] [High] `except Exception: pass` swallows programming errors — violates AC5 anti-pattern rule from Dev Notes
-- [ ] [Med] `last_call_error` not cleared after successful subsequent command — misleading state for consumers
-- [ ] [Low] `on_heartbeat` captures `datetime.now(UTC)` twice — inconsistent timestamps
+- [x] [High] Heartbeat staleness should emit `adapter_disconnected` log — AC3 violation in spirit (decision needed on scope)
+- [x] [High] `except Exception: pass` swallows programming errors — violates AC5 anti-pattern rule from Dev Notes
+- [x] [Med] `last_call_error` not cleared after successful subsequent command — misleading state for consumers
+- [x] [Low] `on_heartbeat` captures `datetime.now(UTC)` twice — inconsistent timestamps
 - [x] [Low] `register()` silently overwrites adapters — deferred as pre-existing design choice
 
 ### Agent Model Used

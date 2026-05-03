@@ -595,6 +595,54 @@ async def test_per_instance_isolation() -> None:
     ws2.close()
     await asyncio.wait_for(task1, timeout=2.0)
     await asyncio.wait_for(task2, timeout=2.0)
+# ---------------------------------------------------------------------------
+
+
+async def test_successful_command_clears_last_call_error() -> None:
+    """A successful command after an error must clear last_call_error (Story 3.3 C2)."""
+    ws = _FakeWebSocket()
+    adapter = OCPPChargerAdapter(make_config())
+    loop_task = await connect_charger(ws, adapter)
+
+    command = RawProtocolCommand(
+        correlation_id="lifecycle-1",
+        device_id="ev-1",
+        command_name="ChangeAvailability",
+        payload={"connector_id": 0, "type": "Operative"},
+    )
+
+    # Step 1: trigger an error response so last_call_error is set.
+    async def charger_error() -> None:
+        msg_str = await asyncio.wait_for(ws.client_recv(), timeout=2.0)
+        unique_id = json.loads(msg_str)[1]
+        await ws.client_send(json.dumps([4, unique_id, "NotImplemented", "Not supported", {}]))
+
+    err_task: asyncio.Task[None] = asyncio.create_task(charger_error())
+    await asyncio.wait_for(adapter.send_raw_command(command), timeout=2.0)
+    await asyncio.wait_for(err_task, timeout=2.0)
+
+    raw_after_error = await adapter.get_raw_state()
+    assert isinstance(raw_after_error, RawOCPPState)
+    assert raw_after_error.last_call_error is not None, "last_call_error should be set after failure"
+
+    # Step 2: send a successful command and verify last_call_error is cleared.
+    async def charger_ok() -> None:
+        msg_str = await asyncio.wait_for(ws.client_recv(), timeout=2.0)
+        unique_id = json.loads(msg_str)[1]
+        await ws.client_send(json.dumps([3, unique_id, {"status": "Accepted"}]))
+
+    ok_task: asyncio.Task[None] = asyncio.create_task(charger_ok())
+    result = await asyncio.wait_for(adapter.send_raw_command(command), timeout=2.0)
+    await asyncio.wait_for(ok_task, timeout=2.0)
+
+    assert result.protocol_status == "acked"
+    raw_after_ok = await adapter.get_raw_state()
+    assert isinstance(raw_after_ok, RawOCPPState)
+    assert raw_after_ok.last_call_result == {"status": "Accepted"}
+    assert raw_after_ok.last_call_error is None, "last_call_error must be cleared after a successful command"
+
+    ws.close()
+    await asyncio.wait_for(loop_task, timeout=2.0)
 
 
 # ---------------------------------------------------------------------------

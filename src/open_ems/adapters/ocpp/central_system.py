@@ -244,6 +244,7 @@ class OCPPChargerAdapter:
                 result_type=type(result).__name__,
             )
         self._state.last_call_result = result_dict
+        self._state.last_call_error = None
         return ProtocolCommandResult(
             correlation_id=command.correlation_id,
             device_id=command.device_id,
