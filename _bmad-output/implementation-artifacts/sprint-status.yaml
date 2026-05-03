@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-03T23:30:00+02:00'
+last_updated: '2026-05-03T23:25:00+02:00'
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -80,8 +80,8 @@ development_status:
   epic-4-retrospective: done
 
   # ─── Epic 5: State Aggregation and Real-Time Distribution ──────────────────
-  epic-5: backlog
-  5-1-define-system-state-model-and-implement-statestore-with-immutable-versioned-snapshots: backlog
+  epic-5: in-progress
+  5-1-define-system-state-model-and-implement-statestore-with-immutable-versioned-snapshots: done
   5-2-implement-sse-state-stream-with-role-filtered-serialization-and-event-metadata: backlog
   5-3-implement-htmx-polling-endpoints-and-per-device-stale-and-unavailable-detection: backlog
   epic-5-retrospective: optional
