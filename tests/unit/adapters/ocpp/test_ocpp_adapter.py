@@ -849,6 +849,100 @@ async def test_callerror_logs_adapter_protocol_error() -> None:
     await asyncio.wait_for(loop_task, timeout=2.0)
 
 
+# ---------------------------------------------------------------------------
+# MeterValues — on_meter_values handler (P2)
+# ---------------------------------------------------------------------------
+
+
+async def test_meter_values_power_w_updates_state() -> None:
+    ws = _FakeWebSocket()
+    adapter = OCPPChargerAdapter(make_config())
+    loop_task = await connect_charger(ws, adapter)
+
+    mv_payload = {
+        "connectorId": 1,
+        "meterValue": [
+            {
+                "timestamp": "2024-01-15T12:00:00Z",
+                "sampledValue": [
+                    {"value": "7400", "measurand": "Power.Active.Import", "unit": "W"}
+                ],
+            }
+        ],
+    }
+    await ws.client_send(json.dumps([2, "mv-1", "MeterValues", mv_payload]))
+    mv_response = json.loads(await asyncio.wait_for(ws.client_recv(), timeout=2.0))
+    assert mv_response[0] == 3
+
+    state = await adapter.get_raw_state()
+    assert isinstance(state, RawOCPPState)
+    assert state.last_meter_values_power_kw == pytest.approx(7.4)
+    assert state.last_meter_values_at is not None
+    assert state.last_meter_values_at == datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
+
+    ws.close()
+    await asyncio.wait_for(loop_task, timeout=2.0)
+
+
+async def test_meter_values_power_kw_updates_state() -> None:
+    ws = _FakeWebSocket()
+    adapter = OCPPChargerAdapter(make_config())
+    loop_task = await connect_charger(ws, adapter)
+
+    mv_payload = {
+        "connectorId": 1,
+        "meterValue": [
+            {
+                "timestamp": "2024-01-15T12:00:00Z",
+                "sampledValue": [
+                    {"value": "7.4", "measurand": "Power.Active.Import", "unit": "kW"}
+                ],
+            }
+        ],
+    }
+    await ws.client_send(json.dumps([2, "mv-2", "MeterValues", mv_payload]))
+    await asyncio.wait_for(ws.client_recv(), timeout=2.0)
+
+    state = await adapter.get_raw_state()
+    assert isinstance(state, RawOCPPState)
+    assert state.last_meter_values_power_kw == pytest.approx(7.4)
+
+    ws.close()
+    await asyncio.wait_for(loop_task, timeout=2.0)
+
+
+async def test_meter_values_non_power_measurand_does_not_update_state() -> None:
+    ws = _FakeWebSocket()
+    adapter = OCPPChargerAdapter(make_config())
+    loop_task = await connect_charger(ws, adapter)
+
+    mv_payload = {
+        "connectorId": 1,
+        "meterValue": [
+            {
+                "timestamp": "2024-01-15T12:00:00Z",
+                "sampledValue": [
+                    {
+                        "value": "100",
+                        "measurand": "Energy.Active.Import.Register",
+                        "unit": "Wh",
+                    }
+                ],
+            }
+        ],
+    }
+    await ws.client_send(json.dumps([2, "mv-3", "MeterValues", mv_payload]))
+    await asyncio.wait_for(ws.client_recv(), timeout=2.0)
+
+    state = await adapter.get_raw_state()
+    assert isinstance(state, RawOCPPState)
+    assert state.last_meter_values_power_kw is None
+    assert state.last_meter_values_at is None
+
+    ws.close()
+    await asyncio.wait_for(loop_task, timeout=2.0)
+
+
 async def test_last_status_notification_overwritten_by_status_notification() -> None:
     """StatusNotification overwrites last_status_notification set by BootNotification."""
     ws = _FakeWebSocket()

@@ -50,7 +50,10 @@
       "Bash(python -c \"import starlette; print\\(starlette.__version__\\)\")",
       "Bash(python -c \"import jinja2; print\\(jinja2.__version__\\)\")",
       "Bash(python -m ruff format --check .)",
-      "Bash(python -m ruff format .)"
+      "Bash(python -m ruff format .)",
+      "Bash(python -m ruff check src/open_ems/services/readiness.py src/open_ems/services/time_sync.py)",
+      "Bash(python -m mypy src/open_ems/services/readiness.py src/open_ems/services/time_sync.py)",
+      "Bash(python -m pytest tests/ -x -q)"
     ]
   }
 }

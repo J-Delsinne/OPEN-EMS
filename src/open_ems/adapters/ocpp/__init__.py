@@ -5,8 +5,10 @@ from open_ems.adapters.ocpp.central_system import (
     OCPPCentralSystem,
     OCPPChargerAdapter,
 )
+from open_ems.adapters.ocpp.charger_adapter import EVChargerAdapter
 
 __all__ = [
+    "EVChargerAdapter",
     "OCPPAdapterConfig",
     "OCPPCentralSystem",
     "OCPPChargerAdapter",

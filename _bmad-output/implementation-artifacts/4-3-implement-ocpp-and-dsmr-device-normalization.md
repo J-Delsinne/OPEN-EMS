@@ -1,6 +1,6 @@
 # Story 4.3: Implement OCPP and DSMR device normalization
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -76,34 +76,34 @@ so that the EV charger and grid meter are available to the decision engine throu
 
 ## Tasks / Subtasks
 
-- [ ] **Task 0: Pre-story quality gate** (AC: all)
-  - [ ] Run `uv run python -m pytest tests/ --no-cov -q` — confirm 348 tests pass
-  - [ ] Run `uv run python -m ruff check .`
-  - [ ] Run `uv run python -m mypy src/`
+- [x] **Task 0: Pre-story quality gate** (AC: all)
+  - [x] Run `uv run python -m pytest tests/ --no-cov -q` — confirm 348 tests pass
+  - [x] Run `uv run python -m ruff check .`
+  - [x] Run `uv run python -m mypy src/`
 
-- [ ] **Task 1: Extend `EVChargerState` with MeterValues data-quality fields** (AC: AC2, AC6)
-  - [ ] In `src/open_ems/core/devices.py`, add to `EVChargerState`:
+- [x] **Task 1: Extend `EVChargerState` with MeterValues data-quality fields** (AC: AC2, AC6)
+  - [x] In `src/open_ems/core/devices.py`, add to `EVChargerState`:
     - `power_source: Literal["meter_values"] | None = None`
     - `power_measured_at: datetime | None = None`
-  - [ ] Add a field validator for `power_measured_at` using the same `_require_utc()` pattern as `read_at`; must be a no-op when value is `None`
-  - [ ] Update the module docstring if needed (sign conventions don't change)
+  - [x] Add a field validator for `power_measured_at` using the same `_require_utc()` pattern as `read_at`; must be a no-op when value is `None`
+  - [x] Update the module docstring if needed (sign conventions don't change)
 
-- [ ] **Task 2: Extend `RawOCPPState` and `OCPPChargerAdapter` for MeterValues** (AC: AC7)
-  - [ ] In `src/open_ems/adapters/protocol.py`, add to `RawOCPPState`:
+- [x] **Task 2: Extend `RawOCPPState` and `OCPPChargerAdapter` for MeterValues** (AC: AC7)
+  - [x] In `src/open_ems/adapters/protocol.py`, add to `RawOCPPState`:
     - `last_meter_values_at: datetime | None = None`
     - `last_meter_values_power_kw: float | None = None`
-  - [ ] Add a field validator for `last_meter_values_at` using `_require_utc()` pattern (no-op when `None`)
-  - [ ] In `src/open_ems/adapters/ocpp/central_system.py`:
+  - [x] Add a field validator for `last_meter_values_at` using `_require_utc()` pattern (no-op when `None`)
+  - [x] In `src/open_ems/adapters/ocpp/central_system.py`:
     - Add `last_meter_values_at: datetime | None = None` and `last_meter_values_power_kw: float | None = None` to `_ChargerState.__init__`
     - Add `@on(Action.meter_values)` handler in `_InternalChargePoint` — extract `Power.Active.Import` measurand value (convert from string to float, divide by 1 if unit is already kW; see Dev Notes for measurand extraction)
     - Update `OCPPChargerAdapter.get_raw_state()` to pass `last_meter_values_at` and `last_meter_values_power_kw` to `RawOCPPState`
 
-- [ ] **Task 3: Create `EVChargerAdapter`** (AC: AC1, AC2, AC5, AC6, AC8)
-  - [ ] Create `src/open_ems/adapters/ocpp/charger_adapter.py` (matches architecture spec `ocpp/charger_adapter.py`)
-  - [ ] Accept `device_id: str` and `protocol_adapter: OCPPChargerAdapter` explicitly in `__init__` — do NOT access `protocol_adapter.config.device_id` (Device ID Access Rule from Story 4.2)
-  - [ ] `connect()` → no-op with docstring explaining OCPP is charger-initiated; WebSocket server manages connection via `OCPPCentralSystem.handle_charger()`
-  - [ ] `disconnect()` → no-op with docstring (OCPP disconnect is charger-driven; no `close()` exists on protocol adapter)
-  - [ ] `get_state()`:
+- [x] **Task 3: Create `EVChargerAdapter`** (AC: AC1, AC2, AC5, AC6, AC8)
+  - [x] Create `src/open_ems/adapters/ocpp/charger_adapter.py` (matches architecture spec `ocpp/charger_adapter.py`)
+  - [x] Accept `device_id: str` and `protocol_adapter: OCPPChargerAdapter` explicitly in `__init__` — do NOT access `protocol_adapter.config.device_id` (Device ID Access Rule from Story 4.2)
+  - [x] `connect()` → no-op with docstring explaining OCPP is charger-initiated; WebSocket server manages connection via `OCPPCentralSystem.handle_charger()`
+  - [x] `disconnect()` → no-op with docstring (OCPP disconnect is charger-driven; no `close()` exists on protocol adapter)
+  - [x] `get_state()`:
     - Call `await self._protocol_adapter.get_raw_state()`
     - If `ProtocolDegradedState` → log `device_degraded` and return `DegradedDeviceState(role=DeviceRole.ev_charger, ...)`
     - If `RawOCPPState` with `last_status_notification is None` → check `raw.connection_status`:
@@ -113,67 +113,67 @@ so that the EV charger and grid meter are available to the decision engine throu
     - For unknown OCPP status → `DegradedDeviceState(reason=f"ocpp_unknown_status:{raw_status}")`
     - Set `current_power_kw`, `power_source`, `power_measured_at` from `raw.last_meter_values_*` (see MeterValues Mapping in Dev Notes)
     - Return `EVChargerState(device_id=self.device_id, ..., read_at=datetime.now(UTC))`
-  - [ ] `get_capabilities()` → return `DeviceCapabilityProfile(device_id=self.device_id, model="ocpp_1_6", capability_status="full")`
+  - [x] `get_capabilities()` → return `DeviceCapabilityProfile(device_id=self.device_id, model="ocpp_1_6", capability_status="full")`
 
-- [ ] **Task 4: Update `src/open_ems/adapters/ocpp/__init__.py`** (AC: AC8)
-  - [ ] Add `EVChargerAdapter` import from `charger_adapter` and add to `__all__`
+- [x] **Task 4: Update `src/open_ems/adapters/ocpp/__init__.py`** (AC: AC8)
+  - [x] Add `EVChargerAdapter` import from `charger_adapter` and add to `__all__`
 
-- [ ] **Task 5: Create `GridMeterAdapter`** (AC: AC3, AC4, AC5, AC8)
-  - [ ] Create `src/open_ems/adapters/dsmr/meter_adapter.py` (matches architecture spec `dsmr/meter_adapter.py`)
-  - [ ] Accept `device_id: str` and `protocol_adapter: DSMRAdapter` explicitly in `__init__`
-  - [ ] Define `_DSMR_STALE_SECONDS: float = 60.0` as a module-level constant
-  - [ ] `connect()` → `await self._protocol_adapter.start()` (starts the background read loop)
-  - [ ] `disconnect()` → `await self._protocol_adapter.stop()` (cancels the background read loop)
-  - [ ] `get_state()`:
+- [x] **Task 5: Create `GridMeterAdapter`** (AC: AC3, AC4, AC5, AC8)
+  - [x] Create `src/open_ems/adapters/dsmr/meter_adapter.py` (matches architecture spec `dsmr/meter_adapter.py`)
+  - [x] Accept `device_id: str` and `protocol_adapter: DSMRAdapter` explicitly in `__init__`
+  - [x] Define `_DSMR_STALE_SECONDS: float = 60.0` as a module-level constant
+  - [x] `connect()` → `await self._protocol_adapter.start()` (starts the background read loop)
+  - [x] `disconnect()` → `await self._protocol_adapter.stop()` (cancels the background read loop)
+  - [x] `get_state()`:
     - Call `await self._protocol_adapter.get_raw_state()`
     - If `ProtocolDegradedState` → log `device_degraded` and return `DegradedDeviceState(role=DeviceRole.grid_meter, ...)`
     - If `RawDSMRState`: domain-level staleness check — if `(datetime.now(UTC) - raw.received_at).total_seconds() > _DSMR_STALE_SECONDS` → `DegradedDeviceState(reason="dsmr_stale")`
     - Call `_map_telegram(raw)` to extract `GridMeterState` — raises `MissingDSMRFieldError` on missing OBIS key; catch and return `DegradedDeviceState`
-  - [ ] Define `MissingDSMRFieldError(Exception)` in this module — `__init__(self, key: str)` with `self.key = key; super().__init__(f"missing_dsmr_field:{key}")`
-  - [ ] `_map_telegram(raw: RawDSMRState) -> GridMeterState` — extract OBIS fields, apply sign convention, validate `ValidationError` from Pydantic (see DSMR Field Extraction in Dev Notes)
-  - [ ] `get_capabilities()` → return `DeviceCapabilityProfile(device_id=self.device_id, model="dsmr_p1", capability_status="full")`
+  - [x] Define `MissingDSMRFieldError(Exception)` in this module — `__init__(self, key: str)` with `self.key = key; super().__init__(f"missing_dsmr_field:{key}")`
+  - [x] `_map_telegram(raw: RawDSMRState) -> GridMeterState` — extract OBIS fields, apply sign convention, validate `ValidationError` from Pydantic (see DSMR Field Extraction in Dev Notes)
+  - [x] `get_capabilities()` → return `DeviceCapabilityProfile(device_id=self.device_id, model="dsmr_p1", capability_status="full")`
 
-- [ ] **Task 6: Update `src/open_ems/adapters/dsmr/__init__.py`** (AC: AC8)
-  - [ ] Add `GridMeterAdapter` import from `meter_adapter` and add to `__all__`
+- [x] **Task 6: Update `src/open_ems/adapters/dsmr/__init__.py`** (AC: AC8)
+  - [x] Add `GridMeterAdapter` import from `meter_adapter` and add to `__all__`
 
-- [ ] **Task 7: Write unit tests for `EVChargerAdapter`** (AC: AC1, AC2, AC5, AC8 tests)
-  - [ ] Create `tests/unit/adapters/ocpp/test_charger_adapter.py`
-  - [ ] Use `FakeOCPPProtocolAdapter` (controls `get_raw_state()` return value; does NOT need to be a full `OCPPChargerAdapter` — see Fake Adapter Pattern in Dev Notes)
-  - [ ] Tests: each OCPP status → correct domain `status` and `session_active` (cover all 9 OCPP status values)
-  - [ ] Tests: `current_power_kw` is `None` when `last_meter_values_at is None` in `RawOCPPState`
-  - [ ] Tests: `current_power_kw`, `power_source="meter_values"`, `power_measured_at` correct when `last_meter_values_*` is populated
-  - [ ] Tests: `ProtocolDegradedState` in → `DegradedDeviceState(role=DeviceRole.ev_charger)` out
-  - [ ] Tests: no `last_status_notification` → `DegradedDeviceState(reason="ocpp_no_status")`
-  - [ ] Tests: unknown OCPP status string → `DegradedDeviceState` with reason containing the unknown status
-  - [ ] Tests: `connect()` is a no-op (no exception, no method call on fake adapter)
-  - [ ] Tests: `disconnect()` is a no-op (no exception, no method call on fake adapter)
-  - [ ] Tests: `isinstance(EVChargerAdapter(...), DeviceAdapter)` is `True`
-  - [ ] Tests: structlog `device_degraded` captured on degraded path (verify `event`, `component`, `device_id`, `role` fields)
+- [x] **Task 7: Write unit tests for `EVChargerAdapter`** (AC: AC1, AC2, AC5, AC8 tests)
+  - [x] Create `tests/unit/adapters/ocpp/test_charger_adapter.py`
+  - [x] Use `FakeOCPPProtocolAdapter` (controls `get_raw_state()` return value; does NOT need to be a full `OCPPChargerAdapter` — see Fake Adapter Pattern in Dev Notes)
+  - [x] Tests: each OCPP status → correct domain `status` and `session_active` (cover all 9 OCPP status values)
+  - [x] Tests: `current_power_kw` is `None` when `last_meter_values_at is None` in `RawOCPPState`
+  - [x] Tests: `current_power_kw`, `power_source="meter_values"`, `power_measured_at` correct when `last_meter_values_*` is populated
+  - [x] Tests: `ProtocolDegradedState` in → `DegradedDeviceState(role=DeviceRole.ev_charger)` out
+  - [x] Tests: no `last_status_notification` → `DegradedDeviceState(reason="ocpp_no_status")`
+  - [x] Tests: unknown OCPP status string → `DegradedDeviceState` with reason containing the unknown status
+  - [x] Tests: `connect()` is a no-op (no exception, no method call on fake adapter)
+  - [x] Tests: `disconnect()` is a no-op (no exception, no method call on fake adapter)
+  - [x] Tests: `isinstance(EVChargerAdapter(...), DeviceAdapter)` is `True`
+  - [x] Tests: structlog `device_degraded` captured on degraded path (verify `event`, `component`, `device_id`, `role` fields)
 
-- [ ] **Task 8: Write unit tests for `GridMeterAdapter`** (AC: AC3, AC4, AC5, AC8 tests)
-  - [ ] Create `tests/unit/adapters/dsmr/test_meter_adapter.py`
-  - [ ] Use `FakeDSMRProtocolAdapter` (controls `get_raw_state()` return; tracks `start()`/`stop()` calls — see Fake Adapter Pattern in Dev Notes)
-  - [ ] Tests: DSMR sign convention — usage field → positive `grid_power_kw`; delivery field → negative `grid_power_kw`; both zero → `grid_power_kw = 0.0`
-  - [ ] Tests: `energy_delivered_kwh` = tariff_1_usage + tariff_2_usage
-  - [ ] Tests: `energy_returned_kwh` = tariff_1_delivery + tariff_2_delivery
-  - [ ] Tests: staleness — `received_at` > 60s ago → `DegradedDeviceState(reason="dsmr_stale")`
-  - [ ] Tests: staleness boundary — `received_at` exactly 60s ago (edge) and 59s ago (not stale) — verify boundary
-  - [ ] Tests: `ProtocolDegradedState(reason="dsmr_stale")` in → `DegradedDeviceState(reason="dsmr_stale")` out
-  - [ ] Tests: `ProtocolDegradedState(reason="dsmr_unavailable")` in → `DegradedDeviceState` with reason preserved
-  - [ ] Tests: missing required OBIS key → `DegradedDeviceState` with `reason` containing the missing key (e.g., `"missing_dsmr_field:1-0:1.7.0"`)
-  - [ ] Tests: `connect()` calls `start()` on protocol adapter
-  - [ ] Tests: `disconnect()` calls `stop()` on protocol adapter
-  - [ ] Tests: `isinstance(GridMeterAdapter(...), DeviceAdapter)` is `True`
-  - [ ] Tests: structlog `device_degraded` captured on degraded path (verify `event`, `component`, `device_id`, `role` fields)
+- [x] **Task 8: Write unit tests for `GridMeterAdapter`** (AC: AC3, AC4, AC5, AC8 tests)
+  - [x] Create `tests/unit/adapters/dsmr/test_meter_adapter.py`
+  - [x] Use `FakeDSMRProtocolAdapter` (controls `get_raw_state()` return; tracks `start()`/`stop()` calls — see Fake Adapter Pattern in Dev Notes)
+  - [x] Tests: DSMR sign convention — usage field → positive `grid_power_kw`; delivery field → negative `grid_power_kw`; both zero → `grid_power_kw = 0.0`
+  - [x] Tests: `energy_delivered_kwh` = tariff_1_usage + tariff_2_usage
+  - [x] Tests: `energy_returned_kwh` = tariff_1_delivery + tariff_2_delivery
+  - [x] Tests: staleness — `received_at` > 60s ago → `DegradedDeviceState(reason="dsmr_stale")`
+  - [x] Tests: staleness boundary — `received_at` exactly 60s ago (edge) and 59s ago (not stale) — verify boundary
+  - [x] Tests: `ProtocolDegradedState(reason="dsmr_stale")` in → `DegradedDeviceState(reason="dsmr_stale")` out
+  - [x] Tests: `ProtocolDegradedState(reason="dsmr_unavailable")` in → `DegradedDeviceState` with reason preserved
+  - [x] Tests: missing required OBIS key → `DegradedDeviceState` with `reason` containing the missing key (e.g., `"missing_dsmr_field:1-0:1.7.0"`)
+  - [x] Tests: `connect()` calls `start()` on protocol adapter
+  - [x] Tests: `disconnect()` calls `stop()` on protocol adapter
+  - [x] Tests: `isinstance(GridMeterAdapter(...), DeviceAdapter)` is `True`
+  - [x] Tests: structlog `device_degraded` captured on degraded path (verify `event`, `component`, `device_id`, `role` fields)
 
-- [ ] **Task 9: Final validation** (AC: all)
-  - [ ] Run `uv run python -m ruff check .`
-  - [ ] Run `uv run python -m ruff format --check .`
-  - [ ] Run `uv run python -m mypy src/`
-  - [ ] Run `uv run python -m pytest tests/ --no-cov -q` — all tests pass
-  - [ ] Confirm: `isinstance(EVChargerAdapter(...), DeviceAdapter)` is `True`
-  - [ ] Confirm: `isinstance(GridMeterAdapter(...), DeviceAdapter)` is `True`
-  - [ ] Confirm: No `ProtocolDegradedState` or `RawOCPPState` or `RawDSMRState` re-exported from `open_ems.core`
+- [x] **Task 9: Final validation** (AC: all)
+  - [x] Run `uv run python -m ruff check .`
+  - [x] Run `uv run python -m ruff format --check .`
+  - [x] Run `uv run python -m mypy src/`
+  - [x] Run `uv run python -m pytest tests/ --no-cov -q` — all tests pass
+  - [x] Confirm: `isinstance(EVChargerAdapter(...), DeviceAdapter)` is `True`
+  - [x] Confirm: `isinstance(GridMeterAdapter(...), DeviceAdapter)` is `True`
+  - [x] Confirm: No `ProtocolDegradedState` or `RawOCPPState` or `RawDSMRState` re-exported from `open_ems.core`
 
 ## Dev Notes
 
@@ -547,23 +547,74 @@ Before marking this story done:
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-sonnet-4-6
 
 ### Debug Log References
 
+- ruff I001: dateutil import placed before structlog in central_system.py — fixed import order
+- ruff B904: bare `raise MissingDSMRFieldError(key)` inside except clause — fixed with `raise ... from exc`
+- mypy import-untyped: dateutil has no bundled stubs — added `dateutil.*` to mypy overrides in pyproject.toml (consistent with existing pattern for ocpp/pymodbus/dsmr_parser)
+
 ### Completion Notes List
+
+- Implemented `EVChargerAdapter` in `adapters/ocpp/charger_adapter.py`: maps all 9 OCPP status strings, MeterValues power extraction, negative power fail-fast, structlog `device_degraded` events
+- Implemented `GridMeterAdapter` in `adapters/dsmr/meter_adapter.py`: DSMR v5 OBIS extraction, sign convention (usage − delivery), 60s domain-level staleness gate independent of protocol layer, `MissingDSMRFieldError`
+- Extended `EVChargerState` with `power_source` and `power_measured_at` (UTC-validated)
+- Extended `RawOCPPState` with `last_meter_values_at` and `last_meter_values_power_kw` (UTC-validated)
+- Extended `_ChargerState` and added `@on(Action.meter_values)` handler in `_InternalChargePoint`; `datetime.fromisoformat` used for timestamp extraction (Python 3.12+, replaces dateutil dependency)
+- 36 new unit tests in initial implementation; +8 additional from review follow-ups (3 MeterValues protocol tests, P3/P6/D1 staleness tests, P7 rename)
+- Review follow-ups applied: D1 (MeterValues staleness guard `_OCPP_POWER_STALE_SECONDS=90.0`), P1 (device_id rule fix), P2 (on_meter_values tests), P3 (disconnected branch test), P4 (dateutil→fromisoformat), P5 (unknown unit warning), P6 (zero power test), P7 (test rename)
+- Final: 392 tests pass (348 baseline + 44 new), ruff clean, mypy strict clean
 
 ### File List
 
-**New files to create:**
+**New files created:**
 - `src/open_ems/adapters/ocpp/charger_adapter.py`
 - `src/open_ems/adapters/dsmr/meter_adapter.py`
 - `tests/unit/adapters/ocpp/test_charger_adapter.py`
 - `tests/unit/adapters/dsmr/test_meter_adapter.py`
 
-**Files to update:**
-- `src/open_ems/core/devices.py` — add `power_source` and `power_measured_at` to `EVChargerState`
-- `src/open_ems/adapters/protocol.py` — add `last_meter_values_at` and `last_meter_values_power_kw` to `RawOCPPState`
-- `src/open_ems/adapters/ocpp/central_system.py` — add MeterValues tracking to `_ChargerState` and `_InternalChargePoint`
-- `src/open_ems/adapters/ocpp/__init__.py` — add `EVChargerAdapter` to exports
-- `src/open_ems/adapters/dsmr/__init__.py` — add `GridMeterAdapter` to exports
+**Files updated:**
+- `src/open_ems/core/devices.py` — added `power_source` and `power_measured_at` to `EVChargerState`
+- `src/open_ems/adapters/protocol.py` — added `last_meter_values_at` and `last_meter_values_power_kw` to `RawOCPPState`
+- `src/open_ems/adapters/ocpp/central_system.py` — added MeterValues tracking to `_ChargerState`, `_InternalChargePoint`, and `get_raw_state()`; added `dateutil` import
+- `src/open_ems/adapters/ocpp/__init__.py` — added `EVChargerAdapter` to exports
+- `src/open_ems/adapters/dsmr/__init__.py` — added `GridMeterAdapter` to exports
+- `pyproject.toml` — removed `dateutil.*` from mypy `ignore_missing_imports` overrides (no longer imported directly)
+
+### Senior Developer Review (AI)
+
+**Outcome:** Changes Requested  
+**Date:** 2026-05-03  
+**Layers:** Blind Hunter · Edge Case Hunter · Acceptance Auditor
+
+#### Action Items
+
+**Decision Needed (resolve before patching):**
+- [x] [Review][Decision] MeterValues staleness — resolved as Option A (scoped variant): added `_OCPP_POWER_STALE_SECONDS = 90.0` guard in `EVChargerAdapter`; stale MeterValues clears power fields without degrading charger state.
+
+**Patches:**
+- [x] [Review][Patch] `_map_telegram` uses `raw.device_id` instead of `self.device_id`, violating the Device ID rule [meter_adapter.py:119]
+- [x] [Review][Patch] No unit tests for `on_meter_values` handler in the protocol adapter test suite [tests/unit/adapters/ocpp/test_ocpp_adapter.py]
+- [x] [Review][Patch] `ocpp_disconnected` branch untested: `last_status_notification is None` + `connection_status == "disconnected"` path never exercised [test_charger_adapter.py]
+- [x] [Review][Patch] Replace `dateutil.parser.parse` with `datetime.fromisoformat` for strict ISO 8601 parsing (project targets Python ≥ 3.12) [central_system.py on_meter_values]
+- [x] [Review][Patch] Unknown/unrecognized MeterValues unit string silently treated as W — add a `logger.warning` for units other than "W" and "kW" [central_system.py on_meter_values]
+- [x] [Review][Patch] 0.0 kW power reading not covered by tests — add test for zero power passing through EVChargerAdapter correctly [test_charger_adapter.py]
+- [x] [Review][Patch] Test name `test_data_at_60s_is_stale` misleads: it tests 60 s + 1 µs, not exactly 60 s — renamed to `test_data_just_past_60s_is_stale` [test_meter_adapter.py]
+
+**Deferred:**
+- [x] [Review][Defer] `reversed(meter_value)` relies on OCPP charger respecting oldest-first ordering; non-compliant chargers could pick the wrong entry [central_system.py on_meter_values] — deferred, pre-existing protocol assumption; flag for Story 8 hardening
+- [x] [Review][Defer] Missing `"value"` key in a `sampled_value` entry causes `KeyError` caught and silently skipped [central_system.py on_meter_values] — deferred, pre-existing; acceptable protocol robustness at this layer
+- [x] [Review][Defer] `_ChargerState` and `RawOCPPState` field mapping is hand-maintained with no compile-time enforcement [central_system.py] — deferred, pre-existing structural issue; Story 8 hardening candidate
+- [x] [Review][Defer] Negative power guard in `EVChargerAdapter` re-detects the same fault on every poll (raw state not cleared); each call produces a new `occurred_at` timestamp making it look like a new fault [charger_adapter.py:91-92] — deferred, by design; domain consumers should deduplicate on reason string
+
+### Review Follow-ups (AI)
+
+- [x] [AI-Review] D1 — MeterValues staleness decision (resolve first)
+- [x] [AI-Review] P1 — Fix `_map_telegram` device_id
+- [x] [AI-Review] P2 — Add `on_meter_values` protocol-level tests
+- [x] [AI-Review] P3 — Add `ocpp_disconnected` test
+- [x] [AI-Review] P4 — Replace dateutil with fromisoformat
+- [x] [AI-Review] P5 — Log warning for unknown MeterValues unit
+- [x] [AI-Review] P6 — Add 0.0 kW test
+- [x] [AI-Review] P7 — Fix test name + add exact 60 s boundary test

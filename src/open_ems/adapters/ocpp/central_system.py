@@ -54,6 +54,8 @@ class _ChargerState:
         self.last_heartbeat_at: datetime | None = None
         self.last_call_result: dict[str, Any] | None = None
         self.last_call_error: dict[str, Any] | None = None
+        self.last_meter_values_at: datetime | None = None
+        self.last_meter_values_power_kw: float | None = None
 
 
 class _InternalChargePoint(_BaseChargePoint):  # type: ignore[misc]
@@ -108,6 +110,49 @@ class _InternalChargePoint(_BaseChargePoint):  # type: ignore[misc]
             **kwargs,
         }
         return call_result.StatusNotification()
+
+    @on(Action.meter_values)  # type: ignore[untyped-decorator]
+    def on_meter_values(
+        self,
+        connector_id: int,
+        meter_value: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        power_kw: float | None = None
+        measurement_ts: datetime | None = None
+        for mv in reversed(meter_value):
+            raw_ts: str | None = mv.get("timestamp")
+            parsed_ts: datetime | None = None
+            if raw_ts:
+                try:
+                    dt = datetime.fromisoformat(raw_ts)
+                    parsed_ts = dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
+                except (ValueError, TypeError, OverflowError):
+                    parsed_ts = None
+            for sv in mv.get("sampled_value", []):
+                if sv.get("measurand") == "Power.Active.Import":
+                    try:
+                        raw_val = float(sv["value"])
+                        unit = sv.get("unit", "W")
+                        if unit not in ("W", "kW"):
+                            logger.warning(
+                                "meter_values_unknown_unit",
+                                component="ocpp",
+                                charge_point_id=self.id,
+                                unit=unit,
+                                measurand="Power.Active.Import",
+                            )
+                        power_kw = raw_val / 1000.0 if unit != "kW" else raw_val
+                        measurement_ts = parsed_ts
+                    except (ValueError, KeyError):
+                        continue
+                    break
+            if power_kw is not None:
+                break
+        if power_kw is not None:
+            self._state.last_meter_values_at = measurement_ts or datetime.now(UTC)
+            self._state.last_meter_values_power_kw = power_kw
+        return call_result.MeterValues()
 
 
 class OCPPChargerAdapter:
@@ -168,6 +213,8 @@ class OCPPChargerAdapter:
             connection_status="connected",
             last_call_result=state.last_call_result,
             last_call_error=state.last_call_error,
+            last_meter_values_at=state.last_meter_values_at,
+            last_meter_values_power_kw=state.last_meter_values_power_kw,
         )
 
     async def send_raw_command(self, command: RawProtocolCommand) -> ProtocolCommandResult:

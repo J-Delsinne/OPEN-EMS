@@ -100,12 +100,21 @@ class EVChargerState(BaseModel):
     status: Literal["available", "charging", "faulted", "unavailable"]
     session_active: bool
     current_power_kw: float | None = None
+    power_source: Literal["meter_values"] | None = None
+    power_measured_at: datetime | None = None
     read_at: datetime
 
     @field_validator("read_at")
     @classmethod
     def _read_at_must_be_utc(cls, value: datetime) -> datetime:
         return _require_utc(value, "read_at")
+
+    @field_validator("power_measured_at")
+    @classmethod
+    def _power_measured_at_must_be_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return _require_utc(value, "power_measured_at")
 
 
 class GridMeterState(BaseModel):

@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 import socket
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 _ready: bool = False
 
 
@@ -31,5 +35,9 @@ def sd_notify(message: str) -> None:
         addr = ("\0" + notify_socket[1:]) if abstract else notify_socket
         with socket.socket(af_unix, socket.SOCK_DGRAM) as sock:
             sock.sendto(message.encode(), addr)
-    except Exception:  # noqa: BLE001
-        pass
+    except OSError as exc:
+        logger.warning(
+            "sd_notify_failed",
+            component="readiness",
+            reason=str(exc),
+        )

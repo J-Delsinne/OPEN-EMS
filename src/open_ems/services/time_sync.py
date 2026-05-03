@@ -5,6 +5,10 @@ import struct
 import time
 from typing import Literal
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 ClockStatus = Literal["valid", "suspect", "unknown"]
 
 _clock_status: ClockStatus = "unknown"
@@ -24,7 +28,13 @@ def check_clock(ntp_host: str | None, drift_threshold_seconds: float) -> ClockSt
         ntp_time = _query_ntp(ntp_host)
         drift = abs(ntp_time - time.time())
         _clock_status = "suspect" if drift > drift_threshold_seconds else "valid"
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "ntp_check_failed",
+            component="time_sync",
+            ntp_host=ntp_host,
+            reason=str(exc),
+        )
         _clock_status = "unknown"
     return _clock_status
 

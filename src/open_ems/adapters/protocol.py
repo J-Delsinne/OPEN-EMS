@@ -109,6 +109,8 @@ class RawOCPPState(RawProtocolState):
     connection_status: ConnectionStatus
     last_call_result: RawMessagePayload = None
     last_call_error: RawMessagePayload = None
+    last_meter_values_at: datetime | None = None
+    last_meter_values_power_kw: float | None = None
 
     @field_validator("last_heartbeat_at")
     @classmethod
@@ -116,6 +118,13 @@ class RawOCPPState(RawProtocolState):
         if value is None:
             return None
         return _require_utc(value, "last_heartbeat_at")
+
+    @field_validator("last_meter_values_at")
+    @classmethod
+    def _last_meter_values_at_must_be_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return _require_utc(value, "last_meter_values_at")
 
 
 class RawDSMRState(RawProtocolState):
