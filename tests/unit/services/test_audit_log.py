@@ -312,7 +312,10 @@ async def test_installer_note_writes_sanitized_installer_event(mem_svc):
 async def test_installer_note_rejects_over_length_before_write(mem_svc):
     svc, conn = mem_svc
 
-    with pytest.raises(ValueError, match=f"installer note must be <= {MAX_INSTALLER_NOTE_LENGTH} characters"):
+    with pytest.raises(
+        ValueError,
+        match=f"installer note must be <= {MAX_INSTALLER_NOTE_LENGTH} characters",
+    ):
         await svc.installer_note("x" * (MAX_INSTALLER_NOTE_LENGTH + 1))
 
     async with conn.execute("SELECT COUNT(*) FROM event_log") as cur:

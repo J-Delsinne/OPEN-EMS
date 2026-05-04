@@ -1,5 +1,9 @@
 # Deferred Work Log
 
+## Deferred from: code review of 7-1-implement-systemoperatingmode-derivation-and-degradation-matrix (2026-05-04)
+
+- **`DegradedDeviceState.role` not validated against positional slot** [`src/open_ems/engine/models.py`] — spec uses `state.role` as source of truth; `from_snapshot` produces correct objects; add cross-validation when/if defensive hardening of direct construction is required.
+
 ## Deferred from: code review of 6-3-implement-installer-note-storage-and-config-audit-log (2026-05-04)
 
 - **Non-atomic `config_version` increment** [`src/open_ems/storage/repositories/config_audit_repo.py:55`] — `SELECT COALESCE(MAX(config_version), 0) + 1` + `INSERT` without `BEGIN IMMEDIATE`; same read-then-write pattern as `EventLogRepo`; SQLite serialized write-lock mitigates in single-process deployment; fix with explicit transaction wrapping when/if multi-process access is ever required.
