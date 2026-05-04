@@ -17,6 +17,7 @@ from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
+from open_ems.storage.repositories.event_log_repo import EventLogRepo
 from open_ems.storage.repositories.session_repo import SessionRepo
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
 from open_ems.web.csrf import CsrfMiddleware
@@ -98,6 +99,17 @@ async def _session_cleanup_task() -> None:
         await asyncio.sleep(24 * 60 * 60)
 
 
+async def _event_log_pruning_task() -> None:
+    """Prune non-critical event_log entries older than 90 days every 24 hours."""
+    while True:
+        try:
+            count = await EventLogRepo().prune_expired()
+            logger.info("event_log_pruned", component="observability", deleted_count=count)
+        except Exception:
+            logger.error("event_log_pruning_failed", exc_info=True, component="observability")
+        await asyncio.sleep(24 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
@@ -152,6 +164,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     _watchdog_task: asyncio.Task[None] | None = None
     _cleanup_task: asyncio.Task[None] | None = None
+    _pruning_task: asyncio.Task[None] | None = None
     try:
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
@@ -186,6 +199,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _cleanup_task.add_done_callback(_on_cleanup_done)
         logger.info("session_cleanup_task_started", component="auth")
 
+        def _on_pruning_done(t: asyncio.Task[None]) -> None:
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    logger.error(
+                        "event_log_pruning_task_died",
+                        exc_info=exc,
+                        component="observability",
+                    )
+
+        _pruning_task = asyncio.create_task(_event_log_pruning_task())
+        _pruning_task.add_done_callback(_on_pruning_done)
+        logger.info("event_log_pruning_task_started", component="observability")
+
         yield  # Application serves requests here
 
         # Shutdown: signal stopping so systemd resets the watchdog timer during WAL checkpoint
@@ -202,6 +229,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _cleanup_task.cancel()
             try:
                 await _cleanup_task
+            except asyncio.CancelledError:
+                pass
+
+        if _pruning_task is not None:
+            _pruning_task.cancel()
+            try:
+                await _pruning_task
             except asyncio.CancelledError:
                 pass
     finally:

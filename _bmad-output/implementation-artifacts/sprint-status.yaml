@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-04T21:00:00+02:00'
+last_updated: '2026-05-04'
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -87,9 +87,9 @@ development_status:
   epic-5-retrospective: optional
 
   # ─── Epic 6: Observability and Event Logging ───────────────────────────────
-  epic-6: backlog
-  6-1-define-event-log-schema-and-implement-observabilityservice-with-dual-sink-logging: backlog
-  6-2-enforce-append-only-semantics-and-event-retention-policy: backlog
+  epic-6: in-progress
+  6-1-define-event-log-schema-and-implement-observabilityservice-with-dual-sink-logging: done
+  6-2-enforce-append-only-semantics-and-event-retention-policy: done
   6-3-implement-installer-note-storage-and-config-audit-log: backlog
   epic-6-retrospective: optional
 
