@@ -98,10 +98,10 @@ def _snapshot(**overrides: object) -> SystemSnapshot:
             DeviceRole.grid_meter: ComponentState.active,
         },
         "data_age_seconds": {
-            DeviceRole.inverter: 0.0,
+            DeviceRole.inverter: 0,
             DeviceRole.battery: None,
             DeviceRole.ev_charger: None,
-            DeviceRole.grid_meter: 0.0,
+            DeviceRole.grid_meter: 0,
         },
         "system_clock_status": "valid",
     }
@@ -151,10 +151,10 @@ def test_snapshot_mapping_fields_are_not_mutable_or_caller_owned() -> None:
         DeviceRole.grid_meter: ComponentState.active,
     }
     data_age_seconds = {
-        DeviceRole.inverter: 1.0,
+        DeviceRole.inverter: 1,
         DeviceRole.battery: None,
         DeviceRole.ev_charger: None,
-        DeviceRole.grid_meter: 1.0,
+        DeviceRole.grid_meter: 1,
     }
     snapshot = _snapshot(
         component_states=component_states,
@@ -162,15 +162,15 @@ def test_snapshot_mapping_fields_are_not_mutable_or_caller_owned() -> None:
     )
 
     component_states[DeviceRole.inverter] = ComponentState.error
-    data_age_seconds[DeviceRole.inverter] = 99.0
+    data_age_seconds[DeviceRole.inverter] = 99
 
     assert snapshot.component_states[DeviceRole.inverter] == ComponentState.active
-    assert snapshot.data_age_seconds[DeviceRole.inverter] == 1.0
+    assert snapshot.data_age_seconds[DeviceRole.inverter] == 1
 
     with pytest.raises(TypeError):
         snapshot.component_states[DeviceRole.inverter] = ComponentState.error  # type: ignore[index]
     with pytest.raises(TypeError):
-        snapshot.data_age_seconds[DeviceRole.inverter] = 99.0  # type: ignore[index]
+        snapshot.data_age_seconds[DeviceRole.inverter] = 99  # type: ignore[index]
 
 
 def test_snapshot_rejects_incomplete_role_maps() -> None:
@@ -178,7 +178,7 @@ def test_snapshot_rejects_incomplete_role_maps() -> None:
         _snapshot(component_states={DeviceRole.inverter: ComponentState.active})
 
     with pytest.raises(ValidationError):
-        _snapshot(data_age_seconds={DeviceRole.inverter: 0.0})
+        _snapshot(data_age_seconds={DeviceRole.inverter: 0})
 
 
 def test_snapshot_mapping_fields_are_json_serializable() -> None:
@@ -187,7 +187,7 @@ def test_snapshot_mapping_fields_are_json_serializable() -> None:
     dumped = snapshot.model_dump(mode="json")
 
     assert dumped["component_states"]["inverter"] == "ACTIVE"
-    assert dumped["data_age_seconds"]["inverter"] == 0.0
+    assert dumped["data_age_seconds"]["inverter"] == 0
     assert "component_states" in snapshot.model_dump_json()
 
 
@@ -205,7 +205,7 @@ def test_snapshot_requires_utc_captured_at() -> None:
         (None, ComponentState.unavailable),
         (_inverter(), ComponentState.active),
         (_degraded(DeviceRole.inverter, "reconnecting"), ComponentState.error),
-        (_degraded(DeviceRole.grid_meter, "dsmr_stale"), ComponentState.stale),
+        (_degraded(DeviceRole.grid_meter, "dsmr_stale"), ComponentState.error),
     ],
 )
 def test_component_state_derivation(
@@ -215,7 +215,7 @@ def test_component_state_derivation(
     assert derive_component_state(state) == expected
 
 
-def test_global_state_derivation_priority_failed_stale_degraded_normal() -> None:
+def test_global_state_derivation_priority_failed_degraded_normal() -> None:
     assert (
         derive_global_state(
             {
@@ -224,15 +224,6 @@ def test_global_state_derivation_priority_failed_stale_degraded_normal() -> None
             }
         )
         == GlobalState.failed
-    )
-    assert (
-        derive_global_state(
-            {
-                DeviceRole.inverter: _inverter(),
-                DeviceRole.grid_meter: _degraded(DeviceRole.grid_meter, "dsmr_stale"),
-            }
-        )
-        == GlobalState.stale
     )
     assert (
         derive_global_state(
@@ -304,7 +295,7 @@ def test_unknown_degraded_reason_remains_degraded() -> None:
     )
 
 
-def test_dsmr_stale_escalates_only_for_required_roles() -> None:
+def test_dsmr_stale_reason_remains_degraded_adapter_input() -> None:
     assert (
         derive_global_state(
             {
@@ -312,7 +303,7 @@ def test_dsmr_stale_escalates_only_for_required_roles() -> None:
                 DeviceRole.grid_meter: _degraded(DeviceRole.grid_meter, "dsmr_stale"),
             }
         )
-        == GlobalState.stale
+        == GlobalState.degraded
     )
     assert (
         derive_global_state(
@@ -343,15 +334,15 @@ def test_data_age_derivation_from_each_timestamp_type() -> None:
     captured_at = _NOW_UTC
     measured_at = _NOW_UTC - timedelta(seconds=12.5)
 
-    assert derive_data_age_seconds(_inverter(measured_at), captured_at) == 12.5
-    assert derive_data_age_seconds(_battery(measured_at), captured_at) == 12.5
-    assert derive_data_age_seconds(_ev_charger(measured_at), captured_at) == 12.5
-    assert derive_data_age_seconds(_grid_meter(measured_at), captured_at) == 12.5
+    assert derive_data_age_seconds(_inverter(measured_at), captured_at) == 12
+    assert derive_data_age_seconds(_battery(measured_at), captured_at) == 12
+    assert derive_data_age_seconds(_ev_charger(measured_at), captured_at) == 12
+    assert derive_data_age_seconds(_grid_meter(measured_at), captured_at) == 12
     assert (
         derive_data_age_seconds(
             _degraded(DeviceRole.grid_meter, "reconnecting", measured_at),
             captured_at,
         )
-        == 12.5
+        == 12
     )
     assert derive_data_age_seconds(None, captured_at) is None

@@ -21,6 +21,7 @@ from open_ems.storage.repositories.session_repo import SessionRepo
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
 from open_ems.web.csrf import CsrfMiddleware
 from open_ems.web.routes.auth import router as auth_router
+from open_ems.web.routes.fragments import router as fragments_router
 from open_ems.web.routes.health import router as health_router
 from open_ems.web.routes.homeowner import router as homeowner_router
 from open_ems.web.routes.installer import router as installer_router
@@ -141,7 +142,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             system_clock_status=clock_status,
             component="startup",
         )
-    app.state.state_store = StateStore(system_clock_status=clock_status)
+    app.state.state_store = StateStore(
+        system_clock_status=clock_status,
+        stale_threshold_seconds=settings.stale_threshold_seconds,
+    )
 
     # Step 4: Open database connection
     await init_database(settings.db_path)
@@ -211,5 +215,6 @@ def create_app() -> FastAPI:
     app.include_router(installer_router)
     app.include_router(homeowner_router)
     app.include_router(stream_router)
+    app.include_router(fragments_router)
     app.add_middleware(CsrfMiddleware)  # Runs first on every request
     return app

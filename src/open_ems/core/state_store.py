@@ -10,6 +10,7 @@ from open_ems.core.devices import (
     BatteryState,
     DegradedDeviceState,
     DeviceRole,
+    DeviceState,
     EVChargerState,
     GridMeterState,
     InverterState,
@@ -39,10 +40,13 @@ class StateStore:
         self,
         *,
         system_clock_status: ClockStatus,
+        stale_threshold_seconds: int = 30,
         operating_mode: SystemOperatingMode = SystemOperatingMode.degraded,
     ) -> None:
         self._writer_lock = asyncio.Lock()
         self._known_device_ids: dict[DeviceRole, str] = {}
+        self._last_successful_states: dict[DeviceRole, DeviceState] = {}
+        self._stale_threshold_seconds = stale_threshold_seconds
         captured_at = datetime.now(UTC)
         self._snapshot = SystemSnapshot(
             sequence_id=0,
@@ -73,6 +77,9 @@ class StateStore:
             data_age_seconds = {
                 role: derive_data_age_seconds(slots[role], captured_at) for role in ALL_DEVICE_ROLES
             }
+            for role in ALL_DEVICE_ROLES:
+                if self._is_stale_successful_state(slots[role], data_age_seconds[role]):
+                    component_states[role] = ComponentState.stale
             snapshot = SystemSnapshot(
                 sequence_id=self._snapshot.sequence_id + 1,
                 captured_at=captured_at,
@@ -102,12 +109,21 @@ class StateStore:
         for role in ALL_DEVICE_ROLES:
             incoming_state = device_states.get(role)
             if incoming_state is None:
-                slots[role] = self._unavailable_known_device(role, captured_at)
+                slots[role] = self._last_successful_states.get(
+                    role
+                ) or self._unavailable_known_device(role, captured_at)
                 continue
             self._validate_state_role(role, incoming_state)
             slots[role] = incoming_state
             self._known_device_ids[role] = incoming_state.device_id
+            if not isinstance(incoming_state, DegradedDeviceState):
+                self._last_successful_states[role] = incoming_state
         return slots
+
+    def _is_stale_successful_state(self, state: DeviceSlot, age_seconds: int | None) -> bool:
+        if state is None or isinstance(state, DegradedDeviceState) or age_seconds is None:
+            return False
+        return age_seconds > self._stale_threshold_seconds
 
     def _validate_state_role(self, role: DeviceRole, state: DeviceSlot) -> None:
         if state is None:

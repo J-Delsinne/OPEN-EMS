@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from open_ems.core import (
     BatteryState,
@@ -15,6 +15,8 @@ from open_ems.core import (
     SystemSnapshot,
 )
 from open_ems.core.state import DeviceSlot
+
+HomeownerCard = Literal["battery", "solar", "grid", "ev"]
 
 
 def serialize_homeowner_snapshot(snapshot: SystemSnapshot) -> dict[str, object]:
@@ -51,6 +53,38 @@ def serialize_installer_snapshot(snapshot: SystemSnapshot) -> dict[str, object]:
     }
 
 
+def build_homeowner_card_context(
+    snapshot: SystemSnapshot, card: HomeownerCard
+) -> dict[str, object]:
+    """Build display-ready fragment context from the homeowner-safe SSE payload."""
+    payload = serialize_homeowner_snapshot(snapshot)
+    component_key = _card_component_key(card)
+    component_state = str(_mapping_value(payload["components"], component_key))
+    data_age_seconds = _age_value(payload["data_age_seconds"], component_key)
+    device_payload = payload[component_key]
+
+    title = _card_title(card)
+    rows = _homeowner_card_rows(card, device_payload)
+    is_unavailable = (
+        component_state == ComponentState.unavailable.value
+        or not isinstance(device_payload, dict)
+        or device_payload.get("state") == "unavailable"
+    )
+    return {
+        "card": card,
+        "title": title,
+        "component_key": component_key,
+        "component_state": component_state,
+        "data_age_seconds": data_age_seconds,
+        "stale_caption": _stale_caption(title, data_age_seconds)
+        if component_state == ComponentState.stale.value
+        else "",
+        "system_clock_status": payload["system_clock_status"],
+        "rows": rows,
+        "unavailable": is_unavailable,
+    }
+
+
 def _datetime_to_iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
@@ -60,6 +94,99 @@ def _role_map(values: Mapping[DeviceRole, object]) -> dict[str, object]:
         role.value: value.value if isinstance(value, ComponentState) else value
         for role, value in values.items()
     }
+
+
+def _mapping_value(value: object, key: str) -> object:
+    if not isinstance(value, Mapping):
+        raise TypeError("Expected role mapping in serialized snapshot")
+    return value[key]
+
+
+def _age_value(value: object, key: str) -> int | None:
+    age = _mapping_value(value, key)
+    return age if isinstance(age, int) else None
+
+
+def _card_component_key(card: HomeownerCard) -> str:
+    return {"battery": "battery", "solar": "inverter", "grid": "grid_meter", "ev": "ev_charger"}[
+        card
+    ]
+
+
+def _card_title(card: HomeownerCard) -> str:
+    return {
+        "battery": "Battery",
+        "solar": "Solar",
+        "grid": "Grid",
+        "ev": "EV charger",
+    }[card]
+
+
+def _number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError("Expected numeric value in serialized snapshot")
+    return float(value)
+
+
+def _format_kw(value: object) -> str:
+    return f"{_number(value):.1f} kW"
+
+
+def _format_percent(value: object) -> str:
+    return f"{_number(value):.0f}%"
+
+
+def _format_kwh(value: object) -> str:
+    return f"{_number(value):.1f} kWh"
+
+
+def _homeowner_card_rows(card: HomeownerCard, device_payload: object) -> list[dict[str, str]]:
+    if not isinstance(device_payload, dict) or device_payload.get("state") == "unavailable":
+        return []
+    if card == "battery":
+        return [
+            {"label": "Charge", "value": _format_percent(device_payload["soc_percent"])},
+            {"label": "Power", "value": _format_kw(device_payload["battery_power_kw"])},
+            {"label": "Mode", "value": str(device_payload["operating_mode"])},
+        ]
+    if card == "solar":
+        return [
+            {"label": "PV output", "value": _format_kw(device_payload["pv_power_kw"])},
+            {"label": "AC output", "value": _format_kw(device_payload["ac_power_kw"])},
+            {"label": "Mode", "value": str(device_payload["operating_mode"])},
+        ]
+    if card == "grid":
+        return [
+            {"label": "Grid power", "value": _format_kw(device_payload["grid_power_kw"])},
+            {
+                "label": "Imported",
+                "value": _format_kwh(device_payload["energy_delivered_kwh"]),
+            },
+            {
+                "label": "Exported",
+                "value": _format_kwh(device_payload["energy_returned_kwh"]),
+            },
+        ]
+    return [
+        {"label": "Status", "value": str(device_payload["status"])},
+        {"label": "Session", "value": "Active" if device_payload["session_active"] else "Idle"},
+        {
+            "label": "Power",
+            "value": _format_kw(device_payload["current_power_kw"])
+            if device_payload["current_power_kw"] is not None
+            else "Unavailable",
+        },
+    ]
+
+
+def _stale_caption(title: str, data_age_seconds: int | None) -> str:
+    if data_age_seconds is None:
+        return f"{title} data is stale"
+    if data_age_seconds < 60:
+        age = f"{data_age_seconds} sec"
+    else:
+        age = f"{data_age_seconds // 60} min"
+    return f"{title} data last updated {age} ago"
 
 
 def _public_unavailable(state: DeviceSlot) -> dict[str, object] | None:

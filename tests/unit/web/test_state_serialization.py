@@ -16,6 +16,7 @@ from open_ems.core import (
     SystemSnapshot,
 )
 from open_ems.web.state_serialization import (
+    build_homeowner_card_context,
     serialize_homeowner_snapshot,
     serialize_installer_snapshot,
 )
@@ -67,10 +68,10 @@ def _snapshot() -> SystemSnapshot:
             DeviceRole.grid_meter: ComponentState.error,
         },
         data_age_seconds={
-            DeviceRole.inverter: 0.0,
-            DeviceRole.battery: 1.0,
-            DeviceRole.ev_charger: 2.0,
-            DeviceRole.grid_meter: 3.0,
+            DeviceRole.inverter: 0,
+            DeviceRole.battery: 1,
+            DeviceRole.ev_charger: 2,
+            DeviceRole.grid_meter: 3,
         },
         system_clock_status="valid",
     )
@@ -114,7 +115,7 @@ def test_installer_snapshot_includes_diagnostics_and_component_flags() -> None:
     payload = serialize_installer_snapshot(_snapshot())
 
     assert payload["component_states"]["grid_meter"] == "ERROR"
-    assert payload["data_age_seconds"]["grid_meter"] == 3.0
+    assert payload["data_age_seconds"]["grid_meter"] == 3
     assert payload["grid_meter"] == {
         "state": "degraded",
         "device_id": "grid-001",
@@ -153,3 +154,57 @@ def test_homeowner_degraded_optional_device_remains_generic_without_reason() -> 
 
     assert payload["battery"] == {"state": "unavailable"}
     assert "reason" not in _keys_recursive(payload)
+
+
+def test_homeowner_stale_payload_retains_public_values_and_age_metadata() -> None:
+    snapshot = _snapshot().model_copy(
+        update={
+            "component_states": {
+                DeviceRole.inverter: ComponentState.active,
+                DeviceRole.battery: ComponentState.stale,
+                DeviceRole.ev_charger: ComponentState.active,
+                DeviceRole.grid_meter: ComponentState.error,
+            },
+            "data_age_seconds": {
+                DeviceRole.inverter: 0,
+                DeviceRole.battery: 185,
+                DeviceRole.ev_charger: 2,
+                DeviceRole.grid_meter: 3,
+            },
+        }
+    )
+
+    payload = serialize_homeowner_snapshot(snapshot)
+    card = build_homeowner_card_context(snapshot, "battery")
+
+    assert payload["battery"]["soc_percent"] == 55.0  # type: ignore[index]
+    assert payload["components"]["battery"] == "STALE"  # type: ignore[index]
+    assert payload["data_age_seconds"]["battery"] == 185  # type: ignore[index]
+    assert card["stale_caption"] == "Battery data last updated 3 min ago"
+    assert card["system_clock_status"] == "valid"
+
+
+def test_homeowner_card_context_renders_unavailable_without_zero_fallbacks() -> None:
+    snapshot = _snapshot().model_copy(
+        update={
+            "battery": None,
+            "component_states": {
+                DeviceRole.inverter: ComponentState.active,
+                DeviceRole.battery: ComponentState.unavailable,
+                DeviceRole.ev_charger: ComponentState.active,
+                DeviceRole.grid_meter: ComponentState.error,
+            },
+            "data_age_seconds": {
+                DeviceRole.inverter: 0,
+                DeviceRole.battery: None,
+                DeviceRole.ev_charger: 2,
+                DeviceRole.grid_meter: 3,
+            },
+        }
+    )
+
+    card = build_homeowner_card_context(snapshot, "battery")
+
+    assert card["unavailable"] is True
+    assert card["rows"] == []
+    assert card["stale_caption"] == ""

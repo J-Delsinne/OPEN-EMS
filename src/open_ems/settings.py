@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     tls_key_path: str | None = None
     installer_session_timeout_hours: int = Field(default=4, gt=0)
     homeowner_session_timeout_days: int = Field(default=30, gt=0)
+    stale_threshold_seconds: int = Field(default=30, gt=0)
     trusted_proxy_ips: list[str] = []
 
 

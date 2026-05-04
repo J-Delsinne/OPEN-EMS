@@ -89,8 +89,6 @@ def derive_component_state(state: DeviceSlot) -> ComponentState:
     if state is None:
         return ComponentState.unavailable
     if isinstance(state, DegradedDeviceState):
-        if state.reason == "dsmr_stale":
-            return ComponentState.stale
         if state.reason == "unavailable":
             return ComponentState.unavailable
         return ComponentState.error
@@ -98,7 +96,7 @@ def derive_component_state(state: DeviceSlot) -> ComponentState:
 
 
 def derive_global_state(device_slots: Mapping[DeviceRole, DeviceSlot]) -> GlobalState:
-    """Derive global state with priority FAILED > STALE > DEGRADED > NORMAL."""
+    """Derive global state with priority FAILED > DEGRADED > NORMAL."""
     required_slots = {role: device_slots.get(role) for role in REQUIRED_DEVICE_ROLES}
 
     if any(
@@ -106,11 +104,6 @@ def derive_global_state(device_slots: Mapping[DeviceRole, DeviceSlot]) -> Global
         for state in device_slots.values()
     ):
         return GlobalState.failed
-
-    if any(
-        derive_component_state(state) == ComponentState.stale for state in required_slots.values()
-    ):
-        return GlobalState.stale
 
     if any(
         isinstance(state, DegradedDeviceState)
@@ -125,7 +118,7 @@ def derive_global_state(device_slots: Mapping[DeviceRole, DeviceSlot]) -> Global
     return GlobalState.normal
 
 
-def derive_data_age_seconds(state: DeviceSlot, captured_at: datetime) -> float | None:
+def derive_data_age_seconds(state: DeviceSlot, captured_at: datetime) -> int | None:
     """Derive device data age from the timestamp type owned by each state model."""
     measurement_at: datetime | None
     if isinstance(state, InverterState | BatteryState | EVChargerState):
@@ -139,7 +132,7 @@ def derive_data_age_seconds(state: DeviceSlot, captured_at: datetime) -> float |
 
     if measurement_at is None:
         return None
-    return (captured_at - measurement_at).total_seconds()
+    return max(0, int((captured_at - measurement_at).total_seconds()))
 
 
 class SystemSnapshot(BaseModel):
@@ -156,7 +149,7 @@ class SystemSnapshot(BaseModel):
     ev_charger: DeviceSlot
     grid_meter: DeviceSlot
     component_states: Mapping[DeviceRole, ComponentState]
-    data_age_seconds: Mapping[DeviceRole, float | None]
+    data_age_seconds: Mapping[DeviceRole, int | None]
     system_clock_status: ClockStatus
 
     @field_validator("captured_at")
@@ -180,8 +173,8 @@ class SystemSnapshot(BaseModel):
 
     @field_serializer("data_age_seconds")
     def _serialize_data_age_seconds(
-        self, value: Mapping[DeviceRole, float | None]
-    ) -> dict[DeviceRole, float | None]:
+        self, value: Mapping[DeviceRole, int | None]
+    ) -> dict[DeviceRole, int | None]:
         return dict(value)
 
 

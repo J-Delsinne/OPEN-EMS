@@ -1,0 +1,28 @@
+<section
+  id="{{ card }}-card"
+  class="state-card state-card--{{ component_state | lower }}"
+  data-component-state="{{ component_state }}"
+  data-clock-status="{{ system_clock_status }}"
+>
+  <header class="state-card__header">
+    <h2>{{ title }}</h2>
+    <span class="state-card__state">{{ component_state }}</span>
+  </header>
+  <div class="state-card__body">
+    {% if unavailable %}
+      <p class="state-card__unavailable">Unavailable</p>
+    {% else %}
+      <dl class="state-card__metrics">
+        {% for row in rows %}
+          <div class="state-card__metric">
+            <dt>{{ row.label }}</dt>
+            <dd>{{ row.value }}</dd>
+          </div>
+        {% endfor %}
+      </dl>
+    {% endif %}
+  </div>
+  <footer class="state-card__freshness" aria-live="polite">
+    {% if stale_caption %}{{ stale_caption }}{% else %}&nbsp;{% endif %}
+  </footer>
+</section>

@@ -22,5 +22,9 @@ async def installer_dashboard(
     return _templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"csrf_token": _user.csrf_token, "title": "Installer Dashboard"},
+        {
+            "csrf_token": _user.csrf_token,
+            "dashboard_role": "installer",
+            "title": "Installer Dashboard",
+        },
     )

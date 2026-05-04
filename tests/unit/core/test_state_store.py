@@ -10,6 +10,7 @@ from open_ems.core import (
     ComponentState,
     DegradedDeviceState,
     DeviceRole,
+    EVChargerState,
     GlobalState,
     GridMeterState,
     InverterState,
@@ -37,6 +38,18 @@ def _battery(device_id: str = "bat-001", read_at: datetime = _NOW_UTC) -> Batter
         battery_power_kw=1.0,
         capacity_kwh=10.0,
         operating_mode="normal",
+        read_at=read_at,
+    )
+
+
+def _ev_charger(device_id: str = "ev-001", read_at: datetime = _NOW_UTC) -> EVChargerState:
+    return EVChargerState(
+        device_id=device_id,
+        status="charging",
+        session_active=True,
+        current_power_kw=7.0,
+        power_source="meter_values",
+        power_measured_at=read_at,
         read_at=read_at,
     )
 
@@ -114,27 +127,168 @@ async def test_old_snapshot_remains_unchanged_after_publish() -> None:
 
 
 async def test_runtime_known_device_preservation_across_publishes() -> None:
+    now = datetime.now(UTC)
     store = StateStore(system_clock_status="valid")
 
     await store.publish(
         {
-            DeviceRole.inverter: _inverter("inv-known"),
-            DeviceRole.grid_meter: _grid_meter(),
-            DeviceRole.battery: _battery("bat-known"),
+            DeviceRole.inverter: _inverter("inv-known", read_at=now),
+            DeviceRole.grid_meter: _grid_meter(received_at=now),
+            DeviceRole.battery: _battery("bat-known", read_at=now),
         }
     )
     snapshot = await store.publish(
         {
-            DeviceRole.inverter: _inverter("inv-known"),
-            DeviceRole.grid_meter: _grid_meter(),
+            DeviceRole.inverter: _inverter("inv-known", read_at=now),
+            DeviceRole.grid_meter: _grid_meter(received_at=now),
         }
     )
 
-    assert isinstance(snapshot.battery, DegradedDeviceState)
+    assert isinstance(snapshot.battery, BatteryState)
     assert snapshot.battery.device_id == "bat-known"
-    assert snapshot.battery.reason == "unavailable"
-    assert snapshot.component_states[DeviceRole.battery] == ComponentState.unavailable
+    assert snapshot.component_states[DeviceRole.battery] == ComponentState.active
     assert snapshot.global_state == GlobalState.normal
+
+
+async def test_stale_overlay_retains_successful_state_and_integer_age() -> None:
+    old_read_at = datetime.now(UTC) - timedelta(seconds=125.9)
+    store = StateStore(system_clock_status="valid", stale_threshold_seconds=30)
+
+    snapshot = await store.publish(
+        {
+            DeviceRole.inverter: _inverter(read_at=old_read_at),
+            DeviceRole.grid_meter: _grid_meter(received_at=datetime.now(UTC)),
+        }
+    )
+
+    assert isinstance(snapshot.inverter, InverterState)
+    assert snapshot.inverter.device_id == "inv-001"
+    assert snapshot.component_states[DeviceRole.inverter] == ComponentState.stale
+    assert isinstance(snapshot.data_age_seconds[DeviceRole.inverter], int)
+    assert snapshot.data_age_seconds[DeviceRole.inverter] >= 125
+
+
+async def test_never_received_devices_remain_unavailable_not_stale() -> None:
+    store = StateStore(system_clock_status="valid", stale_threshold_seconds=1)
+    snapshot = await store.publish(
+        {
+            DeviceRole.inverter: _inverter(read_at=datetime.now(UTC)),
+            DeviceRole.grid_meter: _grid_meter(received_at=datetime.now(UTC)),
+        }
+    )
+
+    assert snapshot.battery is None
+    assert snapshot.component_states[DeviceRole.battery] == ComponentState.unavailable
+    assert snapshot.data_age_seconds[DeviceRole.battery] is None
+
+
+async def test_omission_uses_retained_timestamp_without_itself_causing_stale() -> None:
+    now = datetime.now(UTC)
+    store = StateStore(system_clock_status="valid", stale_threshold_seconds=300)
+
+    await store.publish(
+        {
+            DeviceRole.inverter: _inverter(read_at=now - timedelta(seconds=20)),
+            DeviceRole.grid_meter: _grid_meter(received_at=now),
+            DeviceRole.battery: _battery(read_at=now - timedelta(seconds=20)),
+        }
+    )
+    snapshot = await store.publish(
+        {
+            DeviceRole.inverter: _inverter(read_at=now),
+            DeviceRole.grid_meter: _grid_meter(received_at=now),
+        }
+    )
+
+    assert isinstance(snapshot.battery, BatteryState)
+    assert snapshot.component_states[DeviceRole.battery] == ComponentState.active
+
+
+async def test_adapter_stale_degraded_reason_does_not_drive_stale_overlay() -> None:
+    store = StateStore(system_clock_status="valid", stale_threshold_seconds=30)
+
+    snapshot = await store.publish(
+        {
+            DeviceRole.inverter: _inverter(read_at=datetime.now(UTC)),
+            DeviceRole.grid_meter: _degraded(DeviceRole.grid_meter, "dsmr_stale"),
+        }
+    )
+
+    assert isinstance(snapshot.grid_meter, DegradedDeviceState)
+    assert snapshot.component_states[DeviceRole.grid_meter] == ComponentState.error
+    assert snapshot.global_state == GlobalState.degraded
+
+
+async def test_stale_required_role_does_not_degrade_global_state() -> None:
+    old_read_at = datetime.now(UTC) - timedelta(seconds=31)
+    store = StateStore(system_clock_status="valid", stale_threshold_seconds=30)
+
+    snapshot = await store.publish(
+        {
+            DeviceRole.inverter: _inverter(read_at=old_read_at),
+            DeviceRole.grid_meter: _grid_meter(received_at=old_read_at),
+        }
+    )
+
+    assert snapshot.component_states[DeviceRole.inverter] == ComponentState.stale
+    assert snapshot.component_states[DeviceRole.grid_meter] == ComponentState.stale
+    assert snapshot.global_state == GlobalState.normal
+
+
+async def test_stale_threshold_applies_to_all_successful_timestamp_fields() -> None:
+    old_read_at = datetime.now(UTC) - timedelta(seconds=2)
+    store = StateStore(system_clock_status="valid", stale_threshold_seconds=1)
+
+    snapshot = await store.publish(
+        {
+            DeviceRole.inverter: _inverter(read_at=old_read_at),
+            DeviceRole.battery: _battery(read_at=old_read_at),
+            DeviceRole.ev_charger: _ev_charger(read_at=old_read_at),
+            DeviceRole.grid_meter: _grid_meter(received_at=old_read_at),
+        }
+    )
+
+    assert snapshot.component_states == {
+        DeviceRole.inverter: ComponentState.stale,
+        DeviceRole.battery: ComponentState.stale,
+        DeviceRole.ev_charger: ComponentState.stale,
+        DeviceRole.grid_meter: ComponentState.stale,
+    }
+
+
+async def test_concurrent_sse_style_readers_observe_monotonic_sequence_ids() -> None:
+    store = StateStore(system_clock_status="valid")
+    published_sequences: asyncio.Queue[int | None] = asyncio.Queue(maxsize=1)
+    observed: list[int] = []
+
+    async def writer() -> None:
+        for index in range(1, 20):
+            now = datetime.now(UTC)
+            snapshot = await store.publish(
+                {
+                    DeviceRole.inverter: _inverter(f"inv-{index}", read_at=now),
+                    DeviceRole.grid_meter: _grid_meter(f"grid-{index}", received_at=now),
+                }
+            )
+            await published_sequences.put(snapshot.sequence_id)
+        await published_sequences.put(None)
+
+    async def reader() -> None:
+        last_seen = -1
+        while True:
+            published_sequence = await published_sequences.get()
+            if published_sequence is None:
+                return
+            snapshot = store.get_snapshot()
+            assert snapshot.sequence_id >= published_sequence
+            assert snapshot.sequence_id >= last_seen
+            last_seen = snapshot.sequence_id
+            observed.append(snapshot.sequence_id)
+
+    await asyncio.gather(writer(), reader())
+
+    assert observed
+    assert observed == sorted(observed)
 
 
 async def test_publish_rejects_state_type_that_does_not_match_role_key() -> None:

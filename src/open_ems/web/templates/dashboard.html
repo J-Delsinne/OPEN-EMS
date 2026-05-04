@@ -5,6 +5,35 @@
 {% block content %}
 <main>
   <h1>{{ title }}</h1>
-  <p>Full dashboard UI implemented in Epic 10/11.</p>
+  {% if dashboard_role == "homeowner" %}
+  <section class="dashboard-grid" aria-label="Live system state">
+    <section
+      id="battery-card"
+      hx-get="/fragments/homeowner/battery-card"
+      hx-trigger="load, every 10s"
+      hx-swap="outerHTML"
+    >Loading battery state...</section>
+    <section
+      id="solar-card"
+      hx-get="/fragments/homeowner/solar-card"
+      hx-trigger="load, every 10s"
+      hx-swap="outerHTML"
+    >Loading solar state...</section>
+    <section
+      id="grid-card"
+      hx-get="/fragments/homeowner/grid-card"
+      hx-trigger="load, every 10s"
+      hx-swap="outerHTML"
+    >Loading grid state...</section>
+    <section
+      id="ev-card"
+      hx-get="/fragments/homeowner/ev-card"
+      hx-trigger="load, every 10s"
+      hx-swap="outerHTML"
+    >Loading EV state...</section>
+  </section>
+  {% else %}
+  <p>Full dashboard UI implemented in Epic 11.</p>
+  {% endif %}
 </main>
 {% endblock %}

@@ -149,6 +149,11 @@
 - **`probe_modbus_endpoint`: `adapter.close()` in `finally` may hang if TCP connection is wedged** — pre-existing `ModbusTcpAdapter` behavior; address if close() timeouts become a production issue [`discovery.py:100`]
 - **Unit test `test_probe_dsmr_success`: `patch("DSMRAdapter")` does not validate `DSMRAdapterConfig` construction** — inherent patch limitation; config validation is covered by `DSMRAdapter`'s own unit tests [`test_discovery.py`]
 
+## Deferred from: code review of 5-3-implement-htmx-polling-endpoints-and-per-device-stale-and-unavailable-detection (2026-05-04)
+
+- **`_build_slots` mutates `_known_device_ids` for roles before a `_validate_state_role` failure** [`src/open_ems/core/state_store.py:_build_slots`] — pre-existing pattern; `_last_successful_states` follows the same convention; if `_validate_state_role` raises mid-loop, roles already processed have committed to both dicts while the snapshot is not updated; revisit if multi-role publish atomicity is ever required.
+- **No dedicated concurrency test for HTMX `get_snapshot()` + rapid `publish()`** [`tests/unit/core/test_state_store.py`] — `get_snapshot()` is lock-free by design; the existing SSE concurrency test covers the harder write-path case; HTMX reads cannot observe out-of-order state by construction; add an explicit combined test when HTMX + SSE + publish load testing is required.
+
 ## Deferred from: code review of 4-3-implement-ocpp-and-dsmr-device-normalization (2026-05-03)
 
 - **`reversed()` ordering assumption for MeterValues** [`src/open_ems/adapters/ocpp/central_system.py:on_meter_values`] — latest sample taken from `reversed(meter_value)[-1]`; assumes OCPP chronological ordering of the list. OCPP 1.6 spec does not guarantee order. Acceptable for Story 4.3 scope; harden in Story 8 when production charger behaviour is observed.

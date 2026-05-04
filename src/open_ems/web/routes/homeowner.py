@@ -22,5 +22,9 @@ async def homeowner_dashboard(
     return _templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"csrf_token": _user.csrf_token, "title": "Homeowner Dashboard"},
+        {
+            "csrf_token": _user.csrf_token,
+            "dashboard_role": "homeowner",
+            "title": "Homeowner Dashboard",
+        },
     )
