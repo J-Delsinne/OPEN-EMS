@@ -90,7 +90,7 @@ development_status:
   epic-6: in-progress
   6-1-define-event-log-schema-and-implement-observabilityservice-with-dual-sink-logging: done
   6-2-enforce-append-only-semantics-and-event-retention-policy: done
-  6-3-implement-installer-note-storage-and-config-audit-log: backlog
+  6-3-implement-installer-note-storage-and-config-audit-log: done
   epic-6-retrospective: optional
 
   # ─── Epic 7: Decision Engine ───────────────────────────────────────────────

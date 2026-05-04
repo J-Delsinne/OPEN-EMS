@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from html import escape
 
 from open_ems.services.audit_log import (
+    MAX_INSTALLER_NOTE_LENGTH,
     VALID_ACTORS,
     VALID_EVENT_TYPES,
     serialize_audit_detail,
@@ -47,6 +49,18 @@ class FakeAuditLog:
                 "device_id": device_id,
                 "config_version": config_version,
             }
+        )
+
+    async def installer_note(self, note: str) -> None:
+        if len(note) > MAX_INSTALLER_NOTE_LENGTH:
+            raise ValueError(f"installer note must be <= {MAX_INSTALLER_NOTE_LENGTH} characters")
+        stripped = note.strip()
+        if not stripped:
+            raise ValueError("installer note must be non-empty")
+        await self.audit(
+            actor="installer",
+            event_type="INSTALLER",
+            summary=escape(stripped, quote=True),
         )
 
     def assert_has_event(self, *, event_type: str, actor: str) -> None:

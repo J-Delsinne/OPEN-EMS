@@ -10,6 +10,7 @@ from structlog.testing import capture_logs
 
 from open_ems.services.audit_log import (
     EVENT_LOG_SCHEMA_VERSION,
+    MAX_INSTALLER_NOTE_LENGTH,
     ObservabilityService,
 )
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
@@ -289,3 +290,43 @@ async def test_fake_validates_detail_serializable():
             summary="bad detail",
             detail={"at": datetime.now(UTC)},
         )
+
+
+# ── Story 6.3: installer note storage ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_installer_note_writes_sanitized_installer_event(mem_svc):
+    svc, conn = mem_svc
+
+    await svc.installer_note('  <script>alert("x")</script>  ')
+
+    async with conn.execute("SELECT actor, event_type, summary FROM event_log") as cur:
+        row = await cur.fetchone()
+    assert row["actor"] == "installer"
+    assert row["event_type"] == "INSTALLER"
+    assert row["summary"] == "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"
+
+
+@pytest.mark.asyncio
+async def test_installer_note_rejects_over_length_before_write(mem_svc):
+    svc, conn = mem_svc
+
+    with pytest.raises(ValueError, match=f"installer note must be <= {MAX_INSTALLER_NOTE_LENGTH} characters"):
+        await svc.installer_note("x" * (MAX_INSTALLER_NOTE_LENGTH + 1))
+
+    async with conn.execute("SELECT COUNT(*) FROM event_log") as cur:
+        row = await cur.fetchone()
+    assert row[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_installer_note_rejects_whitespace_before_write(mem_svc):
+    svc, conn = mem_svc
+
+    with pytest.raises(ValueError, match="installer note must be non-empty"):
+        await svc.installer_note(" \n\t ")
+
+    async with conn.execute("SELECT COUNT(*) FROM event_log") as cur:
+        row = await cur.fetchone()
+    assert row[0] == 0

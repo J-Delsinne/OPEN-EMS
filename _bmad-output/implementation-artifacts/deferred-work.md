@@ -1,5 +1,11 @@
 # Deferred Work Log
 
+## Deferred from: code review of 6-3-implement-installer-note-storage-and-config-audit-log (2026-05-04)
+
+- **Non-atomic `config_version` increment** [`src/open_ems/storage/repositories/config_audit_repo.py:55`] — `SELECT COALESCE(MAX(config_version), 0) + 1` + `INSERT` without `BEGIN IMMEDIATE`; same read-then-write pattern as `EventLogRepo`; SQLite serialized write-lock mitigates in single-process deployment; fix with explicit transaction wrapping when/if multi-process access is ever required.
+- **`ConfigAuditRepo.get_connection()` fallback path untested** [`src/open_ems/storage/repositories/config_audit_repo.py:35`] — the `None`-conn constructor fallback has no test coverage; consistent with the pre-existing `EventLogRepo` constructor pattern; cover when/if the injection contract is ever formalized.
+- **Migration `0006` downgrade path not tested** [`migrations/versions/0006_add_config_audit_log_table.py`] — `downgrade()` drops indexes then the table but has no integration test; consistent with `0005` approach; cover if a downgrade test suite is ever added to CI.
+
 ## Deferred from: code review of 4-4-implement-device-capability-profile-system-and-capability-gate (2026-05-03)
 
 - **Template profiles with `device_id="__placeholder__"` in public `__all__`** — direct dict import bypasses `get_profile` and returns profiles with a fake device identity; consider removing from `__all__` or documenting the hazard explicitly.

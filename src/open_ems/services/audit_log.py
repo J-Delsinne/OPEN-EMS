@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from html import escape
 
 import structlog
 
@@ -10,6 +11,7 @@ from open_ems.storage.repositories.event_log_repo import EventLogRepo
 logger = structlog.get_logger(__name__)
 
 EVENT_LOG_SCHEMA_VERSION: int = 1
+MAX_INSTALLER_NOTE_LENGTH: int = 2000
 VALID_ACTORS: frozenset[str] = frozenset({"system", "installer", "homeowner"})
 VALID_EVENT_TYPES: frozenset[str] = frozenset(
     {"DECISION", "DEVICE", "SYSTEM", "CONSTRAINT", "INSTALLER"}
@@ -67,4 +69,16 @@ class ObservabilityService:
             detail=detail,
             device_id=device_id,
             config_version=config_version,
+        )
+
+    async def installer_note(self, note: str) -> None:
+        if len(note) > MAX_INSTALLER_NOTE_LENGTH:
+            raise ValueError(f"installer note must be <= {MAX_INSTALLER_NOTE_LENGTH} characters")
+        stripped = note.strip()
+        if not stripped:
+            raise ValueError("installer note must be non-empty")
+        await self.audit(
+            actor="installer",
+            event_type="INSTALLER",
+            summary=escape(stripped, quote=True),
         )
