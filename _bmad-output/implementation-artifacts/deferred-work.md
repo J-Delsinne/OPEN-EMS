@@ -1,5 +1,12 @@
 # Deferred Work Log
 
+## Deferred from: code review of 7-2-implement-peak-limiting-logic-consuming-peakcontext (2026-05-04)
+
+- **`current_monthly_recorded_peak_kw`, `current_interval_start`, `current_interval_elapsed_seconds` unused in rule logic** [`src/open_ems/engine/rules/peak_limiting.py`] — intentional per spec; fields validated and available for Stories 7.3–7.5 and Epic 8 runtime.
+- **`current_interval_elapsed_seconds=900` (fully elapsed) treated identically to partial window** [`src/open_ems/engine/models.py:IntervalElapsedSeconds`] — no branch differentiates fully elapsed vs. mid-window; Story 7.5 / Epic 8 may need boundary differentiation.
+- **`_require_utc` private helper used exactly once** [`src/open_ems/engine/models.py`] — indirection without reuse; inline or promote to shared utility when a second UTC datetime field is validated.
+- **`LoadReductionAction` StrEnum members carry redundant explicit string values** [`src/open_ems/engine/rules/peak_limiting.py:14-15`] — cosmetic; `StrEnum` defaults to lowercase name; remove explicit values or document if the serialized string is an external contract.
+
 ## Deferred from: code review of 7-1-implement-systemoperatingmode-derivation-and-degradation-matrix (2026-05-04)
 
 - **`DegradedDeviceState.role` not validated against positional slot** [`src/open_ems/engine/models.py`] — spec uses `state.role` as source of truth; `from_snapshot` produces correct objects; add cross-validation when/if defensive hardening of direct construction is required.

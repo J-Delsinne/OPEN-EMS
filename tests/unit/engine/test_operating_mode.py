@@ -18,9 +18,19 @@ from open_ems.core import (
     SystemOperatingMode,
     SystemSnapshot,
 )
-from open_ems.engine import EvaluationInput, derive_recommended_operating_mode
+from open_ems.engine import EvaluationInput, PeakContext, derive_recommended_operating_mode
 
 _NOW_UTC = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
+
+
+def _peak_context() -> PeakContext:
+    return PeakContext(
+        current_partial_window_projection_kw=3.8,
+        configured_peak_limit_kw=5.0,
+        current_monthly_recorded_peak_kw=4.2,
+        current_interval_start=_NOW_UTC,
+        current_interval_elapsed_seconds=120,
+    )
 
 
 def _inverter() -> InverterState:
@@ -84,6 +94,7 @@ def _input_with(degraded_roles: Iterable[DeviceRole] = ()) -> EvaluationInput:
         grid_meter=_degraded(DeviceRole.grid_meter, "dsmr_stale")
         if DeviceRole.grid_meter in degraded
         else _grid_meter(),
+        peak_context=_peak_context(),
     )
 
 
@@ -93,6 +104,7 @@ def test_healthy_required_roles_with_absent_optional_roles_recommend_normal() ->
         battery=None,
         ev_charger=None,
         grid_meter=_grid_meter(),
+        peak_context=_peak_context(),
     )
 
     assert derive_recommended_operating_mode(evaluation_input) == SystemOperatingMode.normal
@@ -169,6 +181,7 @@ def test_derivation_is_deterministic_across_repeated_calls_and_input_constructio
         ev_charger=_degraded(DeviceRole.ev_charger),
         battery=_battery(),
         inverter=_degraded(DeviceRole.inverter),
+        peak_context=_peak_context(),
     )
 
     expected = SystemOperatingMode.degraded
@@ -204,10 +217,12 @@ def test_from_snapshot_copies_slots_and_does_not_echo_snapshot_operating_mode() 
         system_clock_status="valid",
     )
 
-    evaluation_input = EvaluationInput.from_snapshot(snapshot)
+    peak_context = _peak_context()
+    evaluation_input = EvaluationInput.from_snapshot(snapshot, peak_context=peak_context)
 
     assert evaluation_input.inverter is snapshot.inverter
     assert evaluation_input.battery is snapshot.battery
     assert evaluation_input.ev_charger is snapshot.ev_charger
     assert evaluation_input.grid_meter is snapshot.grid_meter
+    assert evaluation_input.peak_context is peak_context
     assert derive_recommended_operating_mode(evaluation_input) == SystemOperatingMode.normal

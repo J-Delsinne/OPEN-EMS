@@ -96,7 +96,7 @@ development_status:
   # ─── Epic 7: Decision Engine ───────────────────────────────────────────────
   epic-7: in-progress
   7-1-implement-systemoperatingmode-derivation-and-degradation-matrix: done
-  7-2-implement-peak-limiting-logic-consuming-peakcontext: backlog
+  7-2-implement-peak-limiting-logic-consuming-peakcontext: done
   7-3-implement-energy-strategy-evaluation-and-deterministic-conflict-resolution: backlog
   7-4-implement-battery-control-and-ev-scheduling-logic: backlog
   7-5-define-evaluationresult-contract-with-decision-reasons-and-cycle-timing: backlog
