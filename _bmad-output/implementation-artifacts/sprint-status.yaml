@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-05'
+last_updated: '2026-05-05'  # 8-0b done; PartialIntervalTracker reviewed and approved
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -94,16 +94,18 @@ development_status:
   epic-6-retrospective: optional
 
   # ─── Epic 7: Decision Engine ───────────────────────────────────────────────
-  epic-7: in-progress
+  epic-7: done
   7-1-implement-systemoperatingmode-derivation-and-degradation-matrix: done
   7-2-implement-peak-limiting-logic-consuming-peakcontext: done
   7-3-implement-energy-strategy-evaluation-and-deterministic-conflict-resolution: done
   7-4-implement-battery-control-and-ev-scheduling-logic: done
   7-5-define-evaluationresult-contract-with-decision-reasons-and-cycle-timing: done
-  epic-7-retrospective: optional
+  epic-7-retrospective: done
 
   # ─── Epic 8: Control Execution and Safety Enforcement ──────────────────────
-  epic-8: backlog
+  epic-8: in-progress
+  8-0-implement-actiontype-enum-and-exhaustive-dispatch: done
+  8-0b-implement-partialintervaltracker-contract-and-implementation: done
   8-1-implement-the-runtime-control-loop-with-adapter-polling-and-statestore-publishing: backlog
   8-2-implement-intentexecutor-policyguard-and-command-dispatch: backlog
   8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement: backlog

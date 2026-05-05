@@ -24,7 +24,7 @@ from open_ems.engine.rules.battery_control import (
     BatteryIntentAction,
     evaluate_battery_control,
 )
-from open_ems.engine.rules.energy_balancing import CandidateAction, PriorityBand
+from open_ems.engine.rules.energy_balancing import ActionType, CandidateAction, PriorityBand
 
 _NOW_UTC = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
 _DEFAULT_SLOT = object()
@@ -144,7 +144,7 @@ def _input_with(
 def _candidate(
     *,
     role: DeviceRole = DeviceRole.battery,
-    action_type: str = "battery_charge_from_pv",
+    action_type: ActionType = ActionType.battery_charge_from_pv,
 ) -> CandidateAction:
     return CandidateAction(
         role=role,
@@ -179,7 +179,7 @@ def test_battery_intent_contract_is_frozen_and_has_exact_actions() -> None:
 def test_battery_unavailable_returns_hold(battery_slot: DegradedDeviceState | None) -> None:
     intent = evaluate_battery_control(
         _input_with(battery=battery_slot),
-        _candidate(action_type="battery_discharge_to_avoid_import"),
+        _candidate(action_type=ActionType.battery_discharge_to_avoid_import),
     )
 
     assert intent.action is BatteryIntentAction.hold
@@ -191,11 +191,10 @@ def test_battery_unavailable_returns_hold(battery_slot: DegradedDeviceState | No
     "candidate",
     [
         None,
-        _candidate(role=DeviceRole.ev_charger, action_type="ev_charge"),
-        _candidate(action_type="unknown_battery_action"),
+        _candidate(role=DeviceRole.ev_charger, action_type=ActionType.ev_charge),
     ],
 )
-def test_absent_non_battery_or_unknown_candidate_returns_hold(
+def test_absent_or_non_battery_candidate_returns_hold(
     candidate: CandidateAction | None,
 ) -> None:
     intent = evaluate_battery_control(_input_with(), candidate)
@@ -206,7 +205,7 @@ def test_absent_non_battery_or_unknown_candidate_returns_hold(
 
 
 def test_charge_intent_requires_matching_charge_capability() -> None:
-    candidate = _candidate(action_type="battery_charge_from_pv")
+    candidate = _candidate(action_type=ActionType.battery_charge_from_pv)
     without_capability = evaluate_battery_control(_input_with(), candidate)
     with_capability = evaluate_battery_control(
         _input_with(
@@ -234,7 +233,7 @@ def test_discharge_at_or_below_reserve_floor_returns_hold(soc_percent: float) ->
                 capability_profile=_capability_profile(WriteCapability.set_discharge_rate),
             ),
         ),
-        _candidate(action_type="battery_discharge_to_avoid_import"),
+        _candidate(action_type=ActionType.battery_discharge_to_avoid_import),
     )
 
     assert intent.action is BatteryIntentAction.hold
@@ -244,9 +243,11 @@ def test_discharge_at_or_below_reserve_floor_returns_hold(soc_percent: float) ->
 
 @pytest.mark.parametrize(
     "action_type",
-    ["battery_discharge_to_avoid_import", "battery_support_ev"],
+    [ActionType.battery_discharge_to_avoid_import, ActionType.battery_support_ev],
 )
-def test_discharge_intent_requires_matching_discharge_capability(action_type: str) -> None:
+def test_discharge_intent_requires_matching_discharge_capability(
+    action_type: ActionType,
+) -> None:
     candidate = _candidate(action_type=action_type)
     without_capability = evaluate_battery_control(_input_with(), candidate)
     with_capability = evaluate_battery_control(
@@ -273,7 +274,7 @@ def test_mismatched_battery_capability_profile_is_treated_as_missing() -> None:
                 )
             )
         ),
-        _candidate(action_type="battery_charge_from_pv"),
+        _candidate(action_type=ActionType.battery_charge_from_pv),
     )
 
     assert intent.action is BatteryIntentAction.hold
@@ -286,11 +287,44 @@ def test_repeated_calls_with_same_input_return_equal_intents() -> None:
             capability_profile=_capability_profile(WriteCapability.set_charge_rate)
         )
     )
-    candidate = _candidate(action_type="battery_charge_from_pv")
+    candidate = _candidate(action_type=ActionType.battery_charge_from_pv)
 
     assert [evaluate_battery_control(evaluation_input, candidate) for _ in range(5)] == [
         evaluate_battery_control(evaluation_input, candidate)
     ] * 5
+
+
+_BATTERY_CHARGE_TYPES = {ActionType.battery_charge_from_pv}
+_BATTERY_DISCHARGE_TYPES = {
+    ActionType.battery_discharge_to_avoid_import,
+    ActionType.battery_support_ev,
+}
+_BATTERY_HANDLED_TYPES = _BATTERY_CHARGE_TYPES | _BATTERY_DISCHARGE_TYPES
+_BATTERY_RAISES_TYPES = set(ActionType) - _BATTERY_HANDLED_TYPES
+
+
+def test_battery_dispatch_exhaustive_all_battery_actiontypes() -> None:
+    capability_profile = _capability_profile(
+        WriteCapability.set_charge_rate, WriteCapability.set_discharge_rate
+    )
+    evaluation_input = _input_with(
+        battery_control=_battery_control_context(capability_profile=capability_profile)
+    )
+    for action_type in _BATTERY_CHARGE_TYPES:
+        result = evaluate_battery_control(evaluation_input, _candidate(action_type=action_type))
+        assert result.action is BatteryIntentAction.charge, action_type
+
+    for action_type in _BATTERY_DISCHARGE_TYPES:
+        result = evaluate_battery_control(evaluation_input, _candidate(action_type=action_type))
+        assert result.action is BatteryIntentAction.discharge, action_type
+
+
+def test_battery_dispatch_raises_on_ev_action_type() -> None:
+    evaluation_input = _input_with()
+    for action_type in _BATTERY_RAISES_TYPES:
+        candidate = _candidate(role=DeviceRole.battery, action_type=action_type)
+        with pytest.raises(ValueError, match="Unhandled battery ActionType"):
+            evaluate_battery_control(evaluation_input, candidate)
 
 
 def test_rule_module_avoids_runtime_infrastructure_imports() -> None:

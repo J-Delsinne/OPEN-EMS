@@ -24,6 +24,7 @@ from open_ems.core import (
 from open_ems.engine import EvaluationInput, PeakContext
 from open_ems.engine.models import BatteryControlContext, EVSchedulingContext
 from open_ems.engine.rules.energy_balancing import (
+    ActionType,
     CandidateAction,
     PriorityBand,
     StrategyEvaluation,
@@ -167,7 +168,7 @@ def _input_with(
 def _candidate(
     *,
     role: DeviceRole = DeviceRole.battery,
-    action_type: str = "battery_charge_from_pv",
+    action_type: ActionType = ActionType.battery_charge_from_pv,
     band: PriorityBand = PriorityBand.optimization,
     weight: int = 50,
     tiebreaker: str = "tb",
@@ -478,8 +479,12 @@ def test_smaller_source_rule_wins_when_band_weight_and_tiebreaker_equal() -> Non
 
 
 def test_smaller_action_type_wins_when_priority_metadata_is_identical() -> None:
-    later = _candidate(action_type="z_action", weight=20, tiebreaker="tb", source="same")
-    earlier = _candidate(action_type="a_action", weight=20, tiebreaker="tb", source="same")
+    later = _candidate(
+        action_type=ActionType.reduce_ev_charge_rate, weight=20, tiebreaker="tb", source="same"
+    )
+    earlier = _candidate(
+        action_type=ActionType.battery_charge_from_pv, weight=20, tiebreaker="tb", source="same"
+    )
 
     forward = resolve_conflicts([later, earlier])
     reverse = resolve_conflicts([earlier, later])
@@ -489,7 +494,7 @@ def test_smaller_action_type_wins_when_priority_metadata_is_identical() -> None:
 
 def test_resolve_conflicts_groups_per_role() -> None:
     battery = _candidate(role=DeviceRole.battery)
-    ev = _candidate(role=DeviceRole.ev_charger, action_type="ev_charge")
+    ev = _candidate(role=DeviceRole.ev_charger, action_type=ActionType.ev_charge)
     resolved = resolve_conflicts([battery, ev])
     assert resolved == {DeviceRole.battery: battery, DeviceRole.ev_charger: ev}
 
@@ -498,7 +503,12 @@ def test_resolve_conflicts_is_deterministic_across_input_ordering() -> None:
     candidates = [
         _candidate(weight=20, tiebreaker="b", source="src1"),
         _candidate(weight=10, tiebreaker="a", source="src2"),
-        _candidate(role=DeviceRole.ev_charger, action_type="ev_charge", weight=10, source="src3"),
+        _candidate(
+            role=DeviceRole.ev_charger,
+            action_type=ActionType.ev_charge,
+            weight=10,
+            source="src3",
+        ),
         _candidate(weight=10, tiebreaker="a", source="src4"),
         _candidate(band=PriorityBand.safety, weight=50, source="safety"),
     ]
@@ -575,3 +585,36 @@ def test_candidate_action_rejects_out_of_range_weight() -> None:
         _candidate(weight=0)
     with pytest.raises(ValidationError):
         _candidate(weight=101)
+
+
+def test_candidate_action_requires_actiontype_for_action_type_field() -> None:
+    valid = _candidate(action_type=ActionType.battery_charge_from_pv)
+    assert valid.action_type is ActionType.battery_charge_from_pv
+
+    with pytest.raises(ValidationError):
+        CandidateAction(
+            role=DeviceRole.battery,
+            action_type="completely_unknown_type",  # type: ignore[arg-type]
+            priority_band=PriorityBand.optimization,
+            priority_weight=20,
+            tiebreaker_key="tb",
+            source_rule="src",
+        )
+
+
+def test_all_actiontype_members_have_expected_membership() -> None:
+    assert set(ActionType) == {
+        ActionType.battery_charge_from_pv,
+        ActionType.battery_discharge_to_avoid_import,
+        ActionType.battery_support_ev,
+        ActionType.permit_ev_charge,
+        ActionType.ev_charge,
+        ActionType.reduce_ev_charge_rate,
+    }
+
+
+def test_evaluate_energy_strategy_handles_all_known_strategies() -> None:
+    for strategy in EnergyStrategy:
+        result = evaluate_energy_strategy(_input_with(strategy=strategy))
+        assert isinstance(result, StrategyEvaluation)
+        assert result.strategy is strategy

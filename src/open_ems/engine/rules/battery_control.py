@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from open_ems.core import BatteryState, DeviceRole
 from open_ems.core.devices import NonEmptyStr, WriteCapability
 from open_ems.engine.models import EvaluationInput
-from open_ems.engine.rules.energy_balancing import CandidateAction
+from open_ems.engine.rules.energy_balancing import ActionType, CandidateAction
 
 
 class BatteryIntentAction(enum.StrEnum):
@@ -32,15 +32,6 @@ class BatteryIntent(BaseModel):
     source_candidate: CandidateAction | None
 
 
-_CHARGE_ACTIONS = frozenset({"battery_charge_from_pv"})
-_DISCHARGE_ACTIONS = frozenset(
-    {
-        "battery_discharge_to_avoid_import",
-        "battery_support_ev",
-    }
-)
-
-
 def evaluate_battery_control(
     evaluation_input: EvaluationInput,
     resolved_candidate: CandidateAction | None,
@@ -53,7 +44,8 @@ def evaluate_battery_control(
     if resolved_candidate is None or resolved_candidate.role is not DeviceRole.battery:
         return _hold(evaluation_input, "battery_candidate_unavailable", resolved_candidate)
 
-    if resolved_candidate.action_type in _CHARGE_ACTIONS:
+    action_type = resolved_candidate.action_type
+    if action_type is ActionType.battery_charge_from_pv:
         if not _has_capability(evaluation_input, battery, WriteCapability.set_charge_rate):
             return _hold(evaluation_input, "battery_charge_capability_missing", resolved_candidate)
         return BatteryIntent(
@@ -63,8 +55,10 @@ def evaluate_battery_control(
             reason_code="battery_charge_allowed",
             source_candidate=resolved_candidate,
         )
-
-    if resolved_candidate.action_type in _DISCHARGE_ACTIONS:
+    elif action_type in (
+        ActionType.battery_discharge_to_avoid_import,
+        ActionType.battery_support_ev,
+    ):
         if battery.soc_percent <= evaluation_input.battery_control.reserve_floor_percent:
             return _hold(
                 evaluation_input,
@@ -84,8 +78,8 @@ def evaluate_battery_control(
             reason_code="battery_discharge_allowed",
             source_candidate=resolved_candidate,
         )
-
-    return _hold(evaluation_input, "battery_candidate_unavailable", resolved_candidate)
+    else:
+        raise ValueError(f"Unhandled battery ActionType: {action_type!r}")
 
 
 def _has_capability(

@@ -12,6 +12,7 @@ from open_ems.engine.operating_mode import derive_recommended_operating_mode
 from open_ems.engine.result import EvaluationResult
 from open_ems.engine.rules.battery_control import BatteryIntent, evaluate_battery_control
 from open_ems.engine.rules.energy_balancing import (
+    ActionType,
     CandidateAction,
     PriorityBand,
     evaluate_energy_strategy,
@@ -78,7 +79,7 @@ def _peak_candidates_to_candidate_actions(
             candidates.append(
                 CandidateAction(
                     role=DeviceRole.battery,
-                    action_type="battery_discharge_to_avoid_import",
+                    action_type=ActionType.battery_discharge_to_avoid_import,
                     priority_band=PriorityBand.safety,
                     priority_weight=1,
                     tiebreaker_key="peak_limit:discharge_battery",
@@ -89,7 +90,7 @@ def _peak_candidates_to_candidate_actions(
             candidates.append(
                 CandidateAction(
                     role=DeviceRole.ev_charger,
-                    action_type="reduce_ev_charge_rate",
+                    action_type=ActionType.reduce_ev_charge_rate,
                     priority_band=PriorityBand.safety,
                     priority_weight=1,
                     tiebreaker_key="peak_limit:reduce_ev_charge_rate",

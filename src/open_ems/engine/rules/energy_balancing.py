@@ -22,6 +22,17 @@ from open_ems.engine.models import EvaluationInput
 from open_ems.engine.operating_mode import derive_recommended_operating_mode
 
 
+class ActionType(enum.StrEnum):
+    """All valid action type values emitted by decision-engine rules."""
+
+    battery_charge_from_pv = "battery_charge_from_pv"
+    battery_discharge_to_avoid_import = "battery_discharge_to_avoid_import"
+    battery_support_ev = "battery_support_ev"
+    permit_ev_charge = "permit_ev_charge"
+    ev_charge = "ev_charge"
+    reduce_ev_charge_rate = "reduce_ev_charge_rate"
+
+
 class PriorityBand(enum.StrEnum):
     """Conflict-resolution priority band per FR11b: safety > optimization > convenience."""
 
@@ -49,7 +60,7 @@ class CandidateAction(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     role: DeviceRole
-    action_type: NonEmptyStr
+    action_type: ActionType
     priority_band: PriorityBand
     priority_weight: int = Field(ge=1, le=100)
     tiebreaker_key: NonEmptyStr
@@ -91,11 +102,7 @@ def evaluate_energy_strategy(evaluation_input: EvaluationInput) -> StrategyEvalu
     }
     handler = dispatch.get(evaluation_input.strategy)
     if handler is None:
-        return StrategyEvaluation(
-            strategy=evaluation_input.strategy,
-            strategy_candidates=(),
-            suppressed_by_operating_mode=None,
-        )
+        raise ValueError(f"Unhandled EnergyStrategy: {evaluation_input.strategy!r}")
     candidates = handler(evaluation_input)
     return StrategyEvaluation(
         strategy=evaluation_input.strategy,
@@ -136,7 +143,7 @@ def _evaluate_minimize_cost(evaluation_input: EvaluationInput) -> tuple[Candidat
         actions.append(
             CandidateAction(
                 role=DeviceRole.battery,
-                action_type="battery_charge_from_pv",
+                action_type=ActionType.battery_charge_from_pv,
                 priority_band=PriorityBand.optimization,
                 priority_weight=20,
                 tiebreaker_key="minimize_cost:battery_charge_from_pv",
@@ -149,7 +156,7 @@ def _evaluate_minimize_cost(evaluation_input: EvaluationInput) -> tuple[Candidat
         actions.append(
             CandidateAction(
                 role=DeviceRole.ev_charger,
-                action_type="permit_ev_charge",
+                action_type=ActionType.permit_ev_charge,
                 priority_band=PriorityBand.convenience,
                 priority_weight=80,
                 tiebreaker_key="minimize_cost:permit_ev_charge",
@@ -176,7 +183,7 @@ def _evaluate_maximize_self_consumption(
         actions.append(
             CandidateAction(
                 role=DeviceRole.battery,
-                action_type="battery_charge_from_pv",
+                action_type=ActionType.battery_charge_from_pv,
                 priority_band=PriorityBand.optimization,
                 priority_weight=10,
                 tiebreaker_key="maximize_self_consumption:battery_charge_from_pv",
@@ -188,7 +195,7 @@ def _evaluate_maximize_self_consumption(
         actions.append(
             CandidateAction(
                 role=DeviceRole.battery,
-                action_type="battery_discharge_to_avoid_import",
+                action_type=ActionType.battery_discharge_to_avoid_import,
                 priority_band=PriorityBand.optimization,
                 priority_weight=15,
                 tiebreaker_key="maximize_self_consumption:battery_discharge_to_avoid_import",
@@ -208,7 +215,7 @@ def _evaluate_prioritize_ev(evaluation_input: EvaluationInput) -> tuple[Candidat
         actions.append(
             CandidateAction(
                 role=DeviceRole.ev_charger,
-                action_type="ev_charge",
+                action_type=ActionType.ev_charge,
                 priority_band=PriorityBand.convenience,
                 priority_weight=10,
                 tiebreaker_key="prioritize_ev:ev_charge",
@@ -220,7 +227,7 @@ def _evaluate_prioritize_ev(evaluation_input: EvaluationInput) -> tuple[Candidat
         actions.append(
             CandidateAction(
                 role=DeviceRole.battery,
-                action_type="battery_support_ev",
+                action_type=ActionType.battery_support_ev,
                 priority_band=PriorityBand.optimization,
                 priority_weight=30,
                 tiebreaker_key="prioritize_ev:battery_support_ev",

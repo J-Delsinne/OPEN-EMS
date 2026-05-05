@@ -23,7 +23,7 @@ from open_ems.engine.models import (
     EVChargingWindow,
     EVSchedulingContext,
 )
-from open_ems.engine.rules.energy_balancing import CandidateAction, PriorityBand
+from open_ems.engine.rules.energy_balancing import ActionType, CandidateAction, PriorityBand
 from open_ems.engine.rules.ev_scheduling import (
     EVChargerIntent,
     EVChargerIntentAction,
@@ -159,7 +159,7 @@ def _input_with(
 def _candidate(
     *,
     role: DeviceRole = DeviceRole.ev_charger,
-    action_type: str = "ev_charge",
+    action_type: ActionType = ActionType.ev_charge,
 ) -> CandidateAction:
     return CandidateAction(
         role=role,
@@ -203,11 +203,10 @@ def test_ev_charger_unavailable_returns_hold(ev_slot: DegradedDeviceState | None
     "candidate",
     [
         None,
-        _candidate(role=DeviceRole.battery, action_type="battery_charge_from_pv"),
-        _candidate(action_type="unknown_ev_action"),
+        _candidate(role=DeviceRole.battery, action_type=ActionType.battery_charge_from_pv),
     ],
 )
-def test_absent_non_ev_or_unknown_candidate_returns_hold(
+def test_absent_or_non_ev_candidate_returns_hold(
     candidate: CandidateAction | None,
 ) -> None:
     intent = evaluate_ev_scheduling(_input_with(), candidate)
@@ -217,8 +216,8 @@ def test_absent_non_ev_or_unknown_candidate_returns_hold(
     assert intent.source_candidate is candidate
 
 
-@pytest.mark.parametrize("action_type", ["permit_ev_charge", "ev_charge"])
-def test_charge_inside_configured_window_returns_charge(action_type: str) -> None:
+@pytest.mark.parametrize("action_type", [ActionType.permit_ev_charge, ActionType.ev_charge])
+def test_charge_inside_configured_window_returns_charge(action_type: ActionType) -> None:
     intent = evaluate_ev_scheduling(
         _input_with(ev_scheduling=_ev_scheduling_context(charging_window=_window(10, 14))),
         _candidate(action_type=action_type),
@@ -419,6 +418,32 @@ def test_repeated_calls_with_same_input_return_equal_intents() -> None:
     assert [evaluate_ev_scheduling(evaluation_input, candidate) for _ in range(5)] == [
         evaluate_ev_scheduling(evaluation_input, candidate)
     ] * 5
+
+
+_EV_CHARGE_TYPES = {ActionType.permit_ev_charge, ActionType.ev_charge}
+_EV_HOLD_TYPES = {ActionType.reduce_ev_charge_rate}
+_EV_HANDLED_TYPES = _EV_CHARGE_TYPES | _EV_HOLD_TYPES
+_EV_RAISES_TYPES = set(ActionType) - _EV_HANDLED_TYPES
+
+
+def test_ev_dispatch_reduce_ev_charge_rate_produces_hold() -> None:
+    candidate = _candidate(role=DeviceRole.ev_charger, action_type=ActionType.reduce_ev_charge_rate)
+    intent = evaluate_ev_scheduling(
+        _input_with(ev_scheduling=_ev_scheduling_context(homeowner_override_active=True)),
+        candidate,
+    )
+    assert intent.action is EVChargerIntentAction.hold
+    assert intent.reason_code == "ev_candidate_unavailable"
+
+
+def test_ev_dispatch_raises_on_battery_action_type() -> None:
+    evaluation_input = _input_with(
+        ev_scheduling=_ev_scheduling_context(homeowner_override_active=True)
+    )
+    for action_type in _EV_RAISES_TYPES:
+        candidate = _candidate(role=DeviceRole.ev_charger, action_type=action_type)
+        with pytest.raises(ValueError, match="Unhandled EV ActionType"):
+            evaluate_ev_scheduling(evaluation_input, candidate)
 
 
 def test_rule_module_avoids_runtime_infrastructure_imports() -> None:

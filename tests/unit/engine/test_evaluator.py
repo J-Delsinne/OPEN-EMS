@@ -28,7 +28,7 @@ from open_ems.engine.evaluator import (
 from open_ems.engine.models import BatteryControlContext, EVChargingWindow, EVSchedulingContext
 from open_ems.engine.result import EvaluationResult
 from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
-from open_ems.engine.rules.energy_balancing import CandidateAction, PriorityBand
+from open_ems.engine.rules.energy_balancing import ActionType, CandidateAction, PriorityBand
 from open_ems.engine.rules.ev_scheduling import EVChargerIntent, EVChargerIntentAction
 
 _NOW_UTC = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
@@ -38,7 +38,7 @@ _DEFAULT_SLOT = object()
 def _candidate(
     *,
     role: DeviceRole = DeviceRole.battery,
-    action_type: str = "battery_charge_from_pv",
+    action_type: ActionType = ActionType.battery_charge_from_pv,
 ) -> CandidateAction:
     return CandidateAction(
         role=role,
@@ -193,7 +193,7 @@ def _ev_intent() -> EVChargerIntent:
         target_charge_rate_kw=None,
         homeowner_override_active=False,
         reason_code="ev_charge_allowed",
-        source_candidate=_candidate(role=DeviceRole.ev_charger, action_type="ev_charge"),
+        source_candidate=_candidate(role=DeviceRole.ev_charger, action_type=ActionType.ev_charge),
     )
 
 
@@ -207,7 +207,7 @@ def _battery_intent_with(
         target_power_kw=None,
         reserve_floor_percent=25.0,
         reason_code=reason_code,
-        source_candidate=_candidate(action_type="battery_discharge_to_avoid_import"),
+        source_candidate=_candidate(action_type=ActionType.battery_discharge_to_avoid_import),
     )
 
 
@@ -222,7 +222,7 @@ def _ev_intent_with(
         target_charge_rate_kw=None,
         homeowner_override_active=homeowner_override_active,
         reason_code=reason_code,
-        source_candidate=_candidate(role=DeviceRole.ev_charger, action_type="ev_charge"),
+        source_candidate=_candidate(role=DeviceRole.ev_charger, action_type=ActionType.ev_charge),
     )
 
 

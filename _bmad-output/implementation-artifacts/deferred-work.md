@@ -1,5 +1,13 @@
 # Deferred Work Log
 
+## Deferred from: code review of 8-0-implement-actiontype-enum-and-exhaustive-dispatch (2026-05-05)
+
+- **Flat `ActionType` enum has no role-to-action-type consistency validation on `CandidateAction`** [`src/open_ems/engine/rules/energy_balancing.py:CandidateAction`] — `role=DeviceRole.ev_charger, action_type=ActionType.battery_charge_from_pv` is accepted by Pydantic; cross-domain combination is a latent data-integrity risk; pre-existing design decision per Dev Notes; add a model validator if defensive hardening is ever required.
+- **Exhaustive dispatch guarantee is purely social** [`src/open_ems/engine/rules/battery_control.py`, `ev_scheduling.py`] — no `__init_subclass__`, assertion, or CI guard ensures battery/EV dispatch stays in sync when a new `ActionType` member is added; tests catch it today only via manual set maintenance; add a structural guard (e.g. assertion `set(ActionType) == _BATTERY_HANDLED_TYPES | _EV_HANDLED_TYPES`) when ActionType is next extended.
+- **`ev_charge` and `permit_ev_charge` produce identical dispatch behavior in `evaluate_ev_scheduling` with no explanation of the semantic distinction** [`src/open_ems/engine/rules/ev_scheduling.py`] — both currently proceed to the same EV charging logic; document the difference or consolidate if the distinction is never used downstream.
+- **Discharge SoC boundary just above `reserve_floor_percent` (e.g. `floor + 0.01`) not covered by a positive-case test** [`tests/unit/engine/rules/test_battery_control.py`] — pre-existing coverage gap; add a parametrized case confirming discharge is permitted when `soc > floor`.
+- **Peak-projection guard equality boundary (`projection_kw == limit_kw`) and negative headroom formatting untested** [`tests/unit/engine/rules/test_ev_scheduling.py`] — pre-existing; add a case where `current_partial_window_projection_kw == configured_peak_limit_kw` to confirm hold is returned at the boundary.
+
 ## Deferred from: code review of 7-5-define-evaluationresult-contract-with-decision-reasons-and-cycle-timing (2026-05-05)
 
 - **`frozen=True` shallow immutability** [`src/open_ems/engine/result.py`] — `EvaluationResult` is frozen but `BatteryIntent`/`EVChargerIntent` are not; tuple contents can be mutated in place; pre-existing design from Stories 7.3-7.4; fix when/if deeper immutability is required.

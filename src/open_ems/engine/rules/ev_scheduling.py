@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from open_ems.core import DeviceRole, EVChargerState
 from open_ems.core.devices import NonEmptyStr, WriteCapability
 from open_ems.engine.models import EvaluationInput, EVChargingWindow
-from open_ems.engine.rules.energy_balancing import CandidateAction
+from open_ems.engine.rules.energy_balancing import ActionType, CandidateAction
 
 
 class EVChargerIntentAction(enum.StrEnum):
@@ -34,9 +34,6 @@ class EVChargerIntent(BaseModel):
     source_candidate: CandidateAction | None
 
 
-_CHARGE_ACTIONS = frozenset({"permit_ev_charge", "ev_charge"})
-
-
 def evaluate_ev_scheduling(
     evaluation_input: EvaluationInput,
     resolved_candidate: CandidateAction | None,
@@ -46,12 +43,16 @@ def evaluate_ev_scheduling(
     if not isinstance(ev_charger, EVChargerState):
         return _hold(evaluation_input, "ev_charger_unavailable", resolved_candidate)
 
-    if (
-        resolved_candidate is None
-        or resolved_candidate.role is not DeviceRole.ev_charger
-        or resolved_candidate.action_type not in _CHARGE_ACTIONS
-    ):
+    if resolved_candidate is None or resolved_candidate.role is not DeviceRole.ev_charger:
         return _hold(evaluation_input, "ev_candidate_unavailable", resolved_candidate)
+
+    action_type = resolved_candidate.action_type
+    if action_type is ActionType.reduce_ev_charge_rate:
+        # Intentional hold: peak_limiting candidate; the peak-projection guard below would
+        # independently block EV charging under peak overshoot anyway.
+        return _hold(evaluation_input, "ev_candidate_unavailable", resolved_candidate)
+    elif action_type not in (ActionType.permit_ev_charge, ActionType.ev_charge):
+        raise ValueError(f"Unhandled EV ActionType: {action_type!r}")
 
     peak_context = evaluation_input.peak_context
     if peak_context.current_partial_window_projection_kw >= peak_context.configured_peak_limit_kw:
