@@ -18,7 +18,7 @@ Percent = Annotated[float, Field(ge=0.0, le=100.0)]
 IntervalElapsedSeconds = Annotated[int, Field(ge=0, le=900)]
 
 
-def _require_utc(value: datetime, field_name: str) -> datetime:
+def require_utc(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware UTC")
     if value.utcoffset() != timedelta(0):
@@ -48,7 +48,7 @@ class PeakContext(BaseModel):
     @field_validator("current_interval_start")
     @classmethod
     def _interval_start_must_be_clock_aligned_utc(cls, value: datetime) -> datetime:
-        value = _require_utc(value, "current_interval_start")
+        value = require_utc(value, "current_interval_start")
         if value.minute % 15 != 0 or value.second != 0 or value.microsecond != 0:
             raise ValueError("current_interval_start must be aligned to a 15-minute boundary")
         return value
@@ -102,7 +102,7 @@ class EVSchedulingContext(BaseModel):
     @field_validator("evaluated_at")
     @classmethod
     def _evaluated_at_must_be_utc(cls, value: datetime) -> datetime:
-        return _require_utc(value, "evaluated_at")
+        return require_utc(value, "evaluated_at")
 
 
 class EvaluationInput(BaseModel):

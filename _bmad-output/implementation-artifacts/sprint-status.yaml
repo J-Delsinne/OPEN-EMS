@@ -99,7 +99,7 @@ development_status:
   7-2-implement-peak-limiting-logic-consuming-peakcontext: done
   7-3-implement-energy-strategy-evaluation-and-deterministic-conflict-resolution: done
   7-4-implement-battery-control-and-ev-scheduling-logic: done
-  7-5-define-evaluationresult-contract-with-decision-reasons-and-cycle-timing: backlog
+  7-5-define-evaluationresult-contract-with-decision-reasons-and-cycle-timing: done
   epic-7-retrospective: optional
 
   # ─── Epic 8: Control Execution and Safety Enforcement ──────────────────────

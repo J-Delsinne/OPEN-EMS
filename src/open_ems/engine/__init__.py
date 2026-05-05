@@ -1,6 +1,7 @@
 """Pure decision-engine contracts and derivation helpers."""
 
 from open_ems.core import EnergyStrategy
+from open_ems.engine.evaluator import evaluate_cycle
 from open_ems.engine.models import (
     BatteryControlContext,
     EvaluationInput,
@@ -9,6 +10,7 @@ from open_ems.engine.models import (
     PeakContext,
 )
 from open_ems.engine.operating_mode import derive_recommended_operating_mode
+from open_ems.engine.result import EvaluationResult
 from open_ems.engine.rules.battery_control import (
     BatteryIntent,
     BatteryIntentAction,
@@ -43,12 +45,14 @@ __all__ = [
     "EVSchedulingContext",
     "EnergyStrategy",
     "EvaluationInput",
+    "EvaluationResult",
     "LoadReductionAction",
     "PeakContext",
     "PeakLimitDecision",
     "PriorityBand",
     "StrategyEvaluation",
     "derive_recommended_operating_mode",
+    "evaluate_cycle",
     "evaluate_battery_control",
     "evaluate_energy_strategy",
     "evaluate_ev_scheduling",

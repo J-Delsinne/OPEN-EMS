@@ -1,5 +1,12 @@
 # Deferred Work Log
 
+## Deferred from: code review of 7-5-define-evaluationresult-contract-with-decision-reasons-and-cycle-timing (2026-05-05)
+
+- **`frozen=True` shallow immutability** [`src/open_ems/engine/result.py`] — `EvaluationResult` is frozen but `BatteryIntent`/`EVChargerIntent` are not; tuple contents can be mutated in place; pre-existing design from Stories 7.3-7.4; fix when/if deeper immutability is required.
+- **`isinstance(battery, BatteryState)` guard in reason helpers** [`src/open_ems/engine/evaluator.py:_reason_for_battery_intent`] — implies `EvaluationInput.battery` may be non-`BatteryState`; pre-existing type ambiguity from `EvaluationInput` model design; clarify annotation when input model is revisited.
+- **`cycle_id` not validated as v4 at model construction** [`src/open_ems/engine/result.py:EvaluationResult`] — spec says "UUID", not "UUID4"; model accepts any UUID version; only the generator enforces v4; add a field_validator if model-level enforcement is ever required.
+- **Future `EVChargerIntentAction` variants silently labelled "hold" in window reason** [`src/open_ems/engine/evaluator.py:_ev_window_inactive_reason`] — low-risk for current two-action scope; add explicit exhaustiveness check when `EVChargerIntentAction` is extended.
+
 ## Deferred from: code review of 7-4-implement-battery-control-and-ev-scheduling-logic (2026-05-05)
 
 - **`resolve_conflicts` priority weight sort direction undocumented** [`src/open_ems/engine/rules/energy_balancing.py:resolve_conflicts`] — ascending sort means weight=1 beats weight=100; field name is misleading; add a docstring or rename when story 7.3 is revisited.
