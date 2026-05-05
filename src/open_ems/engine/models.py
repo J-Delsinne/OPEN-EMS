@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from open_ems.core.state import DeviceSlot, SystemSnapshot
+from open_ems.core.devices import DeviceCapabilityProfile, NonEmptyStr
+from open_ems.core.state import DeviceSlot, EnergyStrategy, SystemSnapshot
 
 PositiveKw = Annotated[float, Field(gt=0.0)]
 NonNegativeKw = Annotated[float, Field(ge=0.0)]
+Percent = Annotated[float, Field(ge=0.0, le=100.0)]
 IntervalElapsedSeconds = Annotated[int, Field(ge=0, le=900)]
 
 
@@ -51,6 +54,57 @@ class PeakContext(BaseModel):
         return value
 
 
+class BatteryControlContext(BaseModel):
+    """Pure battery-control context supplied by the evaluation caller."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reserve_floor_percent: Percent
+    capability_profile: DeviceCapabilityProfile | None = None
+
+
+class EVChargingWindow(BaseModel):
+    """Local-time EV charging preference window."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    start_local_time: time
+    end_local_time: time
+    timezone_name: NonEmptyStr
+
+    @field_validator("timezone_name")
+    @classmethod
+    def _timezone_name_must_resolve(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("timezone_name must be accepted by zoneinfo.ZoneInfo") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _start_and_end_must_differ(self) -> EVChargingWindow:
+        if self.start_local_time == self.end_local_time:
+            raise ValueError("start_local_time and end_local_time must not be equal")
+        return self
+
+
+class EVSchedulingContext(BaseModel):
+    """Pure EV scheduling context supplied by the evaluation caller."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    capability_profile: DeviceCapabilityProfile | None = None
+    charging_window: EVChargingWindow | None = None
+    homeowner_override_active: bool
+    evaluated_at: datetime
+    target_charge_rate_kw: PositiveKw | None = None
+
+    @field_validator("evaluated_at")
+    @classmethod
+    def _evaluated_at_must_be_utc(cls, value: datetime) -> datetime:
+        return _require_utc(value, "evaluated_at")
+
+
 class EvaluationInput(BaseModel):
     """Snapshot-derived input for one decision-engine evaluation cycle."""
 
@@ -61,6 +115,9 @@ class EvaluationInput(BaseModel):
     ev_charger: DeviceSlot
     grid_meter: DeviceSlot
     peak_context: PeakContext
+    strategy: EnergyStrategy
+    battery_control: BatteryControlContext
+    ev_scheduling: EVSchedulingContext
 
     @model_validator(mode="after")
     def _required_slots_present(self) -> EvaluationInput:
@@ -72,7 +129,13 @@ class EvaluationInput(BaseModel):
 
     @classmethod
     def from_snapshot(
-        cls, snapshot: SystemSnapshot, *, peak_context: PeakContext
+        cls,
+        snapshot: SystemSnapshot,
+        *,
+        peak_context: PeakContext,
+        strategy: EnergyStrategy,
+        battery_control: BatteryControlContext,
+        ev_scheduling: EVSchedulingContext,
     ) -> EvaluationInput:
         """Build engine input from a StateStore snapshot without retaining the store."""
         return cls(
@@ -81,4 +144,7 @@ class EvaluationInput(BaseModel):
             ev_charger=snapshot.ev_charger,
             grid_meter=snapshot.grid_meter,
             peak_context=peak_context,
+            strategy=strategy,
+            battery_control=battery_control,
+            ev_scheduling=ev_scheduling,
         )

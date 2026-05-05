@@ -11,12 +11,14 @@ from open_ems.core import (
     BatteryState,
     DegradedDeviceState,
     DeviceRole,
+    EnergyStrategy,
     EVChargerState,
     GridMeterState,
     InverterState,
     SystemOperatingMode,
 )
 from open_ems.engine import EvaluationInput, PeakContext
+from open_ems.engine.models import BatteryControlContext, EVSchedulingContext
 from open_ems.engine.rules.peak_limiting import (
     LoadReductionAction,
     evaluate_peak_limiting,
@@ -24,6 +26,7 @@ from open_ems.engine.rules.peak_limiting import (
 
 _NOW_UTC = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
 _DEFAULT_SLOT = object()
+_DEFAULT_STRATEGY = EnergyStrategy.minimize_cost
 
 
 def _peak_context(
@@ -40,6 +43,20 @@ def _peak_context(
         current_monthly_recorded_peak_kw=monthly_peak_kw,
         current_interval_start=interval_start,
         current_interval_elapsed_seconds=elapsed_seconds,
+    )
+
+
+def _battery_control_context() -> BatteryControlContext:
+    return BatteryControlContext(reserve_floor_percent=20.0, capability_profile=None)
+
+
+def _ev_scheduling_context() -> EVSchedulingContext:
+    return EVSchedulingContext(
+        capability_profile=None,
+        charging_window=None,
+        homeowner_override_active=False,
+        evaluated_at=_NOW_UTC,
+        target_charge_rate_kw=None,
     )
 
 
@@ -125,6 +142,9 @@ def _input_with(
         if DeviceRole.grid_meter in degraded
         else _grid_meter(),
         peak_context=peak_context if peak_context is not None else _peak_context(),
+        strategy=_DEFAULT_STRATEGY,
+        battery_control=_battery_control_context(),
+        ev_scheduling=_ev_scheduling_context(),
     )
 
 

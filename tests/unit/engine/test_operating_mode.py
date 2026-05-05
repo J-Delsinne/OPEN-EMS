@@ -11,6 +11,7 @@ from open_ems.core import (
     ComponentState,
     DegradedDeviceState,
     DeviceRole,
+    EnergyStrategy,
     EVChargerState,
     GlobalState,
     GridMeterState,
@@ -19,8 +20,10 @@ from open_ems.core import (
     SystemSnapshot,
 )
 from open_ems.engine import EvaluationInput, PeakContext, derive_recommended_operating_mode
+from open_ems.engine.models import BatteryControlContext, EVSchedulingContext
 
 _NOW_UTC = datetime(2026, 5, 4, 12, 0, 0, tzinfo=UTC)
+_DEFAULT_STRATEGY = EnergyStrategy.minimize_cost
 
 
 def _peak_context() -> PeakContext:
@@ -30,6 +33,20 @@ def _peak_context() -> PeakContext:
         current_monthly_recorded_peak_kw=4.2,
         current_interval_start=_NOW_UTC,
         current_interval_elapsed_seconds=120,
+    )
+
+
+def _battery_control_context() -> BatteryControlContext:
+    return BatteryControlContext(reserve_floor_percent=20.0, capability_profile=None)
+
+
+def _ev_scheduling_context() -> EVSchedulingContext:
+    return EVSchedulingContext(
+        capability_profile=None,
+        charging_window=None,
+        homeowner_override_active=False,
+        evaluated_at=_NOW_UTC,
+        target_charge_rate_kw=None,
     )
 
 
@@ -95,6 +112,9 @@ def _input_with(degraded_roles: Iterable[DeviceRole] = ()) -> EvaluationInput:
         if DeviceRole.grid_meter in degraded
         else _grid_meter(),
         peak_context=_peak_context(),
+        strategy=_DEFAULT_STRATEGY,
+        battery_control=_battery_control_context(),
+        ev_scheduling=_ev_scheduling_context(),
     )
 
 
@@ -105,6 +125,9 @@ def test_healthy_required_roles_with_absent_optional_roles_recommend_normal() ->
         ev_charger=None,
         grid_meter=_grid_meter(),
         peak_context=_peak_context(),
+        strategy=_DEFAULT_STRATEGY,
+        battery_control=_battery_control_context(),
+        ev_scheduling=_ev_scheduling_context(),
     )
 
     assert derive_recommended_operating_mode(evaluation_input) == SystemOperatingMode.normal
@@ -166,6 +189,10 @@ def test_required_slots_reject_none(missing_field: str) -> None:
         "battery": _battery(),
         "ev_charger": _ev_charger(),
         "grid_meter": _grid_meter(),
+        "peak_context": _peak_context(),
+        "strategy": _DEFAULT_STRATEGY,
+        "battery_control": _battery_control_context(),
+        "ev_scheduling": _ev_scheduling_context(),
     }
     slots[missing_field] = None
     with pytest.raises(ValidationError):
@@ -182,6 +209,9 @@ def test_derivation_is_deterministic_across_repeated_calls_and_input_constructio
         battery=_battery(),
         inverter=_degraded(DeviceRole.inverter),
         peak_context=_peak_context(),
+        strategy=_DEFAULT_STRATEGY,
+        battery_control=_battery_control_context(),
+        ev_scheduling=_ev_scheduling_context(),
     )
 
     expected = SystemOperatingMode.degraded
@@ -218,11 +248,22 @@ def test_from_snapshot_copies_slots_and_does_not_echo_snapshot_operating_mode() 
     )
 
     peak_context = _peak_context()
-    evaluation_input = EvaluationInput.from_snapshot(snapshot, peak_context=peak_context)
+    battery_control = _battery_control_context()
+    ev_scheduling = _ev_scheduling_context()
+    evaluation_input = EvaluationInput.from_snapshot(
+        snapshot,
+        peak_context=peak_context,
+        strategy=_DEFAULT_STRATEGY,
+        battery_control=battery_control,
+        ev_scheduling=ev_scheduling,
+    )
 
     assert evaluation_input.inverter is snapshot.inverter
     assert evaluation_input.battery is snapshot.battery
     assert evaluation_input.ev_charger is snapshot.ev_charger
     assert evaluation_input.grid_meter is snapshot.grid_meter
     assert evaluation_input.peak_context is peak_context
+    assert evaluation_input.strategy is _DEFAULT_STRATEGY
+    assert evaluation_input.battery_control is battery_control
+    assert evaluation_input.ev_scheduling is ev_scheduling
     assert derive_recommended_operating_mode(evaluation_input) == SystemOperatingMode.normal

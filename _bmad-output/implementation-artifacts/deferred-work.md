@@ -1,5 +1,14 @@
 # Deferred Work Log
 
+## Deferred from: code review of 7-4-implement-battery-control-and-ev-scheduling-logic (2026-05-05)
+
+- **`resolve_conflicts` priority weight sort direction undocumented** [`src/open_ems/engine/rules/energy_balancing.py:resolve_conflicts`] — ascending sort means weight=1 beats weight=100; field name is misleading; add a docstring or rename when story 7.3 is revisited.
+- **`tiebreaker_key` lexicographic sort produces alphabetically-dependent resolution order** [`src/open_ems/engine/rules/energy_balancing.py:resolve_conflicts`] — renaming a strategy or action type changes resolution order silently; consider a numeric tiebreaker.
+- **Simultaneous charge+discharge candidates possible in `maximize_self_consumption`** [`src/open_ems/engine/rules/energy_balancing.py:_evaluate_maximize_self_consumption`] — when PV surplus and grid import co-occur, both candidates are emitted; conflict resolution silently picks charge; no diagnostic flag.
+- **Action type strings are untyped literals with no central registry** [`src/open_ems/engine/rules/`] — a typo silently falls through to a hold intent with reason_code "unavailable"; consider a shared `ActionType` enum or registry.
+- **DST fold attribute stripped by `_is_inside_window` during clock-back transitions** [`src/open_ems/engine/rules/ev_scheduling.py:_is_inside_window`] — repeated hour during fall-back DST makes both UTC instants compare identically against window boundaries; decide on DST policy when EV charging windows are operationally validated.
+- **No SOC upper-bound check before approving battery charge intent** [`src/open_ems/engine/rules/battery_control.py:evaluate_battery_control`] — a 100% SOC battery receives a charge intent every cycle; BMS is expected to reject it; add an optional ceiling field to `BatteryControlContext` if BMS tolerance becomes a concern.
+
 ## Deferred from: code review of 7-2-implement-peak-limiting-logic-consuming-peakcontext (2026-05-04)
 
 - **`current_monthly_recorded_peak_kw`, `current_interval_start`, `current_interval_elapsed_seconds` unused in rule logic** [`src/open_ems/engine/rules/peak_limiting.py`] — intentional per spec; fields validated and available for Stories 7.3–7.5 and Epic 8 runtime.

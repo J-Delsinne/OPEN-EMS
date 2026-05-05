@@ -68,6 +68,14 @@ class SystemOperatingMode(enum.StrEnum):
     fail_safe = "fail_safe"
 
 
+class EnergyStrategy(enum.StrEnum):
+    """Homeowner-selected energy optimization strategy (FR11)."""
+
+    minimize_cost = "minimize_cost"
+    maximize_self_consumption = "maximize_self_consumption"
+    prioritize_ev = "prioritize_ev"
+
+
 OPERATING_MODE_GLOBAL_STATE: Mapping[SystemOperatingMode, GlobalState] = MappingProxyType(
     {
         SystemOperatingMode.normal: GlobalState.normal,
