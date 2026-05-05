@@ -10,6 +10,7 @@ import structlog
 from open_ems.adapters.capabilities import get_profile
 from open_ems.adapters.ocpp.central_system import OCPPChargerAdapter
 from open_ems.adapters.protocol import ProtocolDegradedState, RawOCPPState
+from open_ems.core.commands import CommandResult, DeviceCommand
 from open_ems.core.devices import (
     DegradedDeviceState,
     DeviceCapabilityProfile,
@@ -126,6 +127,10 @@ class EVChargerAdapter:
                 firmware_version=None,
             )
         return profile
+
+    async def send_command(self, cmd: DeviceCommand) -> CommandResult:
+        """OCPP charger write path — implementation deferred (Epic 9)."""
+        raise NotImplementedError("EVChargerAdapter.send_command is not yet implemented")
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason

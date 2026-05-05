@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from open_ems.adapters.capabilities import get_profile
 from open_ems.adapters.dsmr.p1 import DSMRAdapter
 from open_ems.adapters.protocol import ProtocolDegradedState, RawDSMRState
+from open_ems.core.commands import CommandResult, DeviceCommand
 from open_ems.core.devices import (
     DegradedDeviceState,
     DeviceCapabilityProfile,
@@ -92,6 +93,10 @@ class GridMeterAdapter:
                 firmware_version=None,
             )
         return profile
+
+    async def send_command(self, cmd: DeviceCommand) -> CommandResult:
+        """DSMR P1 is a read-only meter — write capability is not supported."""
+        raise NotImplementedError("GridMeterAdapter does not support send_command (read-only)")
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason

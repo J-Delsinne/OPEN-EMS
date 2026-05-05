@@ -2,6 +2,7 @@
 
 from open_ems.core import EnergyStrategy
 from open_ems.engine.evaluator import evaluate_cycle
+from open_ems.engine.intent_executor import IntentExecutor
 from open_ems.engine.models import (
     BatteryControlContext,
     EvaluationInput,
@@ -11,6 +12,7 @@ from open_ems.engine.models import (
 )
 from open_ems.engine.operating_mode import derive_recommended_operating_mode
 from open_ems.engine.partial_interval_tracker import CompletedInterval, PartialIntervalTracker
+from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.engine.result import EvaluationResult
 from open_ems.engine.rules.battery_control import (
     BatteryIntent,
@@ -50,10 +52,12 @@ __all__ = [
     "EnergyStrategy",
     "EvaluationInput",
     "EvaluationResult",
+    "IntentExecutor",
     "LoadReductionAction",
     "PartialIntervalTracker",
     "PeakContext",
     "PeakLimitDecision",
+    "PolicyGuard",
     "PriorityBand",
     "StrategyEvaluation",
     "derive_recommended_operating_mode",

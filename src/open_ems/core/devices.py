@@ -47,9 +47,12 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime, timedelta
-from typing import Annotated, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+if TYPE_CHECKING:
+    from open_ems.core.commands import CommandResult, DeviceCommand
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -262,8 +265,9 @@ class DeviceDiscoveryResult(BaseModel):
 class DeviceAdapter(Protocol):
     """Structural contract for all domain-level device adapters.
 
-    Epic 4 scope: get_state() and get_capabilities() only.
-    send_command() is added in Epic 8 via PolicyGuard.
+    ``send_command()`` is the adapter-level write path. It must only be invoked
+    via ``PolicyGuard.authorize_and_dispatch()`` — no other component may call
+    it directly (AR15).
     """
 
     device_id: str
@@ -275,3 +279,5 @@ class DeviceAdapter(Protocol):
     async def get_state(self) -> DeviceState | DegradedDeviceState: ...
 
     async def get_capabilities(self) -> DeviceCapabilityProfile: ...
+
+    async def send_command(self, cmd: DeviceCommand) -> CommandResult: ...

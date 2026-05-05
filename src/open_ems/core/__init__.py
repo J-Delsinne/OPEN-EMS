@@ -1,5 +1,16 @@
 """Domain layer: normalized device models, energy sign conventions, and adapter protocol."""
 
+from open_ems.core.commands import (
+    CommandOrigin,
+    CommandResult,
+    CommandStatus,
+    DeviceCommand,
+    DeviceCommandBase,
+    SetBatteryChargeRateCommand,
+    SetBatteryDischargeRateCommand,
+    SetEVChargingRateCommand,
+    StopEVChargingCommand,
+)
 from open_ems.core.devices import (
     BatteryState,
     DegradedDeviceState,
@@ -23,10 +34,15 @@ from open_ems.core.state_store import StateStore
 
 __all__ = [
     "BatteryState",
+    "CommandOrigin",
+    "CommandResult",
+    "CommandStatus",
     "ComponentState",
     "DegradedDeviceState",
     "DeviceAdapter",
     "DeviceCapabilityProfile",
+    "DeviceCommand",
+    "DeviceCommandBase",
     "DeviceDiscoveryResult",
     "DeviceRole",
     "DeviceState",
@@ -35,7 +51,11 @@ __all__ = [
     "GlobalState",
     "GridMeterState",
     "InverterState",
+    "SetBatteryChargeRateCommand",
+    "SetBatteryDischargeRateCommand",
+    "SetEVChargingRateCommand",
     "StateStore",
+    "StopEVChargingCommand",
     "SystemOperatingMode",
     "SystemSnapshot",
 ]

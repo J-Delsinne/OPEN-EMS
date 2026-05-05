@@ -9,9 +9,11 @@ from pydantic import ValidationError
 
 from open_ems.core import (
     BatteryState,
+    CommandResult,
     DegradedDeviceState,
     DeviceAdapter,
     DeviceCapabilityProfile,
+    DeviceCommand,
     DeviceRole,
     DeviceState,
     EVChargerState,
@@ -60,6 +62,9 @@ class _ConcreteAdapter:
         raise NotImplementedError
 
     async def get_capabilities(self) -> DeviceCapabilityProfile:
+        raise NotImplementedError
+
+    async def send_command(self, cmd: DeviceCommand) -> CommandResult:
         raise NotImplementedError
 
 

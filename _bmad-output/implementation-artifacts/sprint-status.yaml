@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-05'  # 8-0b done; PartialIntervalTracker reviewed and approved
+last_updated: '2026-05-06'  # 8-2 done: code review complete, all patches applied
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -106,8 +106,8 @@ development_status:
   epic-8: in-progress
   8-0-implement-actiontype-enum-and-exhaustive-dispatch: done
   8-0b-implement-partialintervaltracker-contract-and-implementation: done
-  8-1-implement-the-runtime-control-loop-with-adapter-polling-and-statestore-publishing: backlog
-  8-2-implement-intentexecutor-policyguard-and-command-dispatch: backlog
+  8-1-implement-the-runtime-control-loop-with-adapter-polling-and-statestore-publishing: done
+  8-2-implement-intentexecutor-policyguard-and-command-dispatch: done
   8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement: backlog
   8-4-implement-watchdog-heartbeat-stalled-loop-detection-fail-safe-transition-and-recovery: backlog
   8-5-end-to-end-decision-engine-simulation: backlog

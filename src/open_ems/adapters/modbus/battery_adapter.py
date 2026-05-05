@@ -22,6 +22,7 @@ from open_ems.adapters.modbus.register_maps import (
 )
 from open_ems.adapters.modbus.tcp import ModbusTcpAdapter
 from open_ems.adapters.protocol import ProtocolDegradedState, RawModbusState
+from open_ems.core.commands import CommandResult, DeviceCommand
 from open_ems.core.devices import (
     BatteryState,
     DegradedDeviceState,
@@ -107,6 +108,10 @@ class BatteryAdapter:
                 firmware_version=None,
             )
         return profile
+
+    async def send_command(self, cmd: DeviceCommand) -> CommandResult:
+        """Modbus battery write path — implementation deferred (Epic 9)."""
+        raise NotImplementedError("BatteryAdapter.send_command is not yet implemented")
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason

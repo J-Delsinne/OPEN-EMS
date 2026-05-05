@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     homeowner_session_timeout_days: int = Field(default=30, gt=0)
     stale_threshold_seconds: int = Field(default=30, gt=0)
     trusted_proxy_ips: list[str] = []
+    control_loop_interval_seconds: float = Field(default=10.0, gt=0.0)
+    peak_limit_kw: float = Field(default=25.0, gt=0.0)
+    battery_reserve_floor_percent: float = Field(default=20.0, ge=0.0, le=100.0)
 
 
 _settings: Settings | None = None
