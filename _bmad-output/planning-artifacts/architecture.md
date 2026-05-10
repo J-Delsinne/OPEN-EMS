@@ -710,6 +710,8 @@ All `send_command` adapter implementations must return a `CommandResult` object 
 
 The decision engine must not assume a command succeeded unless `CommandResult` confirms acceptance and either observed state confirms effect or the device protocol provides a reliable acknowledgment. Retries must be gated on `CommandResult.status` and must not retry if retrying would risk violating safety constraints.
 
+**Status as of Story 9.0 (2026-05-10):** All three controllable domain adapters (`BatteryAdapter`, `InverterAdapter`, `EVChargerAdapter`) honor the cross-adapter command contract — see `src/open_ems/adapters/__init__.py` module docstring for the single authoritative reference (status mapping table, correlation_id semantics, cancellation/timeout rules, AR16 enforcement). The contract is versioned via `COMMAND_CONTRACT_VERSION`; bump that constant whenever any clause changes. `GridMeterAdapter` is intentionally excluded — DSMR P1 is read-only (FR6b) and never grows a write path.
+
 ---
 
 ### Enforcement Summary

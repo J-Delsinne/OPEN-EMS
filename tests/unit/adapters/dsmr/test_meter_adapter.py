@@ -310,3 +310,41 @@ def test_missing_dsmr_field_error_str() -> None:
     exc = MissingDSMRFieldError("1-0:1.7.0")
     assert exc.key == "1-0:1.7.0"
     assert str(exc) == "missing_dsmr_field:1-0:1.7.0"
+
+
+# ---------------------------------------------------------------------------
+# Cross-adapter contract: GridMeter has no command surface (Story 9.0 AC1)
+# ---------------------------------------------------------------------------
+
+
+class _NullDSMRProtocolAdapter:
+    """Bare DSMR adapter shim — send_command never reaches the protocol layer."""
+
+    async def get_raw_state(self) -> Any:  # pragma: no cover — not used
+        raise AssertionError
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+
+@pytest.mark.asyncio
+async def test_send_command_raises_not_implemented_error_with_read_only_reason() -> None:
+    """Cross-adapter contract clause 1 / Story 9.0 AC1: GridMeter raises
+    NotImplementedError (NOT TypeError) — the distinction signals that this
+    adapter has no command surface at all, not that one command type is wrong.
+    """
+    from open_ems.core.commands import (
+        CommandOrigin,
+        SetBatteryChargeRateCommand,
+    )
+
+    adapter = GridMeterAdapter(_DEVICE_ID, _NullDSMRProtocolAdapter())  # type: ignore[arg-type]
+    cmd = SetBatteryChargeRateCommand(
+        device_id=_DEVICE_ID,
+        device_role=DeviceRole.grid_meter,
+        origin=CommandOrigin.decision_engine,
+        rate_kw=1.0,
+    )
+
+    with pytest.raises(NotImplementedError, match="DSMR P1 is read-only"):
+        await adapter.send_command(cmd)

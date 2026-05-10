@@ -13,6 +13,13 @@ Three-stage pipeline (Story 8.3 adds RetryPolicy on top of Story 8.2):
 PolicyGuard is the single mandatory dispatch path (AR15). Adapters never receive
 ``send_command()`` calls from any other component.
 
+As of Story 9.0, every controllable adapter (Battery, Inverter, EV Charger)
+honors the cross-adapter command contract documented in
+``open_ems.adapters`` (single source of truth) — closing the AR16 gap that
+existed during Epic 8 (where ``send_command`` was a stub raising
+``NotImplementedError``). DSMR P1 remains read-only (FR6b) and is excluded
+from the controllable-adapter set.
+
 Idempotency classification (``is_idempotent: ClassVar[bool]``) is intrinsic to
 the command type and lives at the class level — NOT as a Pydantic field — so it
 cannot be overridden per instance and so ``ConfigDict(extra="forbid")`` does not

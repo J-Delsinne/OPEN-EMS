@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-10'  # 8-5 review complete (end-to-end decision engine simulation → done)
+last_updated: '2026-05-10'  # Story 9-0 done (code review applied 25 patches, gates green)
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -71,7 +71,7 @@ development_status:
   epic-3-retrospective: done
 
   # ─── Epic 4: Device Abstraction Layer ──────────────────────────────────────
-  epic-4: in-progress
+  epic-4: done
   4-1-define-domain-device-state-model-deviceadapter-protocol-and-energy-sign-conventions: done
   4-2-implement-modbus-device-normalization-with-register-maps: done
   4-3-implement-ocpp-and-dsmr-device-normalization: done
@@ -111,10 +111,17 @@ development_status:
   8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement: done
   8-4-implement-watchdog-heartbeat-stalled-loop-detection-fail-safe-transition-and-recovery: done
   8-5-end-to-end-decision-engine-simulation: done
-  epic-8-retrospective: optional
+  epic-8-retrospective: done
 
   # ─── Epic 9: Installer Site Setup and Deployment Validation ────────────────
-  epic-9: backlog
+  # Prep stories below are hard gates established by the Epic 8 retrospective
+  # (2026-05-10): 9-0 must complete before 9-1; 9-0b strongly preferred before
+  # 9-1 and hard before 9-3; 9-0c hard before 9-2; 9-0d hard before 9-4.
+  epic-9: in-progress
+  9-0-real-adapter-command-execution-contracts-and-implementations: done
+  9-0b-db-backed-active-constraints-reload: backlog
+  9-0c-capability-profile-failure-semantics: backlog
+  9-0d-restart-hydration-of-monthly-peak: backlog
   9-1-implement-device-discovery-step-with-live-probing-capability-classification-and-manual-entry: backlog
   9-2-implement-role-assignment-with-inline-conflict-detection-and-gap-acknowledgment: backlog
   9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: backlog

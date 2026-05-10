@@ -22,7 +22,8 @@ def test_get_profile_fronius_returns_full_profile() -> None:
     assert profile.capability_status == CapabilityStatus.full
     assert ReadCapability.state in profile.read_capabilities
     assert ReadCapability.power in profile.read_capabilities
-    assert WriteCapability.set_operating_mode in profile.write_capabilities
+    # Story 9.0 AC3: v1 inverter is read-only.
+    assert profile.write_capabilities == frozenset()
 
 
 def test_get_profile_inverter_does_not_have_charge_or_discharge() -> None:
@@ -34,13 +35,14 @@ def test_get_profile_inverter_does_not_have_charge_or_discharge() -> None:
 def test_get_profile_huawei_returns_full_profile() -> None:
     profile = get_profile("dev-1", "huawei_sun2000_v3")
     assert profile.capability_status == CapabilityStatus.full
-    assert WriteCapability.set_operating_mode in profile.write_capabilities
+    assert profile.write_capabilities == frozenset()
 
 
 def test_get_profile_growatt_returns_full_profile() -> None:
     profile = get_profile("dev-1", "growatt_hybrid_v1")
     assert profile.capability_status == CapabilityStatus.full
     assert ReadCapability.power in profile.read_capabilities
+    assert profile.write_capabilities == frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +56,8 @@ def test_get_profile_byd_hvs_returns_full_profile() -> None:
     assert ReadCapability.soc in profile.read_capabilities
     assert WriteCapability.set_charge_rate in profile.write_capabilities
     assert WriteCapability.set_discharge_rate in profile.write_capabilities
-    assert WriteCapability.set_operating_mode in profile.write_capabilities
+    # Story 9.0 AC10: set_operating_mode removed from BYD profiles for v1.
+    assert WriteCapability.set_operating_mode not in profile.write_capabilities
 
 
 def test_get_profile_byd_hvm_returns_full_profile() -> None:

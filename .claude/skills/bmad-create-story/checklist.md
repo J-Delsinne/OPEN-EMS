@@ -17,6 +17,56 @@ You are an independent quality validator in a **FRESH CONTEXT**. Your mission is
 - **Lying about completion** - Implementing incorrectly or incompletely
 - **Not learning from past work** - Ignoring previous story learnings and patterns
 
+---
+
+## **🛑 A1/A2 ORCHESTRATION RISK ENFORCEMENT (HARD GATE)**
+
+**Origin:** Epic 8 retrospective (2026-05-10). Same enforcement class as missing acceptance criteria.
+
+This section is a **hard gate**. If the story is A2-triggered, the validation MUST fail unless every requirement below is met. A failure here blocks `Status: ready-for-dev` and forces the story to `Status: blocked-needs-orchestration-analysis`.
+
+### **Step A — Re-evaluate A2 trigger independently**
+
+Do NOT trust the create-story workflow's own determination — re-run the evaluation in this fresh context. The story is A2-triggered if **any one** of the following matches its acceptance criteria, dev notes, file scope, or epic context:
+
+| # | Trigger criterion | Evidence sought |
+|---|---|---|
+| T1 | Lifecycle / state-machine behavior | State transitions, mode changes, fail-safe entry/exit, recovery semantics |
+| T2 | Retries / cancellation | Retry policy, attempt counting, cancellation propagation, in-flight cleanup |
+| T3 | Persistence + recovery | DB-backed state across restart; durable counters; reload on config change |
+| T4 | Watchdog / timing semantics | Heartbeat, missed-cycle detection, deadline-relative scheduling |
+| T5 | Multi-adapter coordination | Behavior spans ≥2 protocol adapters or device classes within one story |
+| T6 | Deployment / restart behavior | Process restart triggered as part of workflow; cold-start invariants user-visible |
+| T7 | Installer workflow orchestration | Multi-step installer-facing flow that mutates persisted config or activates runtime |
+
+If A2-triggered: PROCEED to Step B.
+If NOT A2-triggered: confirm in the validation report and skip to the standard checklist below.
+
+### **Step B — Verify R1–R7 are present and substantive**
+
+For each artifact, the dev notes MUST contain a section that is **substantive**:
+- Not a section header followed by "TBD", "N/A", or one-line placeholder
+- Not a copy-paste of generic guidance from architecture docs
+- Specific to this story's scope, files, and risks
+
+| # | Artifact | Pass criteria (validator MUST verify) |
+|---|---|---|
+| R1 | Composition-risk analysis | Lists ≥2 operational domains converging in this story; each has a named, story-specific risk |
+| R2 | State-transition table | Has rows; every modified state machine appears; transitions list triggers AND side-effects |
+| R3 | Impossible-state analysis | ≥3 forbidden state combinations with structural invariants; **cold-start subsection is non-empty and specific** |
+| R4 | Cancellation ownership map | Every async operation introduced/modified appears with named owners for propagation, audit, cleanup |
+| R5 | Before-first-successful-cycle lifecycle review | Concrete trace of system behavior between boot and first cycle; explicit normal-operation marker |
+| R6 | Source-of-truth ownership per datum | Every story-relevant datum has a single named owner; drift risks called out or marked "none" |
+| R7 | Deferred-findings triage | `deferred-work.md` was actually scanned; overlapping findings cited by bracket ref OR explicit confirmation no overlap exists |
+
+### **Step C — Verdict**
+
+- **PASS**: A2-triggered + all of R1–R7 substantive → story may carry `Status: ready-for-dev`
+- **FAIL**: A2-triggered + ≥1 of R1–R7 missing or non-substantive → block `Status: ready-for-dev`. Set status to `blocked-needs-orchestration-analysis`. Report which artifacts failed and why.
+- **PASS (no A2)**: not A2-triggered → continue with standard checklist below
+
+This verdict is structural — the validator agent is expected to enforce it mechanically, not at its discretion. There is no "warn and proceed" path.
+
 ### **🚨 EXHAUSTIVE ANALYSIS REQUIRED:**
 
 You must thoroughly analyze **ALL artifacts** to extract critical context - do NOT be lazy or skim! This is the most important quality control function in the entire development process!

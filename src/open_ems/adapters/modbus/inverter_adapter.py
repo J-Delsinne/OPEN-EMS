@@ -1,4 +1,14 @@
-"""Domain-level inverter adapter: translates RawModbusState → InverterState."""
+"""Domain-level inverter adapter: translates RawModbusState → InverterState.
+
+Story 9.0 AC3 / AC10: v1 inverters are read-only across all supported models
+(``fronius_gen24_v1``, ``huawei_sun2000_v3``, ``growatt_hybrid_v1``). The
+capability profiles in ``open_ems.adapters.capabilities.inverter`` declare an
+empty ``write_capabilities`` set, so PolicyGuard's capability gate rejects every
+command before it reaches ``send_command``. The ``TypeError`` raised here is
+the same defense-in-depth signal used by other controllable adapters when an
+unsupported command type slips through (cross-adapter contract clause 2;
+see ``open_ems.adapters`` module docstring).
+"""
 
 from __future__ import annotations
 
@@ -107,8 +117,15 @@ class InverterAdapter:
         return profile
 
     async def send_command(self, cmd: DeviceCommand) -> CommandResult:
-        """Modbus inverter write path — implementation deferred (Epic 9)."""
-        raise NotImplementedError("InverterAdapter.send_command is not yet implemented")
+        """v1 inverter has no write surface — every command type raises TypeError.
+
+        Per the cross-adapter command contract (clause 2), this is a programming-
+        error signal: PolicyGuard's capability gate should have rejected the
+        command before reaching the adapter. Returning ``TypeError`` (not a
+        ``CommandResult``) lets test suites surface a routing bug immediately
+        instead of silently mapping it to ``failed``.
+        """
+        raise TypeError(f"InverterAdapter does not support {type(cmd).__name__}")
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason

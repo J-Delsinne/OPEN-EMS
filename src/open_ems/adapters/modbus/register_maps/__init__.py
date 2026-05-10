@@ -14,6 +14,7 @@ from open_ems.adapters.modbus.register_maps._base import (
     InvalidRegisterValueError,
     InverterRegisterMap,
     MissingRegisterError,
+    ModbusCommandPayload,
 )
 from open_ems.adapters.modbus.register_maps.byd_hvm_v1 import BydHvmV1
 from open_ems.adapters.modbus.register_maps.byd_hvs_v1 import BydHvsV1
@@ -31,4 +32,5 @@ __all__ = [
     "InvalidRegisterValueError",
     "InverterRegisterMap",
     "MissingRegisterError",
+    "ModbusCommandPayload",
 ]

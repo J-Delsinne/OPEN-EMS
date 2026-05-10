@@ -7,9 +7,13 @@ MissingRegisterError and _require_reg.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from open_ems.adapters.protocol import RawModbusState
+from open_ems.core.commands import (
+    SetBatteryChargeRateCommand,
+    SetBatteryDischargeRateCommand,
+)
 from open_ems.core.devices import BatteryState, InverterState
 
 
@@ -47,7 +51,29 @@ class InverterRegisterMap(Protocol):
     def map_state(self, raw: RawModbusState) -> InverterState: ...
 
 
+# A typed alias for the dict payload that BatteryAdapter forwards to
+# ``ModbusTcpAdapter.send_raw_command``. The shape matches ``_WriteRegisterPayload``
+# / ``_WriteRegistersPayload`` in ``adapters.modbus.tcp``; we keep the type as
+# ``dict[str, Any]`` here to avoid importing private TCP types.
+ModbusCommandPayload = dict[str, Any]
+
+
 class BatteryRegisterMap(Protocol):
     """Structural contract for all battery register map implementations."""
 
     def map_state(self, raw: RawModbusState) -> BatteryState: ...
+
+    def command_payload(
+        self,
+        cmd: SetBatteryChargeRateCommand | SetBatteryDischargeRateCommand,
+    ) -> ModbusCommandPayload:
+        """Encode a battery setpoint command into a Modbus write payload.
+
+        The returned dict is forwarded to ``ModbusTcpAdapter.send_raw_command``
+        as ``RawProtocolCommand.payload``. Implementations MUST raise
+        ``ValueError`` when ``cmd.rate_kw`` is outside the model's encodable
+        range; the calling adapter wraps that into
+        ``CommandResult(status=failed, reason=f"register_map_encoding_error:...")``
+        per the cross-adapter command contract.
+        """
+        ...

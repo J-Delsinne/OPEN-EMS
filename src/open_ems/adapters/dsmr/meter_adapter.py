@@ -95,8 +95,17 @@ class GridMeterAdapter:
         return profile
 
     async def send_command(self, cmd: DeviceCommand) -> CommandResult:
-        """DSMR P1 is a read-only meter — write capability is not supported."""
-        raise NotImplementedError("GridMeterAdapter does not support send_command (read-only)")
+        """DSMR P1 is a read-only meter — write capability is not supported.
+
+        Per AR16 and the cross-adapter contract in ``open_ems.adapters`` (clause 2),
+        this adapter is excluded from the controllable-adapter set; DSMR P1 will
+        never grow a write path. ``NotImplementedError`` (not ``TypeError``) is
+        the runtime signal that this adapter has no command surface at all,
+        distinct from a controllable adapter receiving an unsupported command type.
+        """
+        raise NotImplementedError(
+            "GridMeterAdapter does not support send_command (DSMR P1 is read-only)"
+        )
 
     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason

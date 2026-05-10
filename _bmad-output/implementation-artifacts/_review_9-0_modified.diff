@@ -1,0 +1,1085 @@
+warning: in the working copy of '_bmad-output/planning-artifacts/architecture.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/open_ems/adapters/__init__.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/open_ems/adapters/dsmr/meter_adapter.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/open_ems/adapters/modbus/battery_adapter.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/open_ems/adapters/ocpp/charger_adapter.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/open_ems/core/commands.py', LF will be replaced by CRLF the next time Git touches it
+diff --git a/_bmad-output/planning-artifacts/architecture.md b/_bmad-output/planning-artifacts/architecture.md
+index 0615ea4..e6eb717 100644
+--- a/_bmad-output/planning-artifacts/architecture.md
++++ b/_bmad-output/planning-artifacts/architecture.md
+@@ -710,6 +710,8 @@ All `send_command` adapter implementations must return a `CommandResult` object
+ 
+ The decision engine must not assume a command succeeded unless `CommandResult` confirms acceptance and either observed state confirms effect or the device protocol provides a reliable acknowledgment. Retries must be gated on `CommandResult.status` and must not retry if retrying would risk violating safety constraints.
+ 
++**Status as of Story 9.0 (2026-05-10):** All three controllable domain adapters (`BatteryAdapter`, `InverterAdapter`, `EVChargerAdapter`) honor the cross-adapter command contract — see `src/open_ems/adapters/__init__.py` module docstring for the single authoritative reference (status mapping table, correlation_id semantics, cancellation/timeout rules, AR16 enforcement). The contract is versioned via `COMMAND_CONTRACT_VERSION`; bump that constant whenever any clause changes. `GridMeterAdapter` is intentionally excluded — DSMR P1 is read-only (FR6b) and never grows a write path.
++
+ ---
+ 
+ ### Enforcement Summary
+diff --git a/src/open_ems/adapters/__init__.py b/src/open_ems/adapters/__init__.py
+index 4ba15c6..5f565b4 100644
+--- a/src/open_ems/adapters/__init__.py
++++ b/src/open_ems/adapters/__init__.py
+@@ -1,4 +1,110 @@
+-"""Raw protocol adapter contracts for OPEN-EMS."""
++"""Raw protocol adapter contracts for OPEN-EMS.
++
++Cross-adapter command contract (v1.0)
++=====================================
++
++Single source of truth for ``DeviceAdapter.send_command(cmd) -> CommandResult``
++behavior across all controllable adapters (BatteryAdapter, InverterAdapter,
++EVChargerAdapter). Per-adapter docstrings reference this section by path; they
++do NOT restate clauses.
++
++GridMeterAdapter is intentionally excluded — DSMR P1 is read-only (FR6b);
++``send_command`` raises ``NotImplementedError`` with reason
++``"DSMR P1 is read-only"`` and never grows a write path.
++
++1. Authorization is upstream
++----------------------------
++PolicyGuard authorizes; the adapter executes. Adapters never re-check fail-safe
++mode, capability, or safety constraints — those have already passed.
++
++2. Command surface is exhaustive over the adapter's WriteCapability set
++-----------------------------------------------------------------------
++For every ``WriteCapability`` in the adapter's capability profile, exactly one
++``DeviceCommand`` subtype is dispatchable. For every ``DeviceCommand`` subtype
++NOT covered, ``send_command(cmd)`` raises
++``TypeError(f"{adapter_class} does not support {type(cmd).__name__}")``.
++This is intentionally NOT a ``CommandResult`` failure — it is a programming-
++error signal (PolicyGuard's capability gate should have caught it).
++
++3. Status mapping table
++-----------------------
++
++Source signal → (status, applied, reason form):
++
++- Protocol ``acked`` + affirmative response → (``success``, True, ``"ok"``)
++- Protocol ``acked`` + negative payload (OCPP) →
++  (``rejected``, False, ``f"<protocol>_rejected:<status>"``)
++- Protocol layer ``timeout`` →
++  (``timeout``, False, ``f"<protocol>_command_timeout"``)
++- Protocol layer ``error`` →
++  (``failed``, False, ``f"<protocol>_error:<error_code>"``)
++- Adapter-internal exception (bug) →
++  (``failed``, False, ``f"adapter_internal_error:<exc_type>"``)
++- correlation_id mismatch from protocol →
++  (``failed``, False, ``"correlation_id_mismatch"``)
++- Register-map encoding error (Modbus only) →
++  (``failed``, False, ``f"register_map_encoding_error:<msg>"``)
++- OCPP stop without active transaction →
++  (``failed``, False, ``"no_active_ocpp_transaction"``)
++
++``<protocol>`` ∈ {``modbus``, ``ocpp``}. Audit consumers can group reasons by
++protocol family without parsing free-form text.
++
++4. correlation_id round-trip is exact
++-------------------------------------
++``result.correlation_id == cmd.correlation_id`` (both ``uuid.UUID``). The
++adapter converts ``str(cmd.correlation_id)`` at the protocol-layer boundary
++and parses it back when ``ProtocolCommandResult`` returns. Mismatch (or
++unparseable) ⇒ ``CommandResult(status=failed, reason="correlation_id_mismatch")``
++plus a structured ``adapter_correlation_mismatch`` warning log.
++
++5. Cancellation propagates
++--------------------------
++``asyncio.CancelledError`` is NEVER caught by the adapter's ``send_command``.
++Cleanup happens via ``try/finally``, never ``except CancelledError``.
++``RetryPolicy._emit_cancellation_audit`` is the single audit emitter for
++cancelled commands. Adapters do NOT emit a parallel cancellation audit.
++
++6. Timeout boundary
++-------------------
++The adapter's protocol-layer timeout (``ModbusTcpAdapter.config.timeout_s``,
++``OCPPAdapterConfig.command_timeout_s``) is the primary boundary. PolicyGuard's
++outer ``asyncio.wait_for(..., timeout=COMMAND_DISPATCH_TIMEOUT_SECONDS)`` is
++defense in depth — under nominal operation, the protocol timeout always fires
++first. Adapters MUST return within ``protocol_timeout_s + epsilon`` under any
++non-cancellation condition.
++
++7. observed_state is None on success
++------------------------------------
++Adapters do NOT issue a post-write read to populate ``observed_state``. The
++control loop's polling cycle observes the post-write state on its next tick.
++An adapter MAY populate ``observed_state`` only if its protocol returns the
++post-write state in the same call (e.g. some Modbus "write+read" patterns);
++v1 leaves it None.
++
++8. AR16 enforcement
++-------------------
++All exceptions except ``asyncio.CancelledError`` (clause 5) and ``TypeError``
++(clause 2 — programming-error signal) are caught and wrapped as
++``CommandResult(status=failed, applied=False, reason="adapter_internal_error:<type>")``.
++The full exception is logged via structlog with ``exc_info=True`` BEFORE the
++``CommandResult`` is returned. PolicyGuard's outer ``except Exception`` becomes
++defense in depth that should never fire when adapters honor this clause.
++
++9. Idempotency is in the command, not the adapter
++-------------------------------------------------
++Adapters do NOT consult ``cmd.is_idempotent``. ``RetryPolicy`` reads it. The
++adapter's job is to faithfully execute one attempt.
++
++10. Audit emission is upstream
++------------------------------
++Adapters do NOT emit DECISION / DEVICE / CONSTRAINT audits. PolicyGuard emits
++CONSTRAINT on rejection; RetryPolicy emits DECISION on success and DEVICE on
++terminal failure / cancellation.
++
++The contract version is exposed as ``COMMAND_CONTRACT_VERSION`` for change
++tracking — bump it when any clause above changes.
++"""
+ 
+ from open_ems.adapters.protocol import (
+     ConnectionStatus,
+@@ -14,7 +120,10 @@ from open_ems.adapters.protocol import (
+     RawProtocolState,
+ )
+ 
++COMMAND_CONTRACT_VERSION = "1.0"
++
+ __all__ = [
++    "COMMAND_CONTRACT_VERSION",
+     "ConnectionStatus",
+     "ProtocolAdapter",
+     "ProtocolCommandResult",
+diff --git a/src/open_ems/adapters/capabilities/battery.py b/src/open_ems/adapters/capabilities/battery.py
+index 9d9980a..56bef59 100644
+--- a/src/open_ems/adapters/capabilities/battery.py
++++ b/src/open_ems/adapters/capabilities/battery.py
+@@ -1,4 +1,12 @@
+-"""Capability profiles for supported battery storage models."""
++"""Capability profiles for supported battery storage models.
++
++Story 9.0 decision (AC10): ``set_operating_mode`` is removed from BYD HVS/HVM
++profiles for v1. ``BatteryAdapter.send_command`` only implements rate setpoints
++(``set_charge_rate``, ``set_discharge_rate``); declaring an operating-mode
++capability without an implementation would violate the profile↔implementation
++lockstep invariant. If a future BYD model exposes a discrete operating-mode
++register write, add it back together with the corresponding command type.
++"""
+ 
+ from __future__ import annotations
+ 
+@@ -14,7 +22,6 @@ _WRITE_CAPS = frozenset(
+     {
+         WriteCapability.set_charge_rate,
+         WriteCapability.set_discharge_rate,
+-        WriteCapability.set_operating_mode,
+     }
+ )
+ 
+diff --git a/src/open_ems/adapters/capabilities/inverter.py b/src/open_ems/adapters/capabilities/inverter.py
+index 11251e6..1f6492f 100644
+--- a/src/open_ems/adapters/capabilities/inverter.py
++++ b/src/open_ems/adapters/capabilities/inverter.py
+@@ -1,4 +1,13 @@
+-"""Capability profiles for supported PV inverter models."""
++"""Capability profiles for supported PV inverter models.
++
++Story 9.0 AC3 / AC10: v1 inverters are read-only. ``InverterAdapter.send_command``
++raises ``TypeError`` for any command type, and these profiles correspondingly
++declare an empty ``write_capabilities``. PolicyGuard's capability gate rejects
++every command type before it reaches the adapter; the adapter's TypeError is
++defense in depth. If a future inverter model exposes a Modbus write surface,
++add the corresponding ``WriteCapability`` member here together with the
++``InverterAdapter.send_command`` implementation in lockstep.
++"""
+ 
+ from __future__ import annotations
+ 
+@@ -10,7 +19,7 @@ from open_ems.core.devices import (
+ )
+ 
+ _FULL_CAPS = frozenset({ReadCapability.state, ReadCapability.power})
+-_WRITE_CAPS = frozenset({WriteCapability.set_operating_mode})
++_WRITE_CAPS: frozenset[WriteCapability] = frozenset()
+ 
+ INVERTER_PROFILES: dict[str, DeviceCapabilityProfile] = {
+     "fronius_gen24_v1": DeviceCapabilityProfile(
+diff --git a/src/open_ems/adapters/dsmr/meter_adapter.py b/src/open_ems/adapters/dsmr/meter_adapter.py
+index b3c69ad..e0b98cf 100644
+--- a/src/open_ems/adapters/dsmr/meter_adapter.py
++++ b/src/open_ems/adapters/dsmr/meter_adapter.py
+@@ -95,8 +95,17 @@ class GridMeterAdapter:
+         return profile
+ 
+     async def send_command(self, cmd: DeviceCommand) -> CommandResult:
+-        """DSMR P1 is a read-only meter — write capability is not supported."""
+-        raise NotImplementedError("GridMeterAdapter does not support send_command (read-only)")
++        """DSMR P1 is a read-only meter — write capability is not supported.
++
++        Per AR16 and the cross-adapter contract in ``open_ems.adapters`` (clause 2),
++        this adapter is excluded from the controllable-adapter set; DSMR P1 will
++        never grow a write path. ``NotImplementedError`` (not ``TypeError``) is
++        the runtime signal that this adapter has no command surface at all,
++        distinct from a controllable adapter receiving an unsupported command type.
++        """
++        raise NotImplementedError(
++            "GridMeterAdapter does not support send_command (DSMR P1 is read-only)"
++        )
+ 
+     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
+diff --git a/src/open_ems/adapters/modbus/battery_adapter.py b/src/open_ems/adapters/modbus/battery_adapter.py
+index 27eebf7..b58a1ed 100644
+--- a/src/open_ems/adapters/modbus/battery_adapter.py
++++ b/src/open_ems/adapters/modbus/battery_adapter.py
+@@ -1,5 +1,12 @@
+ """Domain-level battery adapter: translates RawModbusState → BatteryState.
+ 
++``send_command`` honors the cross-adapter command contract documented in
++``open_ems.adapters`` (the canonical reference). Per-clause behavior is enforced
++here without restating the contract; see that module's docstring for clauses
++1–10 (authorization, command surface, status mapping, correlation_id round-trip,
++cancellation, timeout boundary, observed_state, AR16 enforcement, idempotency,
++audit ownership).
++
+ Battery power sign convention (system-wide, per Story 4.1 / devices.py):
+     battery_power_kw > 0  →  charging (consuming power from PV or grid)
+     battery_power_kw < 0  →  discharging (providing power to loads or grid)
+@@ -7,6 +14,7 @@ Battery power sign convention (system-wide, per Story 4.1 / devices.py):
+ 
+ from __future__ import annotations
+ 
++import uuid
+ from datetime import UTC, datetime
+ 
+ import structlog
+@@ -21,8 +29,18 @@ from open_ems.adapters.modbus.register_maps import (
+     MissingRegisterError,
+ )
+ from open_ems.adapters.modbus.tcp import ModbusTcpAdapter
+-from open_ems.adapters.protocol import ProtocolDegradedState, RawModbusState
+-from open_ems.core.commands import CommandResult, DeviceCommand
++from open_ems.adapters.protocol import (
++    ProtocolDegradedState,
++    RawModbusState,
++    RawProtocolCommand,
++)
++from open_ems.core.commands import (
++    CommandResult,
++    CommandStatus,
++    DeviceCommand,
++    SetBatteryChargeRateCommand,
++    SetBatteryDischargeRateCommand,
++)
+ from open_ems.core.devices import (
+     BatteryState,
+     DegradedDeviceState,
+@@ -40,6 +58,11 @@ _SUPPORTED_MODELS: dict[str, BatteryRegisterMap] = {
+ # Protocol reasons that indicate a transient connection loss → mapped to "reconnecting"
+ _RECONNECTING_REASONS: frozenset[str] = frozenset({"modbus_timeout", "modbus_error"})
+ 
++_COMMAND_NAME_BY_TYPE: dict[type, str] = {
++    SetBatteryChargeRateCommand: "set_battery_charge_rate",
++    SetBatteryDischargeRateCommand: "set_battery_discharge_rate",
++}
++
+ 
+ class BatteryAdapter:
+     """Domain-level battery adapter: translates RawModbusState → BatteryState.
+@@ -110,8 +133,81 @@ class BatteryAdapter:
+         return profile
+ 
+     async def send_command(self, cmd: DeviceCommand) -> CommandResult:
+-        """Modbus battery write path — implementation deferred (Epic 9)."""
+-        raise NotImplementedError("BatteryAdapter.send_command is not yet implemented")
++        """Modbus battery write path.
++
++        Honors the cross-adapter command contract in ``open_ems.adapters``.
++        ``asyncio.CancelledError`` and ``TypeError`` propagate (clauses 5 and 2).
++        Every other exception is caught and wrapped (clause 8 / AR16).
++        """
++        if not isinstance(cmd, (SetBatteryChargeRateCommand, SetBatteryDischargeRateCommand)):
++            raise TypeError(f"BatteryAdapter does not support {type(cmd).__name__}")
++
++        try:
++            payload = self._register_map.command_payload(cmd)
++        except ValueError as exc:
++            return _failed(cmd, f"register_map_encoding_error:{exc}")
++        except Exception as exc:  # noqa: BLE001 — AR16: wrap unexpected exceptions
++            return self._wrap_internal_error(cmd, exc, where="register_map.command_payload")
++
++        try:
++            raw_command = RawProtocolCommand(
++                correlation_id=str(cmd.correlation_id),
++                device_id=self.device_id,
++                command_name=_COMMAND_NAME_BY_TYPE[type(cmd)],
++                payload=payload,
++            )
++        except Exception as exc:  # noqa: BLE001 — AR16
++            return self._wrap_internal_error(cmd, exc, where="raw_command_construction")
++
++        try:
++            protocol_result = await self._protocol_adapter.send_raw_command(raw_command)
++        except Exception as exc:  # noqa: BLE001 — AR16
++            # CancelledError is BaseException in 3.11+; not caught here, propagates.
++            return self._wrap_internal_error(cmd, exc, where="protocol_dispatch")
++
++        # correlation_id round-trip integrity (contract clause 4).
++        try:
++            returned_uuid = uuid.UUID(protocol_result.correlation_id)
++        except (ValueError, AttributeError, TypeError):
++            logger.warning(
++                "adapter_correlation_mismatch",
++                component="adapters",
++                device_id=self.device_id,
++                expected=str(cmd.correlation_id),
++                received=str(protocol_result.correlation_id),
++            )
++            return _failed(cmd, "correlation_id_mismatch")
++        if returned_uuid != cmd.correlation_id:
++            logger.warning(
++                "adapter_correlation_mismatch",
++                component="adapters",
++                device_id=self.device_id,
++                expected=str(cmd.correlation_id),
++                received=str(protocol_result.correlation_id),
++            )
++            return _failed(cmd, "correlation_id_mismatch")
++
++        return _map_protocol_result(cmd, protocol_result, protocol_prefix="modbus")
++
++    def _wrap_internal_error(
++        self, cmd: DeviceCommand, exc: BaseException, *, where: str
++    ) -> CommandResult:
++        logger.warning(
++            "adapter_internal_error",
++            component="adapters",
++            device_id=self.device_id,
++            command_type=type(cmd).__name__,
++            phase=where,
++            error=repr(exc),
++            exc_info=True,
++        )
++        return CommandResult(
++            correlation_id=cmd.correlation_id,
++            device_id=cmd.device_id,
++            status=CommandStatus.failed,
++            applied=False,
++            reason=f"adapter_internal_error:{type(exc).__name__}",
++        )
+ 
+     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
+@@ -128,3 +224,52 @@ class BatteryAdapter:
+             reason=domain_reason,
+             occurred_at=occurred_at,
+         )
++
++
++def _failed(cmd: DeviceCommand, reason: str) -> CommandResult:
++    return CommandResult(
++        correlation_id=cmd.correlation_id,
++        device_id=cmd.device_id,
++        status=CommandStatus.failed,
++        applied=False,
++        reason=reason,
++    )
++
++
++def _map_protocol_result(
++    cmd: DeviceCommand,
++    protocol_result: object,  # ProtocolCommandResult; typed as object to avoid circular import
++    *,
++    protocol_prefix: str,
++) -> CommandResult:
++    """Map a ``ProtocolCommandResult`` to a ``CommandResult`` per the contract clause 3."""
++    status = getattr(protocol_result, "protocol_status", None)
++    raw_response = getattr(protocol_result, "raw_response", None)
++
++    if status == "acked":
++        return CommandResult(
++            correlation_id=cmd.correlation_id,
++            device_id=cmd.device_id,
++            status=CommandStatus.success,
++            applied=True,
++            reason="ok",
++        )
++    if status == "timeout":
++        return CommandResult(
++            correlation_id=cmd.correlation_id,
++            device_id=cmd.device_id,
++            status=CommandStatus.timeout,
++            applied=False,
++            reason=f"{protocol_prefix}_command_timeout",
++        )
++    if status == "error":
++        error_code = "unknown"
++        if isinstance(raw_response, dict):
++            error_code = str(
++                raw_response.get("error") or raw_response.get("error_code") or "unknown"
++            )
++        return _failed(cmd, f"{protocol_prefix}_error:{error_code}")
++
++    # Defensive — protocol_status is a Literal in ProtocolCommandResult, so reaching
++    # here would mean a bug at the protocol layer.
++    return _failed(cmd, f"adapter_internal_error:unexpected_protocol_status:{status}")
+diff --git a/src/open_ems/adapters/modbus/inverter_adapter.py b/src/open_ems/adapters/modbus/inverter_adapter.py
+index 1123076..c3bc013 100644
+--- a/src/open_ems/adapters/modbus/inverter_adapter.py
++++ b/src/open_ems/adapters/modbus/inverter_adapter.py
+@@ -1,4 +1,14 @@
+-"""Domain-level inverter adapter: translates RawModbusState → InverterState."""
++"""Domain-level inverter adapter: translates RawModbusState → InverterState.
++
++Story 9.0 AC3 / AC10: v1 inverters are read-only across all supported models
++(``fronius_gen24_v1``, ``huawei_sun2000_v3``, ``growatt_hybrid_v1``). The
++capability profiles in ``open_ems.adapters.capabilities.inverter`` declare an
++empty ``write_capabilities`` set, so PolicyGuard's capability gate rejects every
++command before it reaches ``send_command``. The ``TypeError`` raised here is
++the same defense-in-depth signal used by other controllable adapters when an
++unsupported command type slips through (cross-adapter contract clause 2;
++see ``open_ems.adapters`` module docstring).
++"""
+ 
+ from __future__ import annotations
+ 
+@@ -107,8 +117,15 @@ class InverterAdapter:
+         return profile
+ 
+     async def send_command(self, cmd: DeviceCommand) -> CommandResult:
+-        """Modbus inverter write path — implementation deferred (Epic 9)."""
+-        raise NotImplementedError("InverterAdapter.send_command is not yet implemented")
++        """v1 inverter has no write surface — every command type raises TypeError.
++
++        Per the cross-adapter command contract (clause 2), this is a programming-
++        error signal: PolicyGuard's capability gate should have rejected the
++        command before reaching the adapter. Returning ``TypeError`` (not a
++        ``CommandResult``) lets test suites surface a routing bug immediately
++        instead of silently mapping it to ``failed``.
++        """
++        raise TypeError(f"InverterAdapter does not support {type(cmd).__name__}")
+ 
+     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
+diff --git a/src/open_ems/adapters/modbus/register_maps/__init__.py b/src/open_ems/adapters/modbus/register_maps/__init__.py
+index d062ad2..e7a4a58 100644
+--- a/src/open_ems/adapters/modbus/register_maps/__init__.py
++++ b/src/open_ems/adapters/modbus/register_maps/__init__.py
+@@ -14,6 +14,7 @@ from open_ems.adapters.modbus.register_maps._base import (
+     InvalidRegisterValueError,
+     InverterRegisterMap,
+     MissingRegisterError,
++    ModbusCommandPayload,
+ )
+ from open_ems.adapters.modbus.register_maps.byd_hvm_v1 import BydHvmV1
+ from open_ems.adapters.modbus.register_maps.byd_hvs_v1 import BydHvsV1
+@@ -31,4 +32,5 @@ __all__ = [
+     "InvalidRegisterValueError",
+     "InverterRegisterMap",
+     "MissingRegisterError",
++    "ModbusCommandPayload",
+ ]
+diff --git a/src/open_ems/adapters/modbus/register_maps/_base.py b/src/open_ems/adapters/modbus/register_maps/_base.py
+index 9a89d5c..c86fd28 100644
+--- a/src/open_ems/adapters/modbus/register_maps/_base.py
++++ b/src/open_ems/adapters/modbus/register_maps/_base.py
+@@ -7,9 +7,13 @@ MissingRegisterError and _require_reg.
+ 
+ from __future__ import annotations
+ 
+-from typing import Protocol
++from typing import Any, Protocol
+ 
+ from open_ems.adapters.protocol import RawModbusState
++from open_ems.core.commands import (
++    SetBatteryChargeRateCommand,
++    SetBatteryDischargeRateCommand,
++)
+ from open_ems.core.devices import BatteryState, InverterState
+ 
+ 
+@@ -47,7 +51,29 @@ class InverterRegisterMap(Protocol):
+     def map_state(self, raw: RawModbusState) -> InverterState: ...
+ 
+ 
++# A typed alias for the dict payload that BatteryAdapter forwards to
++# ``ModbusTcpAdapter.send_raw_command``. The shape matches ``_WriteRegisterPayload``
++# / ``_WriteRegistersPayload`` in ``adapters.modbus.tcp``; we keep the type as
++# ``dict[str, Any]`` here to avoid importing private TCP types.
++ModbusCommandPayload = dict[str, Any]
++
++
+ class BatteryRegisterMap(Protocol):
+     """Structural contract for all battery register map implementations."""
+ 
+     def map_state(self, raw: RawModbusState) -> BatteryState: ...
++
++    def command_payload(
++        self,
++        cmd: SetBatteryChargeRateCommand | SetBatteryDischargeRateCommand,
++    ) -> ModbusCommandPayload:
++        """Encode a battery setpoint command into a Modbus write payload.
++
++        The returned dict is forwarded to ``ModbusTcpAdapter.send_raw_command``
++        as ``RawProtocolCommand.payload``. Implementations MUST raise
++        ``ValueError`` when ``cmd.rate_kw`` is outside the model's encodable
++        range; the calling adapter wraps that into
++        ``CommandResult(status=failed, reason=f"register_map_encoding_error:...")``
++        per the cross-adapter command contract.
++        """
++        ...
+diff --git a/src/open_ems/adapters/modbus/register_maps/byd_hvm_v1.py b/src/open_ems/adapters/modbus/register_maps/byd_hvm_v1.py
+index 736f01b..7db6a10 100644
+--- a/src/open_ems/adapters/modbus/register_maps/byd_hvm_v1.py
++++ b/src/open_ems/adapters/modbus/register_maps/byd_hvm_v1.py
+@@ -16,10 +16,15 @@ from __future__ import annotations
+ 
+ from open_ems.adapters.modbus.register_maps._base import (
+     InvalidRegisterValueError,
++    ModbusCommandPayload,
+     _require_reg,
+ )
+ from open_ems.adapters.modbus.register_maps.utils import scale, uint16
+ from open_ems.adapters.protocol import RawModbusState
++from open_ems.core.commands import (
++    SetBatteryChargeRateCommand,
++    SetBatteryDischargeRateCommand,
++)
+ from open_ems.core.devices import BatteryState
+ 
+ _REG_SOC = 200  # uint16, unit: 0.1 % (divide by 10 → %)  # PLACEHOLDER
+@@ -28,6 +33,14 @@ _REG_POWER_W = 202  # uint16, unit: W (unsigned magnitude)  # PLACEHOLDER
+ _REG_DIRECTION = 204  # uint16, 0 = charging, 1 = discharging  # PLACEHOLDER
+ _REG_OPERATING_MODE = 205  # uint16 enum: 0=normal, 1=standby, 2=fault  # PLACEHOLDER
+ 
++# Setpoint write registers — placeholder addresses; verify against BYD docs at
++# installer commissioning. Encoded value is unsigned watts (uint16, 0..65 535).
++_REG_CHARGE_RATE_SETPOINT_W = 210  # PLACEHOLDER
++_REG_DISCHARGE_RATE_SETPOINT_W = 211  # PLACEHOLDER
++
++_MAX_SETPOINT_W = 65_535  # uint16 ceiling
++_MAX_SETPOINT_KW = _MAX_SETPOINT_W / 1000.0  # 65.535 kW
++
+ _DIRECTION_CHARGE = 0
+ _OPERATING_MODE_MAP: dict[int, str] = {
+     0: "normal",
+@@ -38,6 +51,19 @@ _OPERATING_MODE_MAP: dict[int, str] = {
+ __all__ = ["BydHvmV1"]
+ 
+ 
++def _encode_setpoint_w(rate_kw: float, *, command_type: str) -> int:
++    """Encode rate_kw → unsigned-watts uint16 register value, raising on overflow."""
++    if rate_kw < 0.0:
++        # Pydantic Field(ge=0) on the command catches this earlier — defense in depth.
++        raise ValueError(f"{command_type} rate_kw must be >= 0 (got {rate_kw})")
++    watts = int(round(rate_kw * 1000))
++    if watts > _MAX_SETPOINT_W:
++        raise ValueError(
++            f"{command_type} rate_kw={rate_kw} exceeds register-map max ({_MAX_SETPOINT_KW} kW)"
++        )
++    return watts
++
++
+ class BydHvmV1:
+     """Register map for BYD Battery-Box Premium HVM (Modbus TCP, byd_hvm_v1)."""
+ 
+@@ -64,3 +90,23 @@ class BydHvmV1:
+             operating_mode=_OPERATING_MODE_MAP.get(mode_raw, "unknown"),
+             read_at=raw.read_at,
+         )
++
++    def command_payload(
++        self,
++        cmd: SetBatteryChargeRateCommand | SetBatteryDischargeRateCommand,
++    ) -> ModbusCommandPayload:
++        """Encode a battery setpoint into a Modbus ``write_register`` payload."""
++        if isinstance(cmd, SetBatteryChargeRateCommand):
++            address = _REG_CHARGE_RATE_SETPOINT_W
++            command_type = "set_battery_charge_rate"
++        elif isinstance(cmd, SetBatteryDischargeRateCommand):
++            address = _REG_DISCHARGE_RATE_SETPOINT_W
++            command_type = "set_battery_discharge_rate"
++        else:  # pragma: no cover — caller ensures command type
++            raise TypeError(f"BydHvmV1.command_payload does not support {type(cmd).__name__}")
++        value = _encode_setpoint_w(cmd.rate_kw, command_type=command_type)
++        return {
++            "operation": "write_register",
++            "address": address,
++            "value": value,
++        }
+diff --git a/src/open_ems/adapters/modbus/register_maps/byd_hvs_v1.py b/src/open_ems/adapters/modbus/register_maps/byd_hvs_v1.py
+index db69c93..b7be2f9 100644
+--- a/src/open_ems/adapters/modbus/register_maps/byd_hvs_v1.py
++++ b/src/open_ems/adapters/modbus/register_maps/byd_hvs_v1.py
+@@ -16,10 +16,15 @@ from __future__ import annotations
+ 
+ from open_ems.adapters.modbus.register_maps._base import (
+     InvalidRegisterValueError,
++    ModbusCommandPayload,
+     _require_reg,
+ )
+ from open_ems.adapters.modbus.register_maps.utils import scale, uint16
+ from open_ems.adapters.protocol import RawModbusState
++from open_ems.core.commands import (
++    SetBatteryChargeRateCommand,
++    SetBatteryDischargeRateCommand,
++)
+ from open_ems.core.devices import BatteryState
+ 
+ _REG_SOC = 100  # uint16, unit: 0.1 % (divide by 10 → %)  # PLACEHOLDER
+@@ -28,6 +33,14 @@ _REG_POWER_W = 102  # uint16, unit: W (unsigned magnitude)  # PLACEHOLDER
+ _REG_DIRECTION = 104  # uint16, 0 = charging, 1 = discharging  # PLACEHOLDER
+ _REG_OPERATING_MODE = 105  # uint16 enum: 0=normal, 1=standby, 2=fault  # PLACEHOLDER
+ 
++# Setpoint write registers — placeholder addresses; verify against BYD docs at
++# installer commissioning. Encoded value is unsigned watts (uint16, 0..65 535).
++_REG_CHARGE_RATE_SETPOINT_W = 110  # PLACEHOLDER
++_REG_DISCHARGE_RATE_SETPOINT_W = 111  # PLACEHOLDER
++
++_MAX_SETPOINT_W = 65_535  # uint16 ceiling
++_MAX_SETPOINT_KW = _MAX_SETPOINT_W / 1000.0  # 65.535 kW
++
+ _DIRECTION_CHARGE = 0
+ _OPERATING_MODE_MAP: dict[int, str] = {
+     0: "normal",
+@@ -38,6 +51,19 @@ _OPERATING_MODE_MAP: dict[int, str] = {
+ __all__ = ["BydHvsV1"]
+ 
+ 
++def _encode_setpoint_w(rate_kw: float, *, command_type: str) -> int:
++    """Encode rate_kw → unsigned-watts uint16 register value, raising on overflow."""
++    if rate_kw < 0.0:
++        # Pydantic Field(ge=0) on the command catches this earlier — defense in depth.
++        raise ValueError(f"{command_type} rate_kw must be >= 0 (got {rate_kw})")
++    watts = int(round(rate_kw * 1000))
++    if watts > _MAX_SETPOINT_W:
++        raise ValueError(
++            f"{command_type} rate_kw={rate_kw} exceeds register-map max ({_MAX_SETPOINT_KW} kW)"
++        )
++    return watts
++
++
+ class BydHvsV1:
+     """Register map for BYD Battery-Box Premium HVS (Modbus TCP, byd_hvs_v1)."""
+ 
+@@ -64,3 +90,23 @@ class BydHvsV1:
+             operating_mode=_OPERATING_MODE_MAP.get(mode_raw, "unknown"),
+             read_at=raw.read_at,
+         )
++
++    def command_payload(
++        self,
++        cmd: SetBatteryChargeRateCommand | SetBatteryDischargeRateCommand,
++    ) -> ModbusCommandPayload:
++        """Encode a battery setpoint into a Modbus ``write_register`` payload."""
++        if isinstance(cmd, SetBatteryChargeRateCommand):
++            address = _REG_CHARGE_RATE_SETPOINT_W
++            command_type = "set_battery_charge_rate"
++        elif isinstance(cmd, SetBatteryDischargeRateCommand):
++            address = _REG_DISCHARGE_RATE_SETPOINT_W
++            command_type = "set_battery_discharge_rate"
++        else:  # pragma: no cover — caller ensures command type
++            raise TypeError(f"BydHvsV1.command_payload does not support {type(cmd).__name__}")
++        value = _encode_setpoint_w(cmd.rate_kw, command_type=command_type)
++        return {
++            "operation": "write_register",
++            "address": address,
++            "value": value,
++        }
+diff --git a/src/open_ems/adapters/ocpp/central_system.py b/src/open_ems/adapters/ocpp/central_system.py
+index 199e3a8..d3b10f8 100644
+--- a/src/open_ems/adapters/ocpp/central_system.py
++++ b/src/open_ems/adapters/ocpp/central_system.py
+@@ -56,6 +56,14 @@ class _ChargerState:
+         self.last_call_error: dict[str, Any] | None = None
+         self.last_meter_values_at: datetime | None = None
+         self.last_meter_values_power_kw: float | None = None
++        # Story 9.0: required by EVChargerAdapter to dispatch RemoteStopTransaction
++        # against the currently-active OCPP transaction. Reset on stop_transaction
++        # observation; intrinsically transient — not persisted across process restart.
++        self.last_known_transaction_id: int | None = None
++        # Monotonic counter feeding chargingProfileId in SetChargingProfile payloads.
++        # Stable per OCPP session (one charger connection); resets implicitly when
++        # _ChargerState is replaced on reconnect.
++        self.next_charging_profile_id: int = 1
+ 
+ 
+ class _InternalChargePoint(_BaseChargePoint):  # type: ignore[misc]
+@@ -111,6 +119,40 @@ class _InternalChargePoint(_BaseChargePoint):  # type: ignore[misc]
+         }
+         return call_result.StatusNotification()
+ 
++    @on(Action.start_transaction)  # type: ignore[untyped-decorator]
++    def on_start_transaction(
++        self,
++        connector_id: int,
++        id_tag: str,
++        meter_start: int,
++        timestamp: str,
++        **kwargs: Any,
++    ) -> Any:
++        # Issue a transaction id and remember it so EVChargerAdapter.send_command can
++        # construct a valid RemoteStopTransaction payload (Story 9.0 AC4). The id is
++        # monotonic per session; it does not need to survive a process restart because
++        # OCPP transaction ids are intrinsically scoped to an active charger session.
++        transaction_id = (self._state.last_known_transaction_id or 0) + 1
++        self._state.last_known_transaction_id = transaction_id
++        return call_result.StartTransaction(
++            transaction_id=transaction_id,
++            id_tag_info={"status": "Accepted"},
++        )
++
++    @on(Action.stop_transaction)  # type: ignore[untyped-decorator]
++    def on_stop_transaction(
++        self,
++        meter_stop: int,
++        timestamp: str,
++        transaction_id: int,
++        **kwargs: Any,
++    ) -> Any:
++        # Charger-initiated stop — clear the active transaction so the adapter
++        # rejects subsequent StopEVChargingCommand with no_active_ocpp_transaction.
++        if self._state.last_known_transaction_id == transaction_id:
++            self._state.last_known_transaction_id = None
++        return call_result.StopTransaction(id_tag_info={"status": "Accepted"})
++
+     @on(Action.meter_values)  # type: ignore[untyped-decorator]
+     def on_meter_values(
+         self,
+@@ -196,6 +238,28 @@ class OCPPChargerAdapter:
+                 charge_point_id=self.config.charge_point_id,
+             )
+ 
++    @property
++    def active_transaction_id(self) -> int | None:
++        """The most recent OCPP transaction id observed via StartTransaction.
++
++        Cleared on StopTransaction or reconnect. Read by EVChargerAdapter to
++        compose a RemoteStopTransaction payload (Story 9.0 AC4). Returns None if
++        no transaction is currently active.
++        """
++        return self._state.last_known_transaction_id
++
++    def reserve_charging_profile_id(self) -> int:
++        """Reserve the next session-scoped chargingProfileId for SetChargingProfile.
++
++        Monotonic per OCPP session; resets when the charger reconnects (a fresh
++        ``_ChargerState`` is created). Read by EVChargerAdapter to compose
++        SetChargingProfile payloads (Story 9.0 AC4 / Dev Notes § OCPP charging
++        profile composition).
++        """
++        profile_id = self._state.next_charging_profile_id
++        self._state.next_charging_profile_id = profile_id + 1
++        return profile_id
++
+     async def get_raw_state(self) -> RawOCPPState | ProtocolDegradedState:
+         """Return current raw OCPP state or a degraded state if disconnected or heartbeat stale."""
+         state = self._state
+diff --git a/src/open_ems/adapters/ocpp/charger_adapter.py b/src/open_ems/adapters/ocpp/charger_adapter.py
+index b48c07d..2d5f9b5 100644
+--- a/src/open_ems/adapters/ocpp/charger_adapter.py
++++ b/src/open_ems/adapters/ocpp/charger_adapter.py
+@@ -1,16 +1,47 @@
+-"""Domain-level EV charger adapter: translates RawOCPPState → EVChargerState."""
++"""Domain-level EV charger adapter: translates RawOCPPState → EVChargerState.
++
++``send_command`` honors the cross-adapter command contract documented in
++``open_ems.adapters`` (the canonical reference). OCPP-specific clauses on top
++of the cross-adapter contract:
++
++- ``SetEVChargingRateCommand`` → OCPP ``SetChargingProfile`` CALL with a single
++  ``TxProfile`` setting ``chargingRateUnit="W"`` and ``limit=int(rate_kw*1000)``.
++  Response ``status="Accepted"`` ⇒ ``CommandResult(success)``.
++  Response ``status="Rejected"`` ⇒ ``CommandResult(rejected, "ocpp_rejected:Rejected")``.
++- ``StopEVChargingCommand`` → OCPP ``RemoteStopTransaction`` with the active
++  transaction id observed from the charger's most recent ``StartTransaction``.
++  No active transaction ⇒ ``CommandResult(failed, "no_active_ocpp_transaction")``
++  (do NOT send a stop with a stale id — Story 8.0 retro hazard).
++
++OCPP CALL ``acked`` ≠ command applied; the response payload's ``status`` field
++is the authoritative signal. The protocol layer reports both alike as
++``protocol_status="acked"``; this adapter inspects the response payload to
++disambiguate (cross-adapter contract clause 3, OCPP-specific row).
++"""
+ 
+ from __future__ import annotations
+ 
++import uuid
+ from datetime import UTC, datetime
+-from typing import Literal
++from typing import Any, Literal
+ 
+ import structlog
+ 
+ from open_ems.adapters.capabilities import get_profile
+ from open_ems.adapters.ocpp.central_system import OCPPChargerAdapter
+-from open_ems.adapters.protocol import ProtocolDegradedState, RawOCPPState
+-from open_ems.core.commands import CommandResult, DeviceCommand
++from open_ems.adapters.protocol import (
++    ProtocolCommandResult,
++    ProtocolDegradedState,
++    RawOCPPState,
++    RawProtocolCommand,
++)
++from open_ems.core.commands import (
++    CommandResult,
++    CommandStatus,
++    DeviceCommand,
++    SetEVChargingRateCommand,
++    StopEVChargingCommand,
++)
+ from open_ems.core.devices import (
+     DegradedDeviceState,
+     DeviceCapabilityProfile,
+@@ -129,8 +160,166 @@ class EVChargerAdapter:
+         return profile
+ 
+     async def send_command(self, cmd: DeviceCommand) -> CommandResult:
+-        """OCPP charger write path — implementation deferred (Epic 9)."""
+-        raise NotImplementedError("EVChargerAdapter.send_command is not yet implemented")
++        """OCPP charger write path.
++
++        Honors the cross-adapter command contract in ``open_ems.adapters``.
++        ``asyncio.CancelledError`` and ``TypeError`` propagate (clauses 5 and 2).
++        Every other exception is caught and wrapped (clause 8 / AR16).
++        """
++        if isinstance(cmd, SetEVChargingRateCommand):
++            command_name = "SetChargingProfile"
++            try:
++                payload = self._compose_set_charging_profile_payload(cmd.rate_kw)
++            except Exception as exc:  # noqa: BLE001 — AR16
++                return self._wrap_internal_error(cmd, exc, where="ocpp_payload_composition")
++        elif isinstance(cmd, StopEVChargingCommand):
++            command_name = "RemoteStopTransaction"
++            transaction_id = self._protocol_adapter.active_transaction_id
++            if transaction_id is None:
++                return _failed(cmd, "no_active_ocpp_transaction")
++            payload = {"transaction_id": transaction_id}
++        else:
++            raise TypeError(f"EVChargerAdapter does not support {type(cmd).__name__}")
++
++        try:
++            raw_command = RawProtocolCommand(
++                correlation_id=str(cmd.correlation_id),
++                device_id=self.device_id,
++                command_name=command_name,
++                payload=payload,
++            )
++        except Exception as exc:  # noqa: BLE001 — AR16
++            return self._wrap_internal_error(cmd, exc, where="raw_command_construction")
++
++        try:
++            protocol_result = await self._protocol_adapter.send_raw_command(raw_command)
++        except Exception as exc:  # noqa: BLE001 — AR16. CancelledError is BaseException; not caught here.
++            return self._wrap_internal_error(cmd, exc, where="protocol_dispatch")
++
++        # correlation_id round-trip integrity (contract clause 4).
++        try:
++            returned_uuid = uuid.UUID(protocol_result.correlation_id)
++        except (ValueError, AttributeError, TypeError):
++            self._log_correlation_mismatch(cmd, protocol_result)
++            return _failed(cmd, "correlation_id_mismatch")
++        if returned_uuid != cmd.correlation_id:
++            self._log_correlation_mismatch(cmd, protocol_result)
++            return _failed(cmd, "correlation_id_mismatch")
++
++        return self._map_ocpp_result(cmd, protocol_result)
++
++    def _compose_set_charging_profile_payload(self, rate_kw: float) -> dict[str, Any]:
++        """Build an OCPP 1.6 SetChargingProfile payload for an EMS rate setpoint.
++
++        See Dev Notes § "OCPP charging profile composition" (Story 9.0).
++        """
++        if rate_kw < 0.0:
++            raise ValueError(f"rate_kw must be >= 0 (got {rate_kw})")
++        limit_w = int(round(rate_kw * 1000))
++        profile_id = self._protocol_adapter.reserve_charging_profile_id()
++        return {
++            "connector_id": 1,
++            "cs_charging_profiles": {
++                "charging_profile_id": profile_id,
++                "stack_level": 0,
++                "charging_profile_purpose": "TxProfile",
++                "charging_profile_kind": "Absolute",
++                "charging_schedule": {
++                    "charging_rate_unit": "W",
++                    "charging_schedule_period": [
++                        {"start_period": 0, "limit": limit_w},
++                    ],
++                },
++            },
++        }
++
++    def _map_ocpp_result(
++        self,
++        cmd: DeviceCommand,
++        protocol_result: ProtocolCommandResult,
++    ) -> CommandResult:
++        """Map ``ProtocolCommandResult`` → ``CommandResult`` per OCPP semantics.
++
++        OCPP ``acked`` does NOT mean "applied" — the response payload's ``status``
++        field is the authoritative signal. ``status="Accepted"`` ⇒ success;
++        ``status="Rejected"`` ⇒ rejected.
++        """
++        status = protocol_result.protocol_status
++        raw_response = protocol_result.raw_response
++
++        if status == "acked":
++            response_status = None
++            if isinstance(raw_response, dict):
++                response_status = raw_response.get("status")
++            if response_status == "Accepted":
++                return CommandResult(
++                    correlation_id=cmd.correlation_id,
++                    device_id=cmd.device_id,
++                    status=CommandStatus.success,
++                    applied=True,
++                    reason="ok",
++                )
++            # Anything other than Accepted is treated as a rejection. OCPP 1.6
++            # SetChargingProfile defines {Accepted, Rejected, NotSupported}; we
++            # report whatever the charger sent for downstream visibility.
++            reason_status = response_status if isinstance(response_status, str) else "Unknown"
++            return CommandResult(
++                correlation_id=cmd.correlation_id,
++                device_id=cmd.device_id,
++                status=CommandStatus.rejected,
++                applied=False,
++                reason=f"ocpp_rejected:{reason_status}",
++            )
++
++        if status == "timeout":
++            return CommandResult(
++                correlation_id=cmd.correlation_id,
++                device_id=cmd.device_id,
++                status=CommandStatus.timeout,
++                applied=False,
++                reason="ocpp_command_timeout",
++            )
++
++        if status == "error":
++            error_code = "unknown"
++            if isinstance(raw_response, dict):
++                error_code = str(
++                    raw_response.get("error") or raw_response.get("error_code") or "unknown"
++                )
++            return _failed(cmd, f"ocpp_error:{error_code}")
++
++        return _failed(cmd, f"adapter_internal_error:unexpected_protocol_status:{status}")
++
++    def _wrap_internal_error(
++        self, cmd: DeviceCommand, exc: BaseException, *, where: str
++    ) -> CommandResult:
++        logger.warning(
++            "adapter_internal_error",
++            component="adapters",
++            device_id=self.device_id,
++            command_type=type(cmd).__name__,
++            phase=where,
++            error=repr(exc),
++            exc_info=True,
++        )
++        return CommandResult(
++            correlation_id=cmd.correlation_id,
++            device_id=cmd.device_id,
++            status=CommandStatus.failed,
++            applied=False,
++            reason=f"adapter_internal_error:{type(exc).__name__}",
++        )
++
++    def _log_correlation_mismatch(
++        self, cmd: DeviceCommand, protocol_result: ProtocolCommandResult
++    ) -> None:
++        logger.warning(
++            "adapter_correlation_mismatch",
++            component="adapters",
++            device_id=self.device_id,
++            expected=str(cmd.correlation_id),
++            received=str(protocol_result.correlation_id),
++        )
+ 
+     def _to_degraded(self, reason: str, occurred_at: datetime) -> DegradedDeviceState:
+         domain_reason = "reconnecting" if reason in _RECONNECTING_REASONS else reason
+@@ -147,3 +336,13 @@ class EVChargerAdapter:
+             reason=domain_reason,
+             occurred_at=occurred_at,
+         )
++
++
++def _failed(cmd: DeviceCommand, reason: str) -> CommandResult:
++    return CommandResult(
++        correlation_id=cmd.correlation_id,
++        device_id=cmd.device_id,
++        status=CommandStatus.failed,
++        applied=False,
++        reason=reason,
++    )
+diff --git a/src/open_ems/core/commands.py b/src/open_ems/core/commands.py
+index 9f2df7c..f826065 100644
+--- a/src/open_ems/core/commands.py
++++ b/src/open_ems/core/commands.py
+@@ -13,6 +13,13 @@ Three-stage pipeline (Story 8.3 adds RetryPolicy on top of Story 8.2):
+ PolicyGuard is the single mandatory dispatch path (AR15). Adapters never receive
+ ``send_command()`` calls from any other component.
+ 
++As of Story 9.0, every controllable adapter (Battery, Inverter, EV Charger)
++honors the cross-adapter command contract documented in
++``open_ems.adapters`` (single source of truth) — closing the AR16 gap that
++existed during Epic 8 (where ``send_command`` was a stub raising
++``NotImplementedError``). DSMR P1 remains read-only (FR6b) and is excluded
++from the controllable-adapter set.
++
+ Idempotency classification (``is_idempotent: ClassVar[bool]``) is intrinsic to
+ the command type and lives at the class level — NOT as a Pydantic field — so it
+ cannot be overridden per instance and so ``ConfigDict(extra="forbid")`` does not
+diff --git a/tests/unit/adapters/test_adapter_capabilities.py b/tests/unit/adapters/test_adapter_capabilities.py
+index 9477c66..9761ae3 100644
+--- a/tests/unit/adapters/test_adapter_capabilities.py
++++ b/tests/unit/adapters/test_adapter_capabilities.py
+@@ -63,9 +63,11 @@ async def test_inverter_adapter_capabilities_fronius() -> None:
+     assert profile.capability_status == CapabilityStatus.full
+     assert profile.device_id == "inv-001"
+     assert profile.model == "fronius_gen24_v1"
+-    assert WriteCapability.set_operating_mode in profile.write_capabilities
++    # Story 9.0 AC3: inverter is read-only in v1 — write_capabilities is empty.
++    assert profile.write_capabilities == frozenset()
+     assert WriteCapability.set_charge_rate not in profile.write_capabilities
+     assert WriteCapability.set_discharge_rate not in profile.write_capabilities
++    assert WriteCapability.set_operating_mode not in profile.write_capabilities
+ 
+ 
+ @pytest.mark.asyncio
+diff --git a/tests/unit/adapters/test_capability_registry.py b/tests/unit/adapters/test_capability_registry.py
+index a14316c..561f505 100644
+--- a/tests/unit/adapters/test_capability_registry.py
++++ b/tests/unit/adapters/test_capability_registry.py
+@@ -22,7 +22,8 @@ def test_get_profile_fronius_returns_full_profile() -> None:
+     assert profile.capability_status == CapabilityStatus.full
+     assert ReadCapability.state in profile.read_capabilities
+     assert ReadCapability.power in profile.read_capabilities
+-    assert WriteCapability.set_operating_mode in profile.write_capabilities
++    # Story 9.0 AC3: v1 inverter is read-only.
++    assert profile.write_capabilities == frozenset()
+ 
+ 
+ def test_get_profile_inverter_does_not_have_charge_or_discharge() -> None:
+@@ -34,13 +35,14 @@ def test_get_profile_inverter_does_not_have_charge_or_discharge() -> None:
+ def test_get_profile_huawei_returns_full_profile() -> None:
+     profile = get_profile("dev-1", "huawei_sun2000_v3")
+     assert profile.capability_status == CapabilityStatus.full
+-    assert WriteCapability.set_operating_mode in profile.write_capabilities
++    assert profile.write_capabilities == frozenset()
+ 
+ 
+ def test_get_profile_growatt_returns_full_profile() -> None:
+     profile = get_profile("dev-1", "growatt_hybrid_v1")
+     assert profile.capability_status == CapabilityStatus.full
+     assert ReadCapability.power in profile.read_capabilities
++    assert profile.write_capabilities == frozenset()
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -54,7 +56,8 @@ def test_get_profile_byd_hvs_returns_full_profile() -> None:
+     assert ReadCapability.soc in profile.read_capabilities
+     assert WriteCapability.set_charge_rate in profile.write_capabilities
+     assert WriteCapability.set_discharge_rate in profile.write_capabilities
+-    assert WriteCapability.set_operating_mode in profile.write_capabilities
++    # Story 9.0 AC10: set_operating_mode removed from BYD profiles for v1.
++    assert WriteCapability.set_operating_mode not in profile.write_capabilities
+ 
+ 
+ def test_get_profile_byd_hvm_returns_full_profile() -> None:

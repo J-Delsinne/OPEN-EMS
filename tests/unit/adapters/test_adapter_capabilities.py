@@ -63,9 +63,11 @@ async def test_inverter_adapter_capabilities_fronius() -> None:
     assert profile.capability_status == CapabilityStatus.full
     assert profile.device_id == "inv-001"
     assert profile.model == "fronius_gen24_v1"
-    assert WriteCapability.set_operating_mode in profile.write_capabilities
+    # Story 9.0 AC3: inverter is read-only in v1 — write_capabilities is empty.
+    assert profile.write_capabilities == frozenset()
     assert WriteCapability.set_charge_rate not in profile.write_capabilities
     assert WriteCapability.set_discharge_rate not in profile.write_capabilities
+    assert WriteCapability.set_operating_mode not in profile.write_capabilities
 
 
 @pytest.mark.asyncio
