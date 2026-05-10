@@ -1,5 +1,9 @@
 # Deferred Work Log
 
+## Deferred from: code review of 8-4-implement-watchdog-heartbeat-stalled-loop-detection-fail-safe-transition-and-recovery (2026-05-10)
+
+- **`observability.audit` slow DB write blocks watchdog heartbeat tick** [`src/open_ems/services/watchdog.py:60-69`] — If `await observability.audit(...)` exceeds `interval`, no `WATCHDOG=1` is sent for the audit duration → systemd may hard-restart even though the loop recovered. Wrapping the audit emit in `asyncio.wait_for(..., timeout=interval)` is the obvious mitigation, but the underlying DB-hang scenario affects other audit call sites equally and should be addressed as a holistic policy across the audit pipeline (cap, timeout, or background queue) rather than patched per call site.
+
 ## Deferred from: code review of 8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement (2026-05-06)
 
 - **`asyncio.sleep` between attempts not shielded against cancellation** [`src/open_ems/engine/retry_policy.py:82-83`] — control-loop shutdown or task cancellation while RetryPolicy is in a backoff sleep propagates `CancelledError` immediately; the in-flight retry is silently dropped and no DEVICE audit is emitted, so post-mortem cannot reconstruct that a command was partially attempted before shutdown; broader cancellation policy belongs to Story 8.4 watchdog work.

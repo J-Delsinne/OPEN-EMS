@@ -371,3 +371,129 @@ async def test_audit_summary_marks_failed_as_not_applied() -> None:
     summary = audit_spy.await_args.kwargs["summary"]
     assert "not applied" in summary
     assert "indeterminate" not in summary
+
+
+# ─── Story 8.4 AC7: cancellation handling (AC12 #29-#30) ───────────────────────
+
+
+async def test_retry_policy_emits_device_audit_on_cancellation() -> None:
+    """AC12 #29: cancel during retry backoff → CancelledError raised AND DEVICE audit emitted.
+
+    Uses an asyncio.Event signalled by the dispatch mock to guarantee the
+    cancellation lands while the backoff sleep is in progress (not earlier
+    during dispatch), so the test name accurately describes coverage.
+    """
+    import asyncio
+
+    cmd = _idempotent_command()
+    obs, audit_spy = _observability_spy()
+
+    in_backoff = asyncio.Event()
+
+    async def dispatch_then_signal(_cmd: DeviceCommand) -> CommandResult:
+        # Fire AFTER returning the failed result so the next loop iteration
+        # enters `await asyncio.sleep(backoff)` deterministically.
+        in_backoff.set()
+        return _failed_result(cmd)
+
+    pg = MagicMock(spec=PolicyGuard)
+    pg.authorize_and_dispatch = AsyncMock(side_effect=dispatch_then_signal)
+
+    warnings: list[str] = []
+
+    class FakeLogger:
+        def debug(self, _event: str, **_kwargs: object) -> None:
+            pass
+
+        def warning(self, event: str, **_kwargs: object) -> None:
+            warnings.append(event)
+
+        def error(self, _event: str, **_kwargs: object) -> None:
+            pass
+
+    rp = RetryPolicy(
+        policy_guard=pg,
+        observability=obs,
+        # backoff long enough that the test cancels during the sleep
+        settings=_settings(max_retries=2, backoff=1.0),
+    )
+
+    with patch("open_ems.engine.retry_policy.logger", FakeLogger()):
+        task = asyncio.create_task(rp.execute(cmd))
+        # Wait until the first dispatch has returned (we are now inside the backoff sleep)
+        await asyncio.wait_for(in_backoff.wait(), timeout=2.0)
+        # Yield once more so the await asyncio.sleep(backoff) is actually entered
+        await asyncio.sleep(0)
+
+        task.cancel()
+        import pytest
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # Exactly one cancellation audit emitted, mid-retry
+    assert audit_spy.await_count == 1
+    call = audit_spy.await_args
+    assert call.kwargs["event_type"] == "DEVICE"
+    assert call.kwargs["actor"] == "system"
+    assert call.kwargs["device_id"] == cmd.device_id
+    assert "cancelled mid-retry" in call.kwargs["summary"]
+    # AC7 floor: structured `retry_cancelled` warning is the post-mortem record
+    assert "retry_cancelled" in warnings
+
+
+async def test_retry_policy_audit_failure_during_cancellation_swallowed() -> None:
+    """AC12 #30: audit raises during cancel path → CancelledError still propagates.
+
+    Also verifies the AC7 floor: even when the audit DB write fails, the
+    structured ``retry_cancelled`` warning log is still emitted.
+    """
+    import asyncio
+
+    cmd = _idempotent_command()
+    in_backoff = asyncio.Event()
+
+    async def dispatch_then_signal(_cmd: DeviceCommand) -> CommandResult:
+        in_backoff.set()
+        return _failed_result(cmd)
+
+    pg = MagicMock(spec=PolicyGuard)
+    pg.authorize_and_dispatch = AsyncMock(side_effect=dispatch_then_signal)
+
+    audit_spy = AsyncMock(side_effect=RuntimeError("db unavailable"))
+    obs = ObservabilityService(repo=MagicMock())
+    obs.audit = audit_spy  # type: ignore[method-assign]
+
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    class FakeLogger:
+        def debug(self, _event: str, **_kwargs: object) -> None:
+            pass
+
+        def warning(self, event: str, **_kwargs: object) -> None:
+            warnings.append(event)
+
+        def error(self, event: str, **_kwargs: object) -> None:
+            errors.append(event)
+
+    rp = RetryPolicy(
+        policy_guard=pg,
+        observability=obs,
+        settings=_settings(max_retries=2, backoff=1.0),
+    )
+
+    with patch("open_ems.engine.retry_policy.logger", FakeLogger()):
+        task = asyncio.create_task(rp.execute(cmd))
+        await asyncio.wait_for(in_backoff.wait(), timeout=2.0)
+        await asyncio.sleep(0)
+
+        task.cancel()
+        import pytest
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # Floor: warning log MUST be emitted even though the audit DB write blew up
+    assert "retry_cancelled" in warnings
+    assert "audit_emit_failed" in errors

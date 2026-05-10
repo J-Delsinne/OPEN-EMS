@@ -65,49 +65,101 @@ class RetryPolicy:
         max_attempts = self._settings.command_max_retries + 1
         backoff = self._settings.command_retry_backoff_seconds
         last_result: CommandResult | None = None
-        for attempt in range(1, max_attempts + 1):
-            if attempt > 1:
-                assert last_result is not None  # loop invariant: prior attempt ran
-                logger.debug(
-                    "command_retry",
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    prior_status=last_result.status.value,
-                    prior_reason=last_result.reason,
-                    device_id=command.device_id,
-                    correlation_id=str(command.correlation_id),
-                    component="engine",
-                )
-                if backoff > 0:
-                    await asyncio.sleep(backoff)
-            last_result = await self._policy_guard.authorize_and_dispatch(command)
-            if last_result.applied:
-                logger.debug(
-                    "command_applied",
-                    device_id=command.device_id,
-                    command_type=type(command).__name__,
-                    attempts=attempt,
-                    correlation_id=str(command.correlation_id),
-                    component="engine",
-                )
-                return last_result
-            if not command.is_idempotent:
-                logger.debug(
-                    "non_idempotent_command_not_retried",
-                    device_id=command.device_id,
-                    command_type=type(command).__name__,
-                    status=last_result.status.value,
-                    reason=last_result.reason,
-                    correlation_id=str(command.correlation_id),
-                    component="engine",
-                )
-                break
-            if last_result.status is CommandStatus.rejected:
-                # Re-check rejected the command — stop, don't keep hammering an unsafe op.
-                break
-        assert last_result is not None  # range(1, N+1) with N>=1 is non-empty
-        await self._emit_failure_audit(command, last_result, attempts=attempt)
-        return last_result
+        attempt = 0  # tracked for the cancellation path
+        try:
+            for attempt in range(1, max_attempts + 1):
+                if attempt > 1:
+                    assert last_result is not None  # loop invariant: prior attempt ran
+                    logger.debug(
+                        "command_retry",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        prior_status=last_result.status.value,
+                        prior_reason=last_result.reason,
+                        device_id=command.device_id,
+                        correlation_id=str(command.correlation_id),
+                        component="engine",
+                    )
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+                last_result = await self._policy_guard.authorize_and_dispatch(command)
+                if last_result.applied:
+                    logger.debug(
+                        "command_applied",
+                        device_id=command.device_id,
+                        command_type=type(command).__name__,
+                        attempts=attempt,
+                        correlation_id=str(command.correlation_id),
+                        component="engine",
+                    )
+                    return last_result
+                if not command.is_idempotent:
+                    logger.debug(
+                        "non_idempotent_command_not_retried",
+                        device_id=command.device_id,
+                        command_type=type(command).__name__,
+                        status=last_result.status.value,
+                        reason=last_result.reason,
+                        correlation_id=str(command.correlation_id),
+                        component="engine",
+                    )
+                    break
+                if last_result.status is CommandStatus.rejected:
+                    # Re-check rejected the command — stop, don't keep hammering an unsafe op.
+                    break
+            assert last_result is not None  # range(1, N+1) with N>=1 is non-empty
+            await self._emit_failure_audit(command, last_result, attempts=attempt)
+            return last_result
+        except asyncio.CancelledError:
+            await self._emit_cancellation_audit(command, attempts=attempt)
+            raise
+
+    async def _emit_cancellation_audit(
+        self,
+        command: DeviceCommand,
+        *,
+        attempts: int,
+    ) -> None:
+        """Emit a DEVICE audit event when execute() is cancelled mid-retry (AC7).
+
+        The structured warning log is the floor — even if the audit DB write
+        fails or is itself cancelled, the cancellation is recorded.
+        """
+        logger.warning(
+            "retry_cancelled",
+            device_id=command.device_id,
+            command_type=type(command).__name__,
+            attempts=attempts,
+            correlation_id=str(command.correlation_id),
+            component="engine",
+        )
+        if attempts <= 0:
+            audit_summary = (
+                f"Command {type(command).__name__} for {command.device_id} "
+                "cancelled before first dispatch: not attempted"
+            )
+        else:
+            audit_summary = (
+                f"Command {type(command).__name__} for {command.device_id} "
+                f"cancelled mid-retry after {attempts} attempt(s): "
+                "pending result indeterminate"
+            )
+        try:
+            await self._observability.audit(
+                actor="system",
+                event_type="DEVICE",
+                summary=audit_summary,
+                device_id=command.device_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — audit failure must not mask cancellation
+            logger.error(
+                "audit_emit_failed",
+                device_id=command.device_id,
+                command_type=type(command).__name__,
+                error=repr(exc),
+                exc_info=True,
+                component="engine",
+            )
 
     async def _emit_failure_audit(
         self,

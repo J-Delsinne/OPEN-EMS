@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -17,6 +17,7 @@ from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.logging_config import configure_logging
 from open_ems.services.audit_log import ObservabilityService
+from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.services.readiness import mark_ready, sd_notify
 from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
@@ -116,6 +117,52 @@ async def _event_log_pruning_task() -> None:
         await asyncio.sleep(24 * 60 * 60)
 
 
+def make_on_control_loop_done(
+    loop_liveness: LoopLiveness,
+    observability: ObservabilityService,
+) -> Callable[[asyncio.Task[None]], None]:
+    """Build the ``_on_control_loop_done`` callback used by the lifespan.
+
+    Extracted as a module-level factory so the integration test can exercise
+    the real production callback rather than reimplementing its semantics.
+    """
+
+    def _on_control_loop_done(t: asyncio.Task[None]) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is None:
+            return
+        logger.error("control_loop_died", exc_info=exc, component="engine")
+        loop_liveness.mark_crashed(exc)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # process is exiting; only the structured log is recorded
+
+        async def _emit_crash_audit() -> None:
+            try:
+                await observability.audit(
+                    actor="system",
+                    event_type="SYSTEM",
+                    summary=(
+                        f"Control loop crashed: {type(exc).__name__}: {exc!r}; "
+                        "entering fail-safe pending supervisor restart"
+                    ),
+                )
+            except Exception as audit_exc:  # noqa: BLE001
+                logger.error(
+                    "audit_emit_failed",
+                    component="engine",
+                    error=repr(audit_exc),
+                    exc_info=True,
+                )
+
+        running.create_task(_emit_crash_audit())
+
+    return _on_control_loop_done
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
@@ -180,21 +227,50 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         mark_ready()
         logger.info("system_ready", component="startup")
 
-        # Step 6: Start watchdog heartbeat (active only when WATCHDOG_USEC is set by systemd)
-        interval = get_watchdog_interval()
-        if interval is not None:
+        # Construct shared services BEFORE the watchdog and control loop start so both
+        # share the same LoopLiveness signal and ObservabilityService instance.
+        observability = ObservabilityService()
+        loop_liveness = LoopLiveness(
+            missed_cycle_threshold_seconds=(
+                settings.watchdog_missed_cycle_threshold * settings.control_loop_interval_seconds
+            ),
+            cycle_deadline_seconds=settings.watchdog_cycle_deadline_seconds,
+            cycle_interval_seconds=settings.control_loop_interval_seconds,
+        )
+        app.state.loop_liveness = loop_liveness
 
-            def _on_watchdog_done(t: asyncio.Task[None]) -> None:
-                if not t.cancelled():
-                    exc = t.exception()
-                    if exc is not None:
-                        logger.error("watchdog_task_died", exc_info=exc, component="watchdog")
+        # Step 6: Start the watchdog/stall-monitor task.
+        # It ALWAYS runs (Docker parity); whether it sends sd_notify is decided by
+        # whether systemd configured WATCHDOG_USEC for this process.
+        systemd_interval = get_watchdog_interval()
+        if systemd_interval is not None:
+            watchdog_interval = systemd_interval
+            send_sd_notify = True
+        else:
+            watchdog_interval = settings.control_loop_interval_seconds
+            send_sd_notify = False
 
-            _watchdog_task = asyncio.create_task(watchdog_task(interval))
-            _watchdog_task.add_done_callback(_on_watchdog_done)
-            logger.info(
-                "watchdog_started", interval_seconds=round(interval, 3), component="startup"
+        def _on_watchdog_done(t: asyncio.Task[None]) -> None:
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    logger.error("watchdog_task_died", exc_info=exc, component="watchdog")
+
+        _watchdog_task = asyncio.create_task(
+            watchdog_task(
+                watchdog_interval,
+                loop_liveness=loop_liveness,
+                observability=observability,
+                send_sd_notify=send_sd_notify,
             )
+        )
+        _watchdog_task.add_done_callback(_on_watchdog_done)
+        logger.info(
+            "watchdog_started" if send_sd_notify else "stall_monitor_started",
+            interval_seconds=round(watchdog_interval, 3),
+            send_sd_notify=send_sd_notify,
+            component="startup",
+        )
 
         def _on_cleanup_done(t: asyncio.Task[None]) -> None:
             if not t.cancelled():
@@ -221,7 +297,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("event_log_pruning_task_started", component="observability")
 
         intent_executor = IntentExecutor()
-        observability = ObservabilityService()
         policy_guard = PolicyGuard(
             state_store=app.state.state_store,
             adapters={},
@@ -240,16 +315,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             settings=settings,
             intent_executor=intent_executor,
             retry_policy=retry_policy,
+            loop_liveness=loop_liveness,
+            observability=observability,
         )
 
-        def _on_control_loop_done(t: asyncio.Task[None]) -> None:
-            if not t.cancelled():
-                exc = t.exception()
-                if exc is not None:
-                    logger.error("control_loop_died", exc_info=exc, component="engine")
-
         _control_loop_task = asyncio.create_task(_control_loop.run(), name="control_loop")
-        _control_loop_task.add_done_callback(_on_control_loop_done)
+        _control_loop_task.add_done_callback(
+            make_on_control_loop_done(loop_liveness, observability)
+        )
         logger.info("control_loop_started", component="engine")
 
         yield  # Application serves requests here

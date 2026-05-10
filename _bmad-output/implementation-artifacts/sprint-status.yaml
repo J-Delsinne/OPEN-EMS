@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-07'  # 8-3 done: code review applied 6 patches; 822 tests passing
+last_updated: '2026-05-10'  # 8-4 code review applied: 13 patches landed (1 dismissed, 1 deferred); 858 tests, all gates green
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -80,18 +80,18 @@ development_status:
   epic-4-retrospective: done
 
   # ─── Epic 5: State Aggregation and Real-Time Distribution ──────────────────
-  epic-5: in-progress
+  epic-5: done
   5-1-define-system-state-model-and-implement-statestore-with-immutable-versioned-snapshots: done
   5-2-implement-sse-state-stream-with-role-filtered-serialization-and-event-metadata: done
   5-3-implement-htmx-polling-endpoints-and-per-device-stale-and-unavailable-detection: done
-  epic-5-retrospective: optional
+  epic-5-retrospective: done
 
   # ─── Epic 6: Observability and Event Logging ───────────────────────────────
-  epic-6: in-progress
+  epic-6: done
   6-1-define-event-log-schema-and-implement-observabilityservice-with-dual-sink-logging: done
   6-2-enforce-append-only-semantics-and-event-retention-policy: done
   6-3-implement-installer-note-storage-and-config-audit-log: done
-  epic-6-retrospective: optional
+  epic-6-retrospective: done
 
   # ─── Epic 7: Decision Engine ───────────────────────────────────────────────
   epic-7: done
@@ -109,7 +109,7 @@ development_status:
   8-1-implement-the-runtime-control-loop-with-adapter-polling-and-statestore-publishing: done
   8-2-implement-intentexecutor-policyguard-and-command-dispatch: done
   8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement: done
-  8-4-implement-watchdog-heartbeat-stalled-loop-detection-fail-safe-transition-and-recovery: backlog
+  8-4-implement-watchdog-heartbeat-stalled-loop-detection-fail-safe-transition-and-recovery: done
   8-5-end-to-end-decision-engine-simulation: backlog
   epic-8-retrospective: optional
 

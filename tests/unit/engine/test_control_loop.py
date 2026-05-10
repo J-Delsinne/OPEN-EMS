@@ -24,6 +24,8 @@ from open_ems.engine import (
 from open_ems.engine.control_loop import ControlLoop
 from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
 from open_ems.engine.rules.ev_scheduling import EVChargerIntent, EVChargerIntentAction
+from open_ems.services.audit_log import ObservabilityService
+from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.settings import Settings
 
 _NOW = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
@@ -108,11 +110,20 @@ def _control_loop(
     state_store: StateStore | None = None,
     intent_executor: IntentExecutor | None = None,
     retry_policy: RetryPolicy | MagicMock | None = None,
+    loop_liveness: LoopLiveness | None = None,
+    observability: ObservabilityService | MagicMock | None = None,
 ) -> ControlLoop:
     if energy_repo is None:
         energy_repo = AsyncMock()
         energy_repo.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
         energy_repo.write_peak_interval = AsyncMock()
+    if loop_liveness is None:
+        loop_liveness = LoopLiveness(
+            missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0
+        )
+    if observability is None:
+        observability = MagicMock(spec=ObservabilityService)
+        observability.audit = AsyncMock(return_value=None)
     return ControlLoop(
         state_store=state_store or _state_store(),
         adapters=adapters or {},
@@ -120,6 +131,8 @@ def _control_loop(
         settings=_settings(),
         intent_executor=intent_executor or IntentExecutor(),
         retry_policy=retry_policy or _default_retry_policy_mock(),
+        loop_liveness=loop_liveness,
+        observability=observability,
     )
 
 
@@ -351,3 +364,325 @@ async def test_peak_intervals_not_skipped_in_fail_safe_mode() -> None:
     )
 
     loop._energy_repo.write_peak_interval.assert_called_once()  # noqa: SLF001
+
+
+# ── Story 8.4: fail-safe lifecycle tests (AC4, AC5, AC10; AC12 #20-#28) ─────
+
+
+def _battery_state(*, at: datetime = _NOW) -> object:
+    from open_ems.core import BatteryState
+
+    return BatteryState(
+        device_id="bat-001",
+        soc_percent=50.0,
+        battery_power_kw=0.0,
+        capacity_kwh=10.0,
+        operating_mode="hold",
+        read_at=at,
+    )
+
+
+async def _publish_snapshot_with_degraded(
+    loop: ControlLoop,
+    *,
+    grid_degraded: bool,
+    battery_degraded: bool = False,
+) -> Any:
+    """Build and publish a snapshot through the loop's StateStore."""
+    states: dict[DeviceRole, Any] = {
+        DeviceRole.inverter: _inverter_state(),
+    }
+    if grid_degraded:
+        states[DeviceRole.grid_meter] = DegradedDeviceState(
+            device_id="grid-001",
+            role=DeviceRole.grid_meter,
+            reason="adapter timeout",
+            occurred_at=_NOW,
+        )
+    else:
+        states[DeviceRole.grid_meter] = _grid_meter_state()
+    if battery_degraded:
+        states[DeviceRole.battery] = DegradedDeviceState(
+            device_id="bat-001",
+            role=DeviceRole.battery,
+            reason="adapter timeout",
+            occurred_at=_NOW,
+        )
+    return await loop._state_store.publish(states, operating_mode=None)  # noqa: SLF001
+
+
+async def test_fail_safe_entry_emits_audit_and_skips_dispatch() -> None:
+    """AC12 #20: fail_safe mode + non-empty intents → no dispatch, audit emitted."""
+    from open_ems.core.commands import CommandOrigin, SetBatteryChargeRateCommand
+
+    cmd = SetBatteryChargeRateCommand(
+        device_id="bat-001",
+        device_role=DeviceRole.battery,
+        origin=CommandOrigin.decision_engine,
+        rate_kw=2.0,
+    )
+    mock_executor = MagicMock(spec=IntentExecutor)
+    mock_executor.translate = MagicMock(return_value=[cmd])
+    mock_retry = MagicMock(spec=RetryPolicy)
+    mock_retry.execute = AsyncMock()
+    observability = MagicMock(spec=ObservabilityService)
+    observability.audit = AsyncMock(return_value=None)
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+
+    loop = _control_loop(
+        intent_executor=mock_executor,
+        retry_policy=mock_retry,
+        observability=observability,
+        loop_liveness=liveness,
+    )
+    snapshot = await _publish_snapshot_with_degraded(loop, grid_degraded=True)
+
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snapshot
+    )
+
+    mock_executor.translate.assert_not_called()
+    mock_retry.execute.assert_not_called()
+    assert observability.audit.await_count == 1
+    call = observability.audit.await_args
+    assert call.kwargs["event_type"] == "SYSTEM"
+    assert "Fail-safe entered" in call.kwargs["summary"]
+    assert liveness.in_fail_safe is True
+
+
+async def test_fail_safe_consecutive_cycles_no_repeat_audit() -> None:
+    """AC12 #21: two consecutive fail_safe cycles → audit emitted exactly once (entry only)."""
+    observability = MagicMock(spec=ObservabilityService)
+    observability.audit = AsyncMock(return_value=None)
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+
+    loop = _control_loop(observability=observability, loop_liveness=liveness)
+    snapshot = await _publish_snapshot_with_degraded(loop, grid_degraded=True)
+
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snapshot
+    )
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snapshot
+    )
+
+    assert observability.audit.await_count == 1
+
+
+async def test_fail_safe_summary_lists_degraded_roles() -> None:
+    """AC12 #22: degraded grid_meter and battery → audit summary contains both role names."""
+    observability = MagicMock(spec=ObservabilityService)
+    observability.audit = AsyncMock(return_value=None)
+
+    loop = _control_loop(observability=observability)
+    snapshot = await _publish_snapshot_with_degraded(
+        loop, grid_degraded=True, battery_degraded=True
+    )
+
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snapshot
+    )
+
+    summary = observability.audit.await_args.kwargs["summary"]
+    assert "grid_meter" in summary
+    assert "battery" in summary
+
+
+async def test_fail_safe_exit_requires_recommendation_and_recovery() -> None:
+    """AC12 #23: stay while degraded; exit + dispatch only when both engine recommends normal AND device recovered."""  # noqa: E501
+    from open_ems.core.commands import CommandOrigin, SetBatteryChargeRateCommand
+
+    cmd = SetBatteryChargeRateCommand(
+        device_id="bat-001",
+        device_role=DeviceRole.battery,
+        origin=CommandOrigin.decision_engine,
+        rate_kw=2.0,
+    )
+    mock_executor = MagicMock(spec=IntentExecutor)
+    mock_executor.translate = MagicMock(return_value=[cmd])
+    mock_retry = MagicMock(spec=RetryPolicy)
+    mock_retry.execute = AsyncMock(
+        return_value=CommandResult(
+            correlation_id=cmd.correlation_id,
+            device_id="bat-001",
+            status=CommandStatus.success,
+            applied=True,
+            reason="ok",
+        )
+    )
+    observability = MagicMock(spec=ObservabilityService)
+    observability.audit = AsyncMock(return_value=None)
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+
+    loop = _control_loop(
+        intent_executor=mock_executor,
+        retry_policy=mock_retry,
+        observability=observability,
+        loop_liveness=liveness,
+    )
+
+    # Cycle 1: degraded grid_meter, mode=fail_safe → enter fail-safe
+    snap1 = await _publish_snapshot_with_degraded(loop, grid_degraded=True)
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snap1
+    )
+    assert liveness.in_fail_safe is True
+    assert observability.audit.await_count == 1  # entry audit
+
+    # Cycle 2: still degraded but engine now says mode=normal → STAY in fail-safe; no dispatch
+    snap2 = await _publish_snapshot_with_degraded(loop, grid_degraded=True)
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.normal), snap2
+    )
+    assert liveness.in_fail_safe is True
+    assert observability.audit.await_count == 1  # no exit audit
+    mock_retry.execute.assert_not_called()
+
+    # Cycle 3: grid_meter recovered + mode=normal → exit fail-safe, dispatch on this cycle
+    snap3 = await _publish_snapshot_with_degraded(loop, grid_degraded=False)
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.normal), snap3
+    )
+    assert liveness.in_fail_safe is False
+    assert observability.audit.await_count == 2  # entry + exit
+    exit_summary = observability.audit.await_args.kwargs["summary"]
+    assert "Fail-safe exited" in exit_summary
+    mock_retry.execute.assert_awaited_once_with(cmd)
+
+
+async def test_fail_safe_exit_audit_lists_recovered_devices() -> None:
+    """AC12 #24: exit summary contains the originally-degraded role names."""
+    observability = MagicMock(spec=ObservabilityService)
+    observability.audit = AsyncMock(return_value=None)
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+
+    loop = _control_loop(observability=observability, loop_liveness=liveness)
+
+    # Enter fail-safe with grid_meter and battery degraded
+    snap_in = await _publish_snapshot_with_degraded(loop, grid_degraded=True, battery_degraded=True)
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snap_in
+    )
+
+    # Both recovered + engine recommends normal → exit
+    snap_out = await _publish_snapshot_with_degraded(loop, grid_degraded=False)
+    # battery slot still None on this snapshot; the entry-degraded battery role is not yet healthy.
+    # Adjust: include healthy battery via an explicit publish.
+    healthy_states: dict[DeviceRole, Any] = {
+        DeviceRole.inverter: _inverter_state(),
+        DeviceRole.grid_meter: _grid_meter_state(),
+        DeviceRole.battery: _battery_state(),
+    }
+    snap_out = await loop._state_store.publish(healthy_states, operating_mode=None)  # noqa: SLF001
+
+    exit_result = _evaluation_result(mode=SystemOperatingMode.normal)
+    await loop._handle_evaluation_result(exit_result, snap_out)  # noqa: SLF001
+
+    # Last audit call is the exit
+    exit_call = observability.audit.await_args
+    summary = exit_call.kwargs["summary"]
+    assert "Fail-safe exited" in summary
+    assert "grid_meter" in summary
+    assert "battery" in summary
+    assert str(exit_result.cycle_id) in summary
+
+
+async def test_fail_safe_does_not_exit_while_engine_still_recommends_fail_safe() -> None:
+    """AC12 #25: entry-degraded recovered, but engine still says fail_safe → STAY."""
+    observability = MagicMock(spec=ObservabilityService)
+    observability.audit = AsyncMock(return_value=None)
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+
+    loop = _control_loop(observability=observability, loop_liveness=liveness)
+
+    # Enter fail-safe
+    snap_in = await _publish_snapshot_with_degraded(loop, grid_degraded=True)
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snap_in
+    )
+    assert liveness.in_fail_safe is True
+
+    # grid_meter is healthy, but engine still says fail_safe
+    snap_healthy = await _publish_snapshot_with_degraded(loop, grid_degraded=False)
+    await loop._handle_evaluation_result(  # noqa: SLF001
+        _evaluation_result(mode=SystemOperatingMode.fail_safe), snap_healthy
+    )
+
+    assert liveness.in_fail_safe is True
+    # Only entry audit so far (the second fail_safe cycle is a no-op for audits)
+    assert observability.audit.await_count == 1
+
+
+async def test_cycle_completion_marked_after_successful_tick() -> None:
+    """AC12 #26: successful _tick → mark_cycle_complete called once."""
+    grid_adapter = MagicMock()
+    grid_adapter.device_id = "grid-001"
+    grid_adapter.get_state = AsyncMock(return_value=_grid_meter_state())
+    inverter_adapter = MagicMock()
+    inverter_adapter.device_id = "inv-001"
+    inverter_adapter.get_state = AsyncMock(return_value=_inverter_state())
+
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+    spy_mark = MagicMock(side_effect=liveness.mark_cycle_complete)
+    liveness.mark_cycle_complete = spy_mark  # type: ignore[method-assign]
+
+    loop = _control_loop(
+        adapters={
+            DeviceRole.grid_meter: grid_adapter,
+            DeviceRole.inverter: inverter_adapter,
+        },
+        loop_liveness=liveness,
+    )
+
+    await loop._tick()  # noqa: SLF001
+
+    spy_mark.assert_called_once()
+
+
+async def test_cycle_completion_marked_for_fail_safe_cycle() -> None:
+    """AC12 #27: fail-safe cycle still marks completion."""
+    grid_adapter = MagicMock()
+    grid_adapter.device_id = "grid-001"
+    grid_adapter.get_state = AsyncMock(return_value=_grid_meter_state())
+    inverter_adapter = MagicMock()
+    inverter_adapter.device_id = "inv-001"
+    inverter_adapter.get_state = AsyncMock(return_value=_inverter_state())
+
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+    spy_mark = MagicMock(side_effect=liveness.mark_cycle_complete)
+    liveness.mark_cycle_complete = spy_mark  # type: ignore[method-assign]
+
+    observability = MagicMock(spec=ObservabilityService)
+    observability.audit = AsyncMock(return_value=None)
+
+    def _fail_safe_evaluate(_input: object) -> EvaluationResult:
+        return _evaluation_result(mode=SystemOperatingMode.fail_safe)
+
+    loop = _control_loop(
+        adapters={
+            DeviceRole.grid_meter: grid_adapter,
+            DeviceRole.inverter: inverter_adapter,
+        },
+        loop_liveness=liveness,
+        observability=observability,
+    )
+
+    with patch("open_ems.engine.control_loop.evaluate_cycle", _fail_safe_evaluate):
+        await loop._tick()  # noqa: SLF001
+
+    spy_mark.assert_called_once()
+    assert liveness.in_fail_safe is True
+
+
+async def test_cycle_completion_NOT_marked_when_slots_missing() -> None:
+    """AC12 #28: missing-slots early return → mark_cycle_complete NOT called."""
+    # No adapters → snapshot has no inverter and no grid_meter → ValidationError → early return
+    liveness = LoopLiveness(missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0)
+    spy_mark = MagicMock()
+    liveness.mark_cycle_complete = spy_mark  # type: ignore[method-assign]
+
+    loop = _control_loop(loop_liveness=liveness)
+
+    await loop._tick()  # noqa: SLF001
+
+    spy_mark.assert_not_called()

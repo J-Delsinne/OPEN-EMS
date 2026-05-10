@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     battery_reserve_floor_percent: float = Field(default=20.0, ge=0.0, le=100.0)
     command_max_retries: int = Field(default=2, ge=0, le=5)
     command_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=5.0)
+    watchdog_missed_cycle_threshold: int = Field(default=2, ge=1, le=10)
+    watchdog_cycle_deadline_seconds: float = Field(default=60.0, gt=0.0, le=300.0)
 
 
 _settings: Settings | None = None
