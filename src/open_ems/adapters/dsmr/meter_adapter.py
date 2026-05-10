@@ -23,6 +23,11 @@ logger = structlog.get_logger(__name__)
 
 _DSMR_STALE_SECONDS: float = 60.0
 
+# Story 9.0c (D1): fixed model string used by this adapter. The capability-registry
+# alignment maintenance test (test_capability_registry.py) discovers this constant
+# and asserts it is registered in ``adapters.capabilities._FIXED_ADAPTER_MODELS``.
+_FIXED_MODEL: str = "dsmr_p1"
+
 # Protocol reasons that indicate a transient connection loss → mapped to "reconnecting"
 _RECONNECTING_REASONS: frozenset[str] = frozenset({"dsmr_unavailable", "dsmr_stale"})
 
@@ -81,7 +86,7 @@ class GridMeterAdapter:
     async def get_capabilities(self) -> DeviceCapabilityProfile:
         profile = get_profile(
             device_id=self.device_id,
-            model="dsmr_p1",
+            model=_FIXED_MODEL,
             firmware_version=None,
         )
         if profile.limitation_reason is not None:
@@ -89,7 +94,7 @@ class GridMeterAdapter:
                 "capability_profile_unknown",
                 component="adapters",
                 device_id=self.device_id,
-                model="dsmr_p1",
+                model=_FIXED_MODEL,
                 firmware_version=None,
             )
         return profile

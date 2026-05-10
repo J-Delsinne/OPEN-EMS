@@ -62,6 +62,11 @@ logger = structlog.get_logger(__name__)
 
 _OCPP_POWER_STALE_SECONDS: float = 90.0
 
+# Story 9.0c (D1): fixed model string used by this adapter. The capability-registry
+# alignment maintenance test (test_capability_registry.py) discovers this constant
+# and asserts it is registered in ``adapters.capabilities._FIXED_ADAPTER_MODELS``.
+_FIXED_MODEL: str = "ocpp_1_6"
+
 _DomainStatus = Literal["available", "charging", "faulted", "unavailable"]
 
 # Protocol reasons that indicate a transient connection loss → mapped to "reconnecting"
@@ -155,7 +160,7 @@ class EVChargerAdapter:
     async def get_capabilities(self) -> DeviceCapabilityProfile:
         profile = get_profile(
             device_id=self.device_id,
-            model="ocpp_1_6",
+            model=_FIXED_MODEL,
             firmware_version=None,
         )
         if profile.limitation_reason is not None:
@@ -163,7 +168,7 @@ class EVChargerAdapter:
                 "capability_profile_unknown",
                 component="adapters",
                 device_id=self.device_id,
-                model="ocpp_1_6",
+                model=_FIXED_MODEL,
                 firmware_version=None,
             )
         return profile

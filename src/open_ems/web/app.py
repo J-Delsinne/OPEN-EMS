@@ -10,6 +10,10 @@ import structlog
 from fastapi import FastAPI
 from pydantic import SecretStr, ValidationError
 
+from open_ems.adapters.capabilities import (
+    CapabilityRegistryDriftError,
+    validate_capability_registry_alignment,
+)
 from open_ems.core import StateStore
 from open_ems.engine.control_loop import ControlLoop
 from open_ems.engine.intent_executor import IntentExecutor
@@ -225,6 +229,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Step 4: Open database connection
         await init_database(settings.db_path)
         db_initialized = True
+
+        # Step 4a: Story 9.0c (AC5) — fail-loud cross-validation of adapter
+        # ``_SUPPORTED_MODELS`` against the capability registry. Drift here
+        # would otherwise silently degrade write commands to ``capability_missing``
+        # rejections at runtime. Same enforcement class as migration failure.
+        try:
+            validate_capability_registry_alignment()
+        except CapabilityRegistryDriftError as drift_exc:
+            logger.error(
+                "startup_failed",
+                reason="capability_registry_drift",
+                missing_models=drift_exc.missing_models,
+                component="startup",
+            )
+            raise SystemExit(1) from None
 
         # Step 4b: Hydrate the active-constraints provider BEFORE any consumer
         # (PolicyGuard / ControlLoop) is constructed. A failure here means the

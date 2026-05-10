@@ -95,6 +95,16 @@ def _rejected_result(cmd: DeviceCommand, *, reason: str = "fail_safe_mode_active
     )
 
 
+def _correlation_broken_result(cmd: DeviceCommand) -> CommandResult:
+    return CommandResult(
+        correlation_id=cmd.correlation_id,
+        device_id=cmd.device_id,
+        status=CommandStatus.correlation_broken,
+        applied=False,
+        reason="adapter_correlation_id_mismatch",
+    )
+
+
 def _policy_guard_returning(*results: CommandResult) -> MagicMock:
     pg = MagicMock(spec=PolicyGuard)
     pg.authorize_and_dispatch = AsyncMock(side_effect=list(results))
@@ -236,6 +246,48 @@ async def test_non_idempotent_command_not_retried_on_rejection() -> None:
 
 
 # ─── AC10 #7 ───────────────────────────────────────────────────────────────────
+
+
+async def test_idempotent_command_not_retried_on_correlation_broken() -> None:
+    """Story 9.0c D4: ``correlation_broken`` is post-dispatch indeterminate-outcome.
+
+    RetryPolicy must NOT retry: re-issuing an idempotent command that may have
+    already succeeded is wasted effort, and re-issuing a non-idempotent command
+    after a partial-dispatch is unsafe.
+    """
+    cmd = _idempotent_command()
+    pg = _policy_guard_returning(_correlation_broken_result(cmd))
+    obs, audit_spy = _observability_spy()
+    rp = RetryPolicy(policy_guard=pg, observability=obs, settings=_settings(max_retries=2))
+
+    result = await rp.execute(cmd)
+
+    assert pg.authorize_and_dispatch.await_count == 1, (
+        "correlation_broken must not trigger a retry, even for idempotent commands"
+    )
+    assert result.status is CommandStatus.correlation_broken
+    audit_spy.assert_awaited_once()
+    kwargs = audit_spy.await_args.kwargs
+    assert kwargs["event_type"] == "DEVICE"
+    assert kwargs["detail"]["command_status"] == "correlation_broken"
+
+
+async def test_non_idempotent_command_not_retried_on_correlation_broken() -> None:
+    """Story 9.0c D4: ``correlation_broken`` is fatal for non-idempotent commands.
+
+    A double-issue would risk affecting an unrelated session that started between
+    the original dispatch and the retry.
+    """
+    cmd = _non_idempotent_command()
+    pg = _policy_guard_returning(_correlation_broken_result(cmd))
+    obs, audit_spy = _observability_spy()
+    rp = RetryPolicy(policy_guard=pg, observability=obs, settings=_settings(max_retries=2))
+
+    result = await rp.execute(cmd)
+
+    assert pg.authorize_and_dispatch.await_count == 1
+    assert result.status is CommandStatus.correlation_broken
+    audit_spy.assert_awaited_once()
 
 
 async def test_retry_stops_immediately_on_rejection_during_retry_cycle() -> None:

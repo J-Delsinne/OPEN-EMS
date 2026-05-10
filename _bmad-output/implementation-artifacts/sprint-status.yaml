@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-10'  # Story 9-0b code-review complete; status: done (1020 pytest passed; mypy/ruff clean; 2 HIGH findings resolved — audit-trail race + BEGIN IMMEDIATE race; write lock applied)
+last_updated: '2026-05-11'  # Story 9-0c review complete; status: done. 3-layer adversarial review: 29 raw findings → 17 actionable (3 HIGH + 6 MED + 3 LOW resolved via 12 patches; 5 deferred; 9 dismissed). Tests: 1062→1071 (+9 net new from review patches); ruff + mypy + format clean.
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -120,7 +120,7 @@ development_status:
   epic-9: in-progress
   9-0-real-adapter-command-execution-contracts-and-implementations: done
   9-0b-db-backed-active-constraints-reload: done
-  9-0c-capability-profile-failure-semantics: backlog
+  9-0c-capability-profile-failure-semantics: done
   9-0d-restart-hydration-of-monthly-peak: backlog
   9-1-implement-device-discovery-step-with-live-probing-capability-classification-and-manual-entry: backlog
   9-2-implement-role-assignment-with-inline-conflict-detection-and-gap-acknowledgment: backlog

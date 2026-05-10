@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
+import open_ems.adapters.capabilities as capabilities_module
 from open_ems.adapters.capabilities import (
+    CapabilityRegistryDriftError,
     get_profile,
+    validate_capability_registry_alignment,
 )
 from open_ems.core.devices import (
     CapabilityStatus,
@@ -197,3 +202,137 @@ def test_get_profile_known_model_with_any_firmware_returns_full_profile() -> Non
 def test_get_profile_none_firmware_version_stored() -> None:
     profile = get_profile("dev-1", "fronius_gen24_v1")
     assert profile.firmware_version is None
+
+
+# ---------------------------------------------------------------------------
+# AC5 (Story 9.0c) — validate_capability_registry_alignment()
+# ---------------------------------------------------------------------------
+
+
+def test_validate_capability_registry_alignment_success() -> None:
+    """With current ``_SUPPORTED_MODELS`` and registry state, returns None and does not raise."""
+    assert validate_capability_registry_alignment() is None
+
+
+def test_validate_capability_registry_alignment_detects_single_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monkey-patch the battery adapter's _SUPPORTED_MODELS to inject a missing model."""
+    from open_ems.adapters.modbus import battery_adapter
+
+    # Snapshot the original dict and inject a bogus model not in the registry.
+    original = dict(battery_adapter._SUPPORTED_MODELS)
+    patched = dict(original)
+    # The value type doesn't matter for this check — the validator only inspects keys.
+    patched["future_byd_model_v2"] = next(iter(original.values()))
+    monkeypatch.setattr(battery_adapter, "_SUPPORTED_MODELS", patched)
+
+    with pytest.raises(CapabilityRegistryDriftError) as exc_info:
+        validate_capability_registry_alignment()
+
+    assert "future_byd_model_v2" in exc_info.value.missing_models
+    assert "future_byd_model_v2" in str(exc_info.value)
+
+
+def test_validate_capability_registry_alignment_detects_multi_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inject TWO missing models across the two Modbus adapters; both must be named."""
+    from open_ems.adapters.modbus import battery_adapter, inverter_adapter
+
+    bat_patched = dict(battery_adapter._SUPPORTED_MODELS)
+    bat_patched["mystery_battery_v9"] = next(iter(bat_patched.values()))
+    monkeypatch.setattr(battery_adapter, "_SUPPORTED_MODELS", bat_patched)
+
+    inv_patched = dict(inverter_adapter._SUPPORTED_MODELS)
+    inv_patched["mystery_inverter_v9"] = next(iter(inv_patched.values()))
+    monkeypatch.setattr(inverter_adapter, "_SUPPORTED_MODELS", inv_patched)
+
+    with pytest.raises(CapabilityRegistryDriftError) as exc_info:
+        validate_capability_registry_alignment()
+
+    assert "mystery_battery_v9" in exc_info.value.missing_models
+    assert "mystery_inverter_v9" in exc_info.value.missing_models
+
+
+def test_validate_capability_registry_alignment_detects_fixed_model_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remove ``ocpp_1_6`` from ``_ALL_PROFILES``; the validator must name it as missing."""
+    patched_profiles = {
+        k: v for k, v in capabilities_module._ALL_PROFILES.items() if k != "ocpp_1_6"
+    }
+    monkeypatch.setattr(capabilities_module, "_ALL_PROFILES", patched_profiles)
+
+    with pytest.raises(CapabilityRegistryDriftError) as exc_info:
+        validate_capability_registry_alignment()
+
+    assert "ocpp_1_6" in exc_info.value.missing_models
+
+
+def test_capability_registry_drift_error_lists_all_missing() -> None:
+    """The exception message contains every missing model in a single fail-loud raise."""
+    err = CapabilityRegistryDriftError(["model_a", "model_b", "model_c"])
+    msg = str(err)
+    assert "model_a" in msg
+    assert "model_b" in msg
+    assert "model_c" in msg
+    assert err.missing_models == ["model_a", "model_b", "model_c"]
+
+
+# ---------------------------------------------------------------------------
+# D1 (Story 9.0c review): maintenance gate against ``_FIXED_ADAPTER_MODELS`` drift
+#
+# The startup gate ``validate_capability_registry_alignment()`` iterates
+# ``_FIXED_ADAPTER_MODELS`` to know which fixed-model adapters to validate.
+# If a new fixed-model adapter is added without updating this tuple, the
+# startup gate silently passes. This test discovers ``_FIXED_MODEL`` constants
+# across the ``open_ems.adapters`` package tree and asserts each is registered.
+# ---------------------------------------------------------------------------
+
+
+def test_maintenance_every_adapter_fixed_model_is_registered() -> None:
+    """Every adapter module declaring ``_FIXED_MODEL`` must be in ``_FIXED_ADAPTER_MODELS``.
+
+    Maintenance gate: if a new fixed-model adapter is added (declaring its model
+    via ``_FIXED_MODEL = "..."``) without updating ``_FIXED_ADAPTER_MODELS`` in
+    ``adapters/capabilities/__init__.py``, AC5's startup gate silently approves
+    boot. This test discovers the constants by walking the adapter package and
+    fails CI when the registration is missing.
+    """
+    import importlib
+    import pkgutil
+
+    import open_ems.adapters
+
+    declared: dict[str, str] = {}
+    for module_info in pkgutil.walk_packages(
+        open_ems.adapters.__path__,
+        prefix="open_ems.adapters.",
+    ):
+        try:
+            module = importlib.import_module(module_info.name)
+        except ImportError:
+            # Adapter modules with optional dependencies may fail to import in
+            # the unit-test environment; skip them — they will fail elsewhere
+            # if actually used.
+            continue
+        fixed_model = getattr(module, "_FIXED_MODEL", None)
+        if fixed_model is not None:
+            declared[module_info.name] = fixed_model
+
+    # Sanity: the known OCPP and DSMR fixed-model adapters must be discovered.
+    discovered_values = set(declared.values())
+    assert "ocpp_1_6" in discovered_values, (
+        "OCPP charger adapter should declare ``_FIXED_MODEL``; test cannot "
+        "validate the maintenance invariant if discovery returns nothing."
+    )
+    assert "dsmr_p1" in discovered_values
+
+    # Every declared ``_FIXED_MODEL`` must be in ``_FIXED_ADAPTER_MODELS``.
+    for module_name, fixed_model in declared.items():
+        assert fixed_model in capabilities_module._FIXED_ADAPTER_MODELS, (
+            f"{module_name}._FIXED_MODEL={fixed_model!r} is not registered in "
+            f"``adapters.capabilities._FIXED_ADAPTER_MODELS``. Add it so AC5's "
+            f"startup gate validates this model against the capability registry."
+        )

@@ -9,6 +9,14 @@ in the returned profile for future use, but not used for selection).
 
 Unknown models return a REDUCED profile with only basic read access
 (``ReadCapability.state``) and no write capabilities, satisfying FR6b.
+
+Story 9.0c (AC5): ``validate_capability_registry_alignment()`` is a startup
+gate that fails loud if any adapter's ``_SUPPORTED_MODELS`` references a model
+not registered in ``_ALL_PROFILES``. Lifespan invokes it before
+``ActiveConstraintsProvider.hydrate()``; drift aborts boot with
+``SystemExit(1)``. This prevents the silent REDUCED-profile degradation that
+would otherwise present to the installer as "the device is connected but
+nothing works".
 """
 
 from __future__ import annotations
@@ -24,11 +32,13 @@ from open_ems.core.devices import (
 )
 
 __all__ = [
-    "get_profile",
-    "INVERTER_PROFILES",
     "BATTERY_PROFILES",
+    "CapabilityRegistryDriftError",
     "EV_CHARGER_PROFILES",
     "GRID_METER_PROFILES",
+    "INVERTER_PROFILES",
+    "get_profile",
+    "validate_capability_registry_alignment",
 ]
 
 _ALL_PROFILES: dict[str, DeviceCapabilityProfile] = {
@@ -45,6 +55,64 @@ assert len(_ALL_PROFILES) == (
 ), "Duplicate model key detected across capability profile categories"
 
 _SAFE_READ_CAPS: frozenset[ReadCapability] = frozenset({ReadCapability.state})
+
+# Fixed model strings used by adapters that do not declare a ``_SUPPORTED_MODELS``
+# dict (OCPP and DSMR each address exactly one wire-level protocol version).
+# Listed here so ``validate_capability_registry_alignment()`` can assert their
+# presence without importing the adapter modules.
+_FIXED_ADAPTER_MODELS: tuple[str, ...] = ("ocpp_1_6", "dsmr_p1")
+
+
+class CapabilityRegistryDriftError(Exception):
+    """Raised when an adapter's ``_SUPPORTED_MODELS`` references a model absent from the registry.
+
+    The error message lists EVERY missing model on a single fail-loud raise so
+    the operator (or CI) can fix all drift in one pass instead of iterating.
+    """
+
+    def __init__(self, missing_models: list[str]) -> None:
+        self.missing_models = list(missing_models)
+        super().__init__(
+            "Capability registry drift detected: the following models are referenced by an "
+            f"adapter's _SUPPORTED_MODELS but are missing from _ALL_PROFILES: {self.missing_models}"
+        )
+
+
+def validate_capability_registry_alignment() -> None:
+    """Assert that every adapter-supported model is registered in ``_ALL_PROFILES``.
+
+    Story 9.0c (AC5). Called at lifespan startup AFTER ``init_database()`` and
+    BEFORE ``ActiveConstraintsProvider.hydrate()``. Raises
+    ``CapabilityRegistryDriftError`` listing every missing model on a single
+    fail-loud raise.
+
+    Imports adapter ``_SUPPORTED_MODELS`` lazily inside the function body to
+    avoid the circular import (the adapter modules import from this package).
+
+    Returns ``None`` on success.
+    """
+    # Deferred imports break the import cycle: battery_adapter / inverter_adapter
+    # both import from ``open_ems.adapters.capabilities``.
+    from open_ems.adapters.modbus.battery_adapter import (
+        _SUPPORTED_MODELS as _BATTERY_MODELS,
+    )
+    from open_ems.adapters.modbus.inverter_adapter import (
+        _SUPPORTED_MODELS as _INVERTER_MODELS,
+    )
+
+    missing: list[str] = []
+    for model in _BATTERY_MODELS:
+        if model not in _ALL_PROFILES:
+            missing.append(model)
+    for model in _INVERTER_MODELS:
+        if model not in _ALL_PROFILES:
+            missing.append(model)
+    for fixed_model in _FIXED_ADAPTER_MODELS:
+        if fixed_model not in _ALL_PROFILES:
+            missing.append(fixed_model)
+
+    if missing:
+        raise CapabilityRegistryDriftError(missing)
 
 
 def get_profile(

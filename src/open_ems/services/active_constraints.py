@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import structlog
 
@@ -41,6 +42,30 @@ from open_ems.storage.repositories.config_repo import ConfigRepo
 ACTIVE_CONSTRAINTS_PROVIDER_VERSION: str = "1.0"
 
 logger = structlog.get_logger(__name__)
+
+
+class _RaisingRepo:
+    """Sentinel repo used by ``ActiveConstraintsProvider.from_snapshot()``.
+
+    Any access to a public attribute or method raises ``AssertionError`` —
+    guards against a future PolicyGuard / ControlLoop hot-path regression that
+    reads ``ConfigRepo`` directly instead of going through
+    ``ActiveConstraintsProvider``.
+
+    Story 9.0c review (P2): the original implementation returned an async
+    closure for every ``__getattr__`` call — but a sync attribute access like
+    ``if repo.is_connected: ...`` or ``repo.connection.commit()`` would
+    silently evaluate the closure as truthy (or AttributeError-trip on
+    ``.commit``) without firing the assertion. The fix is to raise at attribute
+    access time. Dunder names (``__class__``, etc.) are allowed to fall through
+    to default lookup so Python internals don't trip the sentinel.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        # Dunder attributes are Python's internal protocol — fall through.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        raise AssertionError(f"PolicyGuard hot path must not touch ConfigRepo (attempted: .{name})")
 
 
 class ActiveConstraintsProvider:
@@ -129,3 +154,25 @@ class ActiveConstraintsProvider:
         if snapshot is None:
             raise RuntimeError("ActiveConstraintsProvider.get() called before hydrate()")
         return snapshot
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: ActiveConstraints,
+        *,
+        settings: Settings | None = None,
+    ) -> ActiveConstraintsProvider:
+        """Test-only constructor. Production code MUST call ``await hydrate()``.
+
+        Returns a provider already hydrated with the given ``snapshot``. The
+        underlying ``repo`` is a ``_RaisingRepo`` sentinel — any awaited method
+        on it raises ``AssertionError``, so this constructor doubles as a guard
+        against a future PolicyGuard hot-path regression that touches the DB.
+
+        Story 9.0c (AC8): new tests use this constructor instead of the
+        ``# noqa: SLF001`` private-field write pattern from prior fixtures.
+        """
+        s = settings if settings is not None else Settings(_env_file=None)  # type: ignore[call-arg]
+        provider = cls(repo=cast(ConfigRepo, _RaisingRepo()), settings=s)
+        provider._current = snapshot
+        return provider

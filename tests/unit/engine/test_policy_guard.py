@@ -19,6 +19,7 @@ from open_ems.core.commands import (
     CommandOrigin,
     CommandResult,
     CommandStatus,
+    DeviceCommand,
     SetBatteryChargeRateCommand,
     SetBatteryDischargeRateCommand,
     SetEVChargingRateCommand,
@@ -94,7 +95,17 @@ def _adapter(
     device_id: str = "bat-001",
     write_caps: frozenset[WriteCapability] = frozenset({WriteCapability.set_discharge_rate}),
     send_command_result: CommandResult | None = None,
+    command: DeviceCommand | None = None,
 ) -> MagicMock:
+    """Build a mock DeviceAdapter.
+
+    Story 9.0c (AC6): pass ``command=cmd`` so the default ``CommandResult`` stamps
+    the command's ``correlation_id`` — PolicyGuard now enforces correlation_id
+    round-trip post-dispatch. If ``send_command_result`` is provided AND
+    ``command`` is provided, the explicit result's correlation_id is overridden
+    to match — caller intent is "preserve other fields but pass the correlation
+    check".
+    """
     adapter = MagicMock(spec=DeviceAdapter)
     adapter.device_id = device_id
     adapter.get_capabilities = AsyncMock(
@@ -102,11 +113,15 @@ def _adapter(
     )
     if send_command_result is None:
         send_command_result = CommandResult(
-            correlation_id=uuid.uuid4(),
+            correlation_id=command.correlation_id if command is not None else uuid.uuid4(),
             device_id=device_id,
             status=CommandStatus.success,
             applied=True,
             reason="ok",
+        )
+    elif command is not None:
+        send_command_result = send_command_result.model_copy(
+            update={"correlation_id": command.correlation_id}
         )
     adapter.send_command = AsyncMock(return_value=send_command_result)
     return adapter
@@ -219,7 +234,8 @@ async def test_capability_missing_blocks_send_command() -> None:
 
     assert result.status is CommandStatus.rejected
     assert result.applied is False
-    assert "capability_missing" in result.reason
+    # AC7 sweep: exact-match assertion on the P4 reason string.
+    assert result.reason == "capability_missing: set_discharge_rate"
     adapter.send_command.assert_not_awaited()
     audit_spy.assert_awaited_once()
 
@@ -228,6 +244,7 @@ async def test_command_result_applied_false_is_not_treated_as_success() -> None:
     """Adapter returning CommandResult(applied=False) is propagated verbatim — not coerced."""
     store = _state_store()
     await _publish_battery(store, soc_percent=80.0)
+    cmd = _discharge_command()
     not_applied = CommandResult(
         correlation_id=uuid.uuid4(),
         device_id="bat-001",
@@ -235,7 +252,7 @@ async def test_command_result_applied_false_is_not_treated_as_success() -> None:
         applied=False,
         reason="device_not_ready",
     )
-    adapter = _adapter(send_command_result=not_applied)
+    adapter = _adapter(send_command_result=not_applied, command=cmd)
     obs, _ = _observability_with_audit_spy()
 
     guard = PolicyGuard(
@@ -246,7 +263,7 @@ async def test_command_result_applied_false_is_not_treated_as_success() -> None:
         active_constraints=_active_constraints_provider(),
     )
 
-    result = await guard.authorize_and_dispatch(_discharge_command())
+    result = await guard.authorize_and_dispatch(cmd)
 
     assert result.applied is False
     assert result.status is CommandStatus.failed
@@ -254,12 +271,18 @@ async def test_command_result_applied_false_is_not_treated_as_success() -> None:
 
 
 def test_command_result_status_uses_enum_values() -> None:
-    """CommandStatus enum has exactly: success, failed, timeout, rejected."""
+    """CommandStatus enum membership.
+
+    Story 9.0c D4 (review): added ``correlation_broken`` for the P5
+    post-dispatch correlation_id mismatch path. The dedicated status lets
+    RetryPolicy refuse to retry on indeterminate-outcome failures.
+    """
     assert {member.value for member in CommandStatus} == {
         "success",
         "failed",
         "timeout",
         "rejected",
+        "correlation_broken",
     }
 
 
@@ -442,7 +465,8 @@ async def test_successful_dispatch_returns_adapter_result_no_audit() -> None:
     """Happy path: adapter returns success → no CONSTRAINT audit event emitted."""
     store = _state_store()
     await _publish_battery(store, soc_percent=80.0)
-    adapter = _adapter()
+    cmd = _discharge_command()
+    adapter = _adapter(command=cmd)
     obs, audit_spy = _observability_with_audit_spy()
 
     guard = PolicyGuard(
@@ -453,7 +477,7 @@ async def test_successful_dispatch_returns_adapter_result_no_audit() -> None:
         active_constraints=_active_constraints_provider(),
     )
 
-    result = await guard.authorize_and_dispatch(_discharge_command())
+    result = await guard.authorize_and_dispatch(cmd)
 
     assert result.status is CommandStatus.success
     assert result.applied is True
@@ -463,6 +487,7 @@ async def test_successful_dispatch_returns_adapter_result_no_audit() -> None:
 
 async def test_stop_ev_command_requires_set_ev_charge_current_capability() -> None:
     store = _state_store()
+    cmd = _stop_ev_command()
     adapter = MagicMock(spec=DeviceAdapter)
     adapter.device_id = "ev-001"
     adapter.get_capabilities = AsyncMock(
@@ -472,7 +497,7 @@ async def test_stop_ev_command_requires_set_ev_charge_current_capability() -> No
     )
     adapter.send_command = AsyncMock(
         return_value=CommandResult(
-            correlation_id=uuid.uuid4(),
+            correlation_id=cmd.correlation_id,
             device_id="ev-001",
             status=CommandStatus.success,
             applied=True,
@@ -489,7 +514,7 @@ async def test_stop_ev_command_requires_set_ev_charge_current_capability() -> No
         active_constraints=_active_constraints_provider(),
     )
 
-    result = await guard.authorize_and_dispatch(_stop_ev_command())
+    result = await guard.authorize_and_dispatch(cmd)
 
     assert result.status is CommandStatus.success
     adapter.send_command.assert_awaited_once()
@@ -555,4 +580,5 @@ async def test_reject_audit_includes_correlation_id_in_detail() -> None:
     detail = kwargs["detail"]
     assert detail["correlation_id"] == str(cmd.correlation_id)
     assert detail["command_type"] == "SetBatteryDischargeRateCommand"
-    assert "capability_missing" in detail["rejection_reason"]
+    # AC7 sweep: exact-match assertion on the P4 reason string.
+    assert detail["rejection_reason"] == "capability_missing: set_discharge_rate"

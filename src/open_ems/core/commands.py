@@ -61,6 +61,12 @@ class CommandStatus(enum.StrEnum):
     failed = "failed"
     timeout = "timeout"
     rejected = "rejected"
+    # Story 9.0c (D4): post-dispatch correlation_id mismatch (P5). Indeterminate
+    # outcome — the adapter may have applied the command but returned a bogus
+    # correlation_id. Distinct from ``failed`` so RetryPolicy can refuse to
+    # retry (re-issuing a non-idempotent command after a partial dispatch is
+    # unsafe).
+    correlation_broken = "correlation_broken"
 
 
 class DeviceCommandBase(BaseModel):

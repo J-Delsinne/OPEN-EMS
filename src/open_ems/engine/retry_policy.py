@@ -124,6 +124,13 @@ class RetryPolicy:
                 if last_result.status is CommandStatus.rejected:
                     # Re-check rejected the command — stop, don't keep hammering an unsafe op.
                     break
+                if last_result.status is CommandStatus.correlation_broken:
+                    # Story 9.0c P5: post-dispatch correlation_id mismatch — the
+                    # adapter may have applied the command but returned a bogus UUID.
+                    # Outcome is indeterminate; retry would double-execute a
+                    # non-idempotent command (and is wasted effort for idempotent
+                    # commands that already succeeded at the device).
+                    break
             assert last_result is not None  # range(1, N+1) with N>=1 is non-empty
             await self._emit_failure_audit(command, last_result, attempts=attempt)
             return last_result
