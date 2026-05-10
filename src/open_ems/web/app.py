@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import pathlib
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
@@ -264,6 +265,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise SystemExit(1) from None
         app.state.active_constraints_provider = active_constraints_provider
 
+        # Step 4c (Story 9.0d): hydrate the control loop's monthly-peak cache from
+        # peak_intervals BEFORE constructing the loop. Without this seed,
+        # _monthly_peak_kw stays 0.0 until the first interval rollover, so the first
+        # ≤15 minutes of peak-limit decisions after every restart silently use stale
+        # data. The installer wizard triggers restarts; this window is user-visible.
+        energy_repo = EnergyRepo()
+        try:
+            initial_monthly_peak_kw = await energy_repo.get_current_monthly_peak_kw()
+        except Exception:
+            logger.error(
+                "startup_failed",
+                reason="monthly_peak_hydrate_failed",
+                exc_info=True,
+                component="startup",
+            )
+            raise SystemExit(1) from None
+        if initial_monthly_peak_kw < 0.0 or not math.isfinite(initial_monthly_peak_kw):
+            logger.error(
+                "startup_failed",
+                reason="monthly_peak_corrupt_value",
+                initial_monthly_peak_kw=initial_monthly_peak_kw,
+                component="startup",
+            )
+            raise SystemExit(1) from None
+        logger.info(
+            "monthly_peak_hydrated",
+            initial_monthly_peak_kw=initial_monthly_peak_kw,
+            component="startup",
+        )
+
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
 
@@ -356,13 +387,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _control_loop = ControlLoop(
             state_store=app.state.state_store,
             adapters={},
-            energy_repo=EnergyRepo(),
+            energy_repo=energy_repo,
             settings=settings,
             intent_executor=intent_executor,
             retry_policy=retry_policy,
             loop_liveness=loop_liveness,
             observability=observability,
             active_constraints=active_constraints_provider,
+            initial_monthly_peak_kw=initial_monthly_peak_kw,
         )
 
         _control_loop_task = asyncio.create_task(_control_loop.run(), name="control_loop")

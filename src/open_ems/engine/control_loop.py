@@ -19,11 +19,23 @@ Story 9.0b update: ``_build_evaluation_input`` reads ``peak_limit_kw`` and
 hydrated once at lifespan startup and atomically refreshed by the installer
 activation endpoint; this loop and ``PolicyGuard`` share the same provider
 instance, so within one evaluation cycle both layers see the same values.
+
+Story 9.0d update: ``_monthly_peak_kw`` is now seeded via the
+``initial_monthly_peak_kw`` constructor argument, populated by the lifespan
+from ``EnergyRepo.get_current_monthly_peak_kw()`` BEFORE the loop is
+constructed. The prior behaviour of initializing to ``0.0`` and refreshing
+only on the next interval rollover meant the first ≤15 min of peak-limit
+decisions after every restart silently used stale data; the installer
+wizard restarts the process, so this window was user-visible. The
+in-loop refresh inside ``_update_tracker`` (post-rollover re-query of
+``MAX(avg_power_kw)``) is unchanged — the seed only affects the first
+interval after restart.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
@@ -92,7 +104,10 @@ class ControlLoop:
         loop_liveness: LoopLiveness,
         observability: ObservabilityService,
         active_constraints: ActiveConstraintsProvider,
+        initial_monthly_peak_kw: float = 0.0,
     ) -> None:
+        if initial_monthly_peak_kw < 0.0 or not math.isfinite(initial_monthly_peak_kw):
+            raise ValueError("initial_monthly_peak_kw must be a finite non-negative float")
         self._state_store = state_store
         self._adapters = adapters
         self._energy_repo = energy_repo
@@ -103,7 +118,7 @@ class ControlLoop:
         self._observability = observability
         self._active_constraints = active_constraints
         self._tracker = PartialIntervalTracker.from_current_time(at=datetime.now(UTC))
-        self._monthly_peak_kw: float = 0.0
+        self._monthly_peak_kw = initial_monthly_peak_kw
         self._last_mode: SystemOperatingMode | None = None
         self._fail_safe_entry_degraded_roles: frozenset[DeviceRole] = frozenset()
 

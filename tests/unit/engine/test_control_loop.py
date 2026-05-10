@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from open_ems.core import (
     DegradedDeviceState,
@@ -754,3 +757,104 @@ async def test_cycle_completion_NOT_marked_when_slots_missing() -> None:
     await loop._tick()  # noqa: SLF001
 
     spy_mark.assert_not_called()
+
+
+# ── Story 9.0d: initial_monthly_peak_kw seed (AC2, AC7) ────────────────────
+
+
+async def test_initial_monthly_peak_kw_seeds_evaluation_input() -> None:
+    """AC7 #1: seed value reaches PeakContext on the very first cycle, before any rollover."""
+    grid_adapter = MagicMock()
+    grid_adapter.device_id = "grid-001"
+    grid_adapter.get_state = AsyncMock(return_value=_grid_meter_state())
+    inverter_adapter = MagicMock()
+    inverter_adapter.device_id = "inv-001"
+    inverter_adapter.get_state = AsyncMock(return_value=_inverter_state())
+
+    energy_repo = AsyncMock()
+    energy_repo.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
+    energy_repo.write_peak_interval = AsyncMock()
+    settings = _settings()
+    loop = ControlLoop(
+        state_store=_state_store(),
+        adapters={
+            DeviceRole.grid_meter: grid_adapter,
+            DeviceRole.inverter: inverter_adapter,
+        },
+        energy_repo=energy_repo,
+        settings=settings,
+        intent_executor=IntentExecutor(),
+        retry_policy=_default_retry_policy_mock(),
+        loop_liveness=LoopLiveness(
+            missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0
+        ),
+        observability=MagicMock(spec=ObservabilityService),
+        active_constraints=make_active_constraints_provider(settings),
+        initial_monthly_peak_kw=14.7,
+    )
+    interval_start = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
+    _set_tracker_to_boundary(loop, interval_start)
+    now = datetime(2026, 5, 5, 12, 5, 0, tzinfo=UTC)
+
+    device_states = await loop._poll_adapters()  # noqa: SLF001
+    snapshot = await loop._state_store.publish(  # noqa: SLF001
+        device_states, operating_mode=None
+    )
+    # Build evaluation input WITHOUT calling _update_tracker first — proves the
+    # seed value drives the very first cycle, before any rollover refresh.
+    evaluation_input = loop._build_evaluation_input(snapshot, now)  # noqa: SLF001
+
+    assert evaluation_input.peak_context.current_monthly_recorded_peak_kw == 14.7
+    # And the rollover-refresh path was NOT exercised on this read.
+    energy_repo.get_current_monthly_peak_kw.assert_not_called()
+
+
+def test_initial_monthly_peak_kw_default_is_zero() -> None:
+    """AC7 #2: omitting the argument keeps the legacy default (0.0); fixtures stay diff-free."""
+    loop = _control_loop()
+    assert loop._monthly_peak_kw == 0.0  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "bogus_value",
+    [
+        pytest.param(-0.001, id="slightly_negative"),
+        pytest.param(-1.0, id="negative_one"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="positive_infinity"),
+        pytest.param(float("-inf"), id="negative_infinity"),
+    ],
+)
+def test_initial_monthly_peak_kw_rejects_negative_and_nan(bogus_value: float) -> None:
+    """AC2 + AC7 #3: constructor rejects non-finite or negative seed with ValueError."""
+    # Sanity: each bogus value really is bogus by the predicate the validator uses.
+    assert bogus_value < 0.0 or not math.isfinite(bogus_value)
+    with pytest.raises(ValueError, match="initial_monthly_peak_kw"):
+        _control_loop_with_seed(bogus_value)
+
+
+def _control_loop_with_seed(seed: float) -> ControlLoop:
+    """Construct a ControlLoop with a specified initial_monthly_peak_kw seed.
+
+    Mirrors ``_control_loop()`` defaults; only the seed differs. Used by the
+    AC7 #3 parametrized validator test so each bogus value triggers the
+    constructor validator rather than a fixture-construction error.
+    """
+    energy_repo = AsyncMock()
+    energy_repo.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
+    energy_repo.write_peak_interval = AsyncMock()
+    settings = _settings()
+    return ControlLoop(
+        state_store=_state_store(),
+        adapters={},
+        energy_repo=energy_repo,
+        settings=settings,
+        intent_executor=IntentExecutor(),
+        retry_policy=_default_retry_policy_mock(),
+        loop_liveness=LoopLiveness(
+            missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0
+        ),
+        observability=MagicMock(spec=ObservabilityService),
+        active_constraints=make_active_constraints_provider(settings),
+        initial_monthly_peak_kw=seed,
+    )
