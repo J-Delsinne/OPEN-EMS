@@ -85,10 +85,13 @@ async def test_lifespan_runs_validator_on_happy_path() -> None:
     """Sanity: when the validator returns None, lifespan reaches the application body."""
     app = create_app()
 
-    with patch(
-        "open_ems.web.app.validate_capability_registry_alignment",
-        return_value=None,
-    ) as mock_validator:
+    with (
+        patch(
+            "open_ems.web.app.validate_capability_registry_alignment",
+            return_value=None,
+        ) as mock_validator,
+        patch("open_ems.web.app._bootstrap_admin_if_needed", return_value=None),
+    ):
         async with lifespan(app):
             pass
 
