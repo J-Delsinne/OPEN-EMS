@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Generator
 import aiosqlite
 import pytest
 import pytest_asyncio
+import structlog
 
 from open_ems.services.readiness import reset as readiness_reset
 from open_ems.storage.database import close_database, get_connection, init_database
@@ -45,6 +46,21 @@ CREATE_SESSIONS_TABLE_DDL = """
 @pytest.fixture(autouse=True)
 def _set_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SECRET_KEY", "test-secret-key-32-chars-xxxxxxxxxx")
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog_config() -> None:
+    """Ensure tests start with structlog at its library defaults.
+
+    ``open_ems.logging_config.configure_logging`` enables
+    ``cache_logger_on_first_use=True`` which makes ``capture_logs()`` miss
+    events for loggers bound before the capture context started. Tests that
+    drive the production lifespan (e.g. ``test_migrations``,
+    ``test_constraints_reload``) reconfigure structlog; without this reset
+    those reconfigurations would leak into every subsequent test that uses
+    ``capture_logs()``.
+    """
+    structlog.reset_defaults()
 
 
 @pytest.fixture

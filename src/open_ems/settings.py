@@ -28,7 +28,13 @@ class Settings(BaseSettings):
     stale_threshold_seconds: int = Field(default=30, gt=0)
     trusted_proxy_ips: list[str] = []
     control_loop_interval_seconds: float = Field(default=10.0, gt=0.0)
+    # Cold-start seed only. Runtime reads MUST go through ActiveConstraintsProvider.
+    # After the first installer activation (Story 9.3), the DB row is authoritative
+    # and the value here is unread.
     peak_limit_kw: float = Field(default=25.0, gt=0.0)
+    # Cold-start seed only. Runtime reads MUST go through ActiveConstraintsProvider.
+    # After the first installer activation (Story 9.3), the DB row is authoritative
+    # and the value here is unread.
     battery_reserve_floor_percent: float = Field(default=20.0, ge=0.0, le=100.0)
     command_max_retries: int = Field(default=2, ge=0, le=5)
     command_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=5.0)

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
-from open_ems.storage.database import get_connection
+from open_ems.storage.database import get_connection, get_write_lock
 
 _CRITICAL_EVENT_TYPES: frozenset[str] = frozenset({"CONSTRAINT"})
 
@@ -28,24 +28,25 @@ class EventLogRepo:
     ) -> int:
         """Append an event log entry. Returns the new row id."""
         detail_json = json.dumps(detail, allow_nan=False) if detail is not None else None
-        async with self._conn.execute(
-            "INSERT INTO event_log"
-            " (schema_version, timestamp, actor, event_type,"
-            "  summary, detail, device_id, config_version)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                schema_version,
-                timestamp.astimezone(UTC).isoformat(),
-                actor,
-                event_type,
-                summary,
-                detail_json,
-                device_id,
-                config_version,
-            ),
-        ) as cursor:
-            row_id = cursor.lastrowid
-        await self._conn.commit()
+        async with get_write_lock():
+            async with self._conn.execute(
+                "INSERT INTO event_log"
+                " (schema_version, timestamp, actor, event_type,"
+                "  summary, detail, device_id, config_version)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    schema_version,
+                    timestamp.astimezone(UTC).isoformat(),
+                    actor,
+                    event_type,
+                    summary,
+                    detail_json,
+                    device_id,
+                    config_version,
+                ),
+            ) as cursor:
+                row_id = cursor.lastrowid
+            await self._conn.commit()
         if row_id is None:
             raise RuntimeError("SQLite did not return a row id for event_log insert.")
         return row_id
@@ -62,10 +63,11 @@ class EventLogRepo:
             raise ValueError(f"retention_days must be >= 1, got {retention_days}")
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
         placeholders = ",".join("?" * len(_CRITICAL_EVENT_TYPES))
-        async with self._conn.execute(
-            f"DELETE FROM event_log WHERE timestamp < ? AND event_type NOT IN ({placeholders})",
-            (cutoff, *_CRITICAL_EVENT_TYPES),
-        ) as cursor:
-            deleted = cursor.rowcount
-        await self._conn.commit()
+        async with get_write_lock():
+            async with self._conn.execute(
+                f"DELETE FROM event_log WHERE timestamp < ? AND event_type NOT IN ({placeholders})",
+                (cutoff, *_CRITICAL_EVENT_TYPES),
+            ) as cursor:
+                deleted = cursor.rowcount
+            await self._conn.commit()
         return deleted

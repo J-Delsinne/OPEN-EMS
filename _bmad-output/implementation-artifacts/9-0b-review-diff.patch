@@ -1,0 +1,2331 @@
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index 008beb1..e8018bc 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -35,7 +35,7 @@
+ # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+ 
+ generated: '2026-05-01'
+-last_updated: '2026-05-10'  # Story 9-0 done (code review applied 25 patches, gates green)
++last_updated: '2026-05-10'  # Story 9-0b dev-story complete; status: review (1014 pytest passed; mypy/ruff clean)
+ project_key: NOKEY
+ tracking_system: file-system
+ story_location: _bmad-output/implementation-artifacts
+@@ -119,7 +119,7 @@ development_status:
+   # 9-1 and hard before 9-3; 9-0c hard before 9-2; 9-0d hard before 9-4.
+   epic-9: in-progress
+   9-0-real-adapter-command-execution-contracts-and-implementations: done
+-  9-0b-db-backed-active-constraints-reload: backlog
++  9-0b-db-backed-active-constraints-reload: review
+   9-0c-capability-profile-failure-semantics: backlog
+   9-0d-restart-hydration-of-monthly-peak: backlog
+   9-1-implement-device-discovery-step-with-live-probing-capability-classification-and-manual-entry: backlog
+diff --git a/_bmad-output/planning-artifacts/architecture.md b/_bmad-output/planning-artifacts/architecture.md
+index e6eb717..5076212 100644
+--- a/_bmad-output/planning-artifacts/architecture.md
++++ b/_bmad-output/planning-artifacts/architecture.md
+@@ -1151,6 +1151,8 @@ The control loop evaluates the current set of `DegradedDeviceState` objects in e
+ 
+ **Constraint that cannot be activated:** if validation returns a FAIL result, the `POST /actions/activate-constraints` endpoint returns 409 with a structured error body. The draft remains staged but inactive. The installer must revise the draft and re-validate.
+ 
++**Story 9.0b implementation note (2026-05-10):** Step 5's activation surface and step 6's "PolicyGuard reads active constraints" are implemented by `ActiveConstraintsProvider` (`open_ems.services.active_constraints`) and `ConfigRepo` (`open_ems.storage.repositories.config_repo`). `ConfigRepo.activate()` is a single `BEGIN IMMEDIATE` transaction that inserts a new row into `active_constraints` AND emits one `config_audit_log` row per changed field (delegating to `ConfigAuditRepo.append_activation` with `commit=False`), so the two tables can never disagree on `config_version`. The provider is hydrated once at lifespan startup (fail-loud `SystemExit(1)` on hydrate failure) and refreshed via `provider.reload()` after each activation commit — the reload is change-triggered, not TTL-based, because the activation endpoint is the only legitimate change source. `PolicyGuard` and `ControlLoop` share the same provider instance, eliminating the source-of-truth fragmentation the deferred Story 6.3 finding called out. The cold-start fallback (no DB row yet) seeds the in-memory snapshot from `Settings.peak_limit_kw` / `Settings.battery_reserve_floor_percent` with `config_version=0`; after the first installer activation those Settings fields are unread (enforced by `tests/unit/test_settings_seed_only.py`). Story 9.3 owns the draft / validate halves of the flow above.
++
+ ---
+ 
+ ### BAD-4: Deployment Validation Service
+diff --git a/migrations/versions/0008_add_active_constraints_table.py b/migrations/versions/0008_add_active_constraints_table.py
+new file mode 100644
+index 0000000..e56e727
+--- /dev/null
++++ b/migrations/versions/0008_add_active_constraints_table.py
+@@ -0,0 +1,51 @@
++"""Add active_constraints table
++
++Revision ID: 0008
++Revises: 0007
++Create Date: 2026-05-10
++
++"""
++
++from __future__ import annotations
++
++from collections.abc import Sequence
++
++import sqlalchemy as sa
++from alembic import op
++
++revision: str = "0008"
++down_revision: str | None = "0007"
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    op.create_table(
++        "active_constraints",
++        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
++        sa.Column("peak_limit_kw", sa.Float(), nullable=False),
++        sa.Column("battery_reserve_floor_percent", sa.Float(), nullable=False),
++        sa.Column("config_version", sa.Integer(), nullable=False, unique=True),
++        sa.Column("activated_at", sa.Text(), nullable=False),
++        sa.Column("actor", sa.Text(), nullable=False),
++        sa.CheckConstraint("peak_limit_kw > 0", name="ck_active_constraints_peak_limit_positive"),
++        sa.CheckConstraint(
++            "battery_reserve_floor_percent >= 0 AND battery_reserve_floor_percent <= 100",
++            name="ck_active_constraints_reserve_floor_range",
++        ),
++        sa.CheckConstraint(
++            "actor IN ('system', 'installer')",
++            name="ck_active_constraints_actor_allowed",
++        ),
++        sqlite_autoincrement=True,
++    )
++    op.create_index(
++        "ix_active_constraints_config_version",
++        "active_constraints",
++        [sa.text("config_version DESC")],
++    )
++
++
++def downgrade() -> None:
++    op.drop_index("ix_active_constraints_config_version", table_name="active_constraints")
++    op.drop_table("active_constraints")
+diff --git a/src/open_ems/core/constraints.py b/src/open_ems/core/constraints.py
+new file mode 100644
+index 0000000..fe74329
+--- /dev/null
++++ b/src/open_ems/core/constraints.py
+@@ -0,0 +1,55 @@
++"""Active-constraints typed models — Story 9.0b.
++
++The runtime values for the two safety-critical site constraints
++(``peak_limit_kw`` and ``battery_reserve_floor_percent``) are owned by
++``ActiveConstraintsProvider`` (``open_ems.services.active_constraints``) and
++read on the hot path by ``PolicyGuard`` and ``ControlLoop``. The models below
++are the wire/storage shape — pure typed values with no I/O — and live under
++``core/`` so they can be imported from both ``engine/`` and ``services/``
++without violating the engine→core import boundary.
++"""
++
++from __future__ import annotations
++
++from datetime import datetime, timedelta
++from typing import Annotated
++
++from pydantic import BaseModel, ConfigDict, Field, field_validator
++
++
++class ActiveConstraintsInput(BaseModel):
++    """Input shape for ``ConfigRepo.activate()`` — only the two value fields.
++
++    ``config_version`` and ``activated_at`` are server-assigned; callers must
++    not provide them.
++    """
++
++    model_config = ConfigDict(frozen=True, extra="forbid")
++
++    peak_limit_kw: Annotated[float, Field(gt=0.0)]
++    battery_reserve_floor_percent: Annotated[float, Field(ge=0.0, le=100.0)]
++
++
++class ActiveConstraints(BaseModel):
++    """The currently-active site safety constraints.
++
++    Returned by ``ConfigRepo.get_active()`` and cached in
++    ``ActiveConstraintsProvider``. Treated as an immutable snapshot — readers
++    receive whichever instance is current at the moment of ``provider.get()``.
++    """
++
++    model_config = ConfigDict(frozen=True, extra="forbid")
++
++    peak_limit_kw: Annotated[float, Field(gt=0.0)]
++    battery_reserve_floor_percent: Annotated[float, Field(ge=0.0, le=100.0)]
++    config_version: Annotated[int, Field(ge=0)]
++    activated_at: datetime
++
++    @field_validator("activated_at")
++    @classmethod
++    def _activated_at_must_be_utc(cls, value: datetime) -> datetime:
++        if value.tzinfo is None or value.utcoffset() is None:
++            raise ValueError("activated_at must be timezone-aware UTC")
++        if value.utcoffset() != timedelta(0):
++            raise ValueError("activated_at must be in UTC")
++        return value
+diff --git a/src/open_ems/engine/control_loop.py b/src/open_ems/engine/control_loop.py
+index 6501fbd..4d70d96 100644
+--- a/src/open_ems/engine/control_loop.py
++++ b/src/open_ems/engine/control_loop.py
+@@ -12,6 +12,13 @@ on ``recommended_operating_mode=fail_safe`` and emits a SYSTEM audit event on
+ fresh fail-safe entry; and it gates fail-safe exit on the entry-time degraded
+ roles having recovered AND the engine's recommendation no longer being
+ ``fail_safe``.
++
++Story 9.0b update: ``_build_evaluation_input`` reads ``peak_limit_kw`` and
++``battery_reserve_floor_percent`` from the injected
++``ActiveConstraintsProvider`` rather than from ``Settings``. The provider is
++hydrated once at lifespan startup and atomically refreshed by the installer
++activation endpoint; this loop and ``PolicyGuard`` share the same provider
++instance, so within one evaluation cycle both layers see the same values.
+ """
+ 
+ from __future__ import annotations
+@@ -44,6 +51,7 @@ from open_ems.engine import (
+ )
+ from open_ems.engine.intent_executor import IntentExecutor
+ from open_ems.engine.retry_policy import RetryPolicy
++from open_ems.services.active_constraints import ActiveConstraintsProvider
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.services.loop_liveness import LoopLiveness
+ from open_ems.settings import Settings
+@@ -83,6 +91,7 @@ class ControlLoop:
+         retry_policy: RetryPolicy,
+         loop_liveness: LoopLiveness,
+         observability: ObservabilityService,
++        active_constraints: ActiveConstraintsProvider,
+     ) -> None:
+         self._state_store = state_store
+         self._adapters = adapters
+@@ -92,6 +101,7 @@ class ControlLoop:
+         self._retry_policy = retry_policy
+         self._loop_liveness = loop_liveness
+         self._observability = observability
++        self._active_constraints = active_constraints
+         self._tracker = PartialIntervalTracker.from_current_time(at=datetime.now(UTC))
+         self._monthly_peak_kw: float = 0.0
+         self._last_mode: SystemOperatingMode | None = None
+@@ -166,8 +176,9 @@ class ControlLoop:
+         snapshot: SystemSnapshot,
+         now: datetime,
+     ) -> EvaluationInput:
++        constraints = self._active_constraints.get()
+         peak_context = self._tracker.build_peak_context(
+-            configured_peak_limit_kw=self._settings.peak_limit_kw,
++            configured_peak_limit_kw=constraints.peak_limit_kw,
+             current_monthly_recorded_peak_kw=self._monthly_peak_kw,
+             at=now,
+         )
+@@ -176,7 +187,7 @@ class ControlLoop:
+             peak_context=peak_context,
+             strategy=EnergyStrategy.maximize_self_consumption,
+             battery_control=BatteryControlContext(
+-                reserve_floor_percent=self._settings.battery_reserve_floor_percent,
++                reserve_floor_percent=constraints.battery_reserve_floor_percent,
+                 capability_profile=None,
+             ),
+             ev_scheduling=EVSchedulingContext(
+diff --git a/src/open_ems/engine/policy_guard.py b/src/open_ems/engine/policy_guard.py
+index 68a85d7..58a8813 100644
+--- a/src/open_ems/engine/policy_guard.py
++++ b/src/open_ems/engine/policy_guard.py
+@@ -7,7 +7,8 @@ before any adapter ``send_command()`` is invoked. PolicyGuard:
+ - rejects all commands when ``SystemOperatingMode.fail_safe`` is active,
+ - enforces the declared device capability profile (no write without capability),
+ - enforces safety constraints (battery reserve floor, peak limit bounds,
+-  conservative-mode load suppression),
++  conservative-mode load suppression) — Story 9.0b: the two safety values
++  are read via ``ActiveConstraintsProvider``, not ``Settings``,
+ - wraps adapter exceptions and timeouts as typed ``CommandResult`` values so
+   raw exceptions never propagate to the control loop (AR16),
+ - emits a ``CONSTRAINT`` audit event for every rejection (mandatory).
+@@ -38,6 +39,7 @@ from open_ems.core.commands import (
+ )
+ from open_ems.core.devices import WriteCapability
+ from open_ems.core.state import SystemSnapshot
++from open_ems.services.active_constraints import ActiveConstraintsProvider
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.settings import Settings
+ 
+@@ -57,11 +59,13 @@ class PolicyGuard:
+         adapters: Mapping[DeviceRole, DeviceAdapter],
+         observability: ObservabilityService,
+         settings: Settings,
++        active_constraints: ActiveConstraintsProvider,
+     ) -> None:
+         self._state_store = state_store
+         self._adapters = adapters
+         self._observability = observability
+         self._settings = settings
++        self._active_constraints = active_constraints
+ 
+     async def authorize_and_dispatch(self, command: DeviceCommand) -> CommandResult:
+         snapshot = self._state_store.get_snapshot()
+@@ -143,14 +147,16 @@ class PolicyGuard:
+         command: DeviceCommand,
+         snapshot: SystemSnapshot,
+     ) -> str | None:
++        constraints = self._active_constraints.get()
++
+         if isinstance(command, SetBatteryDischargeRateCommand) and isinstance(
+             snapshot.battery, BatteryState
+         ):
+-            if snapshot.battery.soc_percent <= self._settings.battery_reserve_floor_percent:
++            if snapshot.battery.soc_percent <= constraints.battery_reserve_floor_percent:
+                 return "battery_soc_at_or_below_reserve_floor"
+ 
+         if isinstance(command, (SetBatteryChargeRateCommand, SetEVChargingRateCommand)):
+-            if command.rate_kw > self._settings.peak_limit_kw:
++            if command.rate_kw > constraints.peak_limit_kw:
+                 return "commanded_rate_exceeds_peak_limit"
+ 
+         if snapshot.operating_mode is SystemOperatingMode.conservative and isinstance(
+diff --git a/src/open_ems/services/active_constraints.py b/src/open_ems/services/active_constraints.py
+new file mode 100644
+index 0000000..df5d4b4
+--- /dev/null
++++ b/src/open_ems/services/active_constraints.py
+@@ -0,0 +1,114 @@
++"""``ActiveConstraintsProvider`` — single in-memory owner of active site constraints.
++
++Story 9.0b: PolicyGuard and ControlLoop both read ``peak_limit_kw`` and
++``battery_reserve_floor_percent`` from this provider on the hot path. The
++provider is constructed and hydrated exactly once during lifespan startup
++(``app.py``); subsequent activations from the installer wizard call
++``reload()`` to refresh the snapshot without a process restart.
++
++Contract summary:
++
++* ``hydrate()`` runs once at startup. Reads the active row from
++  ``ConfigRepo``; if the table is empty (fresh deployment, no installer
++  activation yet) it seeds the snapshot from ``Settings`` with
++  ``config_version=0``. ``hydrate()`` is idempotent — a second call is a
++  no-op + a structured warning.
++* ``reload()`` is the post-hydrate update path. Re-reads the active row.
++  If the table is unexpectedly empty post-hydrate, the existing snapshot is
++  preserved (and a warning is logged) — re-seeding from Settings here
++  would mask a DB regression.
++* ``get()`` is synchronous, returns the cached immutable snapshot, and
++  raises ``RuntimeError`` if called before ``hydrate()``. PolicyGuard's
++  hot path MUST never block on DB I/O.
++* Snapshot replacement is atomic: ``self._current = new`` is a single
++  CPython attribute assignment; readers either see the old reference or
++  the new one, never a torn read.
++* ``hydrate`` and ``reload`` are serialized by ``self._lock`` so two
++  concurrent calls cannot interleave their DB read + assignment.
++"""
++
++from __future__ import annotations
++
++import asyncio
++from datetime import UTC, datetime
++
++import structlog
++
++from open_ems.core.constraints import ActiveConstraints
++from open_ems.settings import Settings
++from open_ems.storage.repositories.config_repo import ConfigRepo
++
++ACTIVE_CONSTRAINTS_PROVIDER_VERSION: str = "1.0"
++
++logger = structlog.get_logger(__name__)
++
++
++class ActiveConstraintsProvider:
++    def __init__(self, *, repo: ConfigRepo, settings: Settings) -> None:
++        self._repo = repo
++        self._settings = settings
++        self._current: ActiveConstraints | None = None
++        self._lock = asyncio.Lock()
++
++    @property
++    def is_hydrated(self) -> bool:
++        return self._current is not None
++
++    async def hydrate(self) -> None:
++        """Read the active row from ``ConfigRepo``; seed from Settings if empty.
++
++        Idempotent: a second call logs ``constraints_provider_already_hydrated``
++        and returns without touching state.
++        """
++        async with self._lock:
++            if self._current is not None:
++                logger.warning(
++                    "constraints_provider_already_hydrated",
++                    component="config",
++                    config_version=self._current.config_version,
++                )
++                return
++            row = await self._repo.get_active()
++            if row is not None:
++                self._current = row
++                return
++            self._current = ActiveConstraints(
++                peak_limit_kw=self._settings.peak_limit_kw,
++                battery_reserve_floor_percent=self._settings.battery_reserve_floor_percent,
++                config_version=0,
++                activated_at=datetime.now(UTC),
++            )
++            logger.info(
++                "constraints_hydrate_seeded_from_settings",
++                component="config",
++                peak_limit_kw=self._current.peak_limit_kw,
++                battery_reserve_floor_percent=self._current.battery_reserve_floor_percent,
++            )
++
++    async def reload(self) -> None:
++        """Re-read the active row and atomically replace the cached snapshot.
++
++        Called by the installer activation endpoint after
++        ``ConfigRepo.activate()`` commits. If the DB is empty post-hydrate
++        (a regression we don't want to mask), the existing snapshot is
++        preserved and ``constraints_reload_found_empty`` is logged.
++        """
++        async with self._lock:
++            row = await self._repo.get_active()
++            if row is None:
++                logger.warning(
++                    "constraints_reload_found_empty",
++                    component="config",
++                    cached_config_version=(
++                        self._current.config_version if self._current is not None else None
++                    ),
++                )
++                return
++            self._current = row
++
++    def get(self) -> ActiveConstraints:
++        """Return the cached snapshot. Raises if called before ``hydrate()``."""
++        snapshot = self._current
++        if snapshot is None:
++            raise RuntimeError("ActiveConstraintsProvider.get() called before hydrate()")
++        return snapshot
+diff --git a/src/open_ems/settings.py b/src/open_ems/settings.py
+index 1333b62..ceb094e 100644
+--- a/src/open_ems/settings.py
++++ b/src/open_ems/settings.py
+@@ -28,7 +28,13 @@ class Settings(BaseSettings):
+     stale_threshold_seconds: int = Field(default=30, gt=0)
+     trusted_proxy_ips: list[str] = []
+     control_loop_interval_seconds: float = Field(default=10.0, gt=0.0)
++    # Cold-start seed only. Runtime reads MUST go through ActiveConstraintsProvider.
++    # After the first installer activation (Story 9.3), the DB row is authoritative
++    # and the value here is unread.
+     peak_limit_kw: float = Field(default=25.0, gt=0.0)
++    # Cold-start seed only. Runtime reads MUST go through ActiveConstraintsProvider.
++    # After the first installer activation (Story 9.3), the DB row is authoritative
++    # and the value here is unread.
+     battery_reserve_floor_percent: float = Field(default=20.0, ge=0.0, le=100.0)
+     command_max_retries: int = Field(default=2, ge=0, le=5)
+     command_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=5.0)
+diff --git a/src/open_ems/storage/repositories/config_audit_repo.py b/src/open_ems/storage/repositories/config_audit_repo.py
+index 90ecafc..e11fc2d 100644
+--- a/src/open_ems/storage/repositories/config_audit_repo.py
++++ b/src/open_ems/storage/repositories/config_audit_repo.py
+@@ -34,7 +34,23 @@ class ConfigAuditRepo:
+     def __init__(self, conn: aiosqlite.Connection | None = None) -> None:
+         self._conn = conn if conn is not None else get_connection()
+ 
+-    async def append_activation(self, *, actor: str, changes: Sequence[ConfigAuditChange]) -> int:
++    async def append_activation(
++        self,
++        *,
++        actor: str,
++        changes: Sequence[ConfigAuditChange],
++        config_version: int | None = None,
++        commit: bool = True,
++    ) -> int:
++        """Append one config_audit_log row per change.
++
++        ``config_version`` and ``commit`` exist so ``ConfigRepo.activate``
++        can drive a single atomic transaction that spans both
++        ``active_constraints`` and ``config_audit_log`` (Story 9.0b AC2):
++        the caller passes the version it has already chosen and skips the
++        local commit so the outer transaction commits both inserts together.
++        Direct callers (no outer transaction) get the legacy semantics.
++        """
+         if actor not in VALID_CONFIG_AUDIT_ACTORS:
+             raise ValueError(f"Invalid actor {actor!r}")
+         if not changes:
+@@ -52,13 +68,14 @@ class ConfigAuditRepo:
+                 )
+             )
+ 
+-        async with self._conn.execute(
+-            "SELECT COALESCE(MAX(config_version), 0) + 1 FROM config_audit_log"
+-        ) as cursor:
+-            row = await cursor.fetchone()
+-        if row is None:
+-            raise RuntimeError("SQLite did not return a config version.")
+-        config_version = int(row[0])
++        if config_version is None:
++            async with self._conn.execute(
++                "SELECT COALESCE(MAX(config_version), 0) + 1 FROM config_audit_log"
++            ) as cursor:
++                row = await cursor.fetchone()
++            if row is None:
++                raise RuntimeError("SQLite did not return a config version.")
++            config_version = int(row[0])
+         timestamp = datetime.now(UTC).isoformat()
+ 
+         await self._conn.executemany(
+@@ -70,7 +87,8 @@ class ConfigAuditRepo:
+                 for field, previous_value, new_value in serialized_changes
+             ],
+         )
+-        await self._conn.commit()
++        if commit:
++            await self._conn.commit()
+         return config_version
+ 
+ 
+diff --git a/src/open_ems/storage/repositories/config_repo.py b/src/open_ems/storage/repositories/config_repo.py
+new file mode 100644
+index 0000000..4eabe9b
+--- /dev/null
++++ b/src/open_ems/storage/repositories/config_repo.py
+@@ -0,0 +1,142 @@
++"""``ConfigRepo`` — persistent owner of the active site safety constraints.
++
++Story 9.0b: this repo is the only legal write path into the
++``active_constraints`` table. ``activate()`` runs a single atomic transaction
++that inserts the new active row AND emits one ``config_audit_log`` row per
++changed field (delegated to ``ConfigAuditRepo.append_activation``), so the
++two tables can never disagree on ``config_version``.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from typing import Literal
++
++import aiosqlite
++
++from open_ems.core.constraints import ActiveConstraints, ActiveConstraintsInput
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.config_audit_repo import (
++    ConfigAuditChange,
++    ConfigAuditRepo,
++)
++
++VALID_ACTIVATION_ACTORS: frozenset[str] = frozenset({"system", "installer"})
++
++# Audit-vocabulary field names already established by Story 6.3
++# (see SAFETY_RELEVANT_CONFIG_FIELDS in config_audit_repo).
++_AUDIT_FIELD_PEAK_LIMIT: str = "peak_consumption_limit"
++_AUDIT_FIELD_RESERVE_FLOOR: str = "battery_reserve_floor"
++
++
++class ConfigRepo:
++    def __init__(
++        self,
++        conn: aiosqlite.Connection | None = None,
++        *,
++        audit_repo: ConfigAuditRepo | None = None,
++    ) -> None:
++        self._conn = conn if conn is not None else get_connection()
++        self._audit_repo = audit_repo if audit_repo is not None else ConfigAuditRepo(self._conn)
++
++    async def get_active(self) -> ActiveConstraints | None:
++        """Return the currently-active row (highest ``config_version``) or ``None``."""
++        async with self._conn.execute(
++            "SELECT peak_limit_kw, battery_reserve_floor_percent, config_version,"
++            " activated_at FROM active_constraints"
++            " ORDER BY config_version DESC LIMIT 1"
++        ) as cursor:
++            row = await cursor.fetchone()
++        if row is None:
++            return None
++        return ActiveConstraints(
++            peak_limit_kw=float(row[0]),
++            battery_reserve_floor_percent=float(row[1]),
++            config_version=int(row[2]),
++            activated_at=datetime.fromisoformat(row[3]),
++        )
++
++    async def activate(
++        self,
++        input: ActiveConstraintsInput,
++        *,
++        actor: Literal["system", "installer"],
++    ) -> int:
++        """Atomically activate a new constraint set; return the assigned ``config_version``.
++
++        Audit emission is delegated to ``ConfigAuditRepo.append_activation``
++        with ``commit=False`` so both inserts share the outer
++        ``BEGIN IMMEDIATE`` transaction.
++        """
++        if actor not in VALID_ACTIVATION_ACTORS:
++            raise ValueError(f"Invalid actor {actor!r}")
++
++        previous = await self.get_active()
++        changes = _build_audit_changes(previous, input)
++        if not changes:
++            raise ValueError("activate called with no changed fields")
++
++        # Flush any implicit transaction the connection may have opened so
++        # BEGIN IMMEDIATE below acquires the write lock cleanly.
++        await self._conn.commit()
++        await self._conn.execute("BEGIN IMMEDIATE")
++        try:
++            async with self._conn.execute(
++                "SELECT COALESCE(MAX(config_version), 0) + 1 FROM active_constraints"
++            ) as cursor:
++                version_row = await cursor.fetchone()
++            if version_row is None:
++                raise RuntimeError("SQLite did not return a config version")
++            next_version = int(version_row[0])
++            now_iso = datetime.now(UTC).isoformat()
++
++            await self._conn.execute(
++                "INSERT INTO active_constraints"
++                " (peak_limit_kw, battery_reserve_floor_percent,"
++                "  config_version, activated_at, actor)"
++                " VALUES (?, ?, ?, ?, ?)",
++                (
++                    input.peak_limit_kw,
++                    input.battery_reserve_floor_percent,
++                    next_version,
++                    now_iso,
++                    actor,
++                ),
++            )
++            await self._audit_repo.append_activation(
++                actor=actor,
++                changes=changes,
++                config_version=next_version,
++                commit=False,
++            )
++            await self._conn.commit()
++        except Exception:
++            await self._conn.rollback()
++            raise
++        return next_version
++
++
++def _build_audit_changes(
++    previous: ActiveConstraints | None,
++    new: ActiveConstraintsInput,
++) -> list[ConfigAuditChange]:
++    changes: list[ConfigAuditChange] = []
++    prev_peak = None if previous is None else previous.peak_limit_kw
++    if prev_peak != new.peak_limit_kw:
++        changes.append(
++            ConfigAuditChange(
++                field=_AUDIT_FIELD_PEAK_LIMIT,
++                previous_value={"kw": prev_peak},
++                new_value={"kw": new.peak_limit_kw},
++            )
++        )
++    prev_floor = None if previous is None else previous.battery_reserve_floor_percent
++    if prev_floor != new.battery_reserve_floor_percent:
++        changes.append(
++            ConfigAuditChange(
++                field=_AUDIT_FIELD_RESERVE_FLOOR,
++                previous_value={"percent": prev_floor},
++                new_value={"percent": new.battery_reserve_floor_percent},
++            )
++        )
++    return changes
+diff --git a/src/open_ems/web/app.py b/src/open_ems/web/app.py
+index 26a23d3..fc9920d 100644
+--- a/src/open_ems/web/app.py
++++ b/src/open_ems/web/app.py
+@@ -16,6 +16,7 @@ from open_ems.engine.intent_executor import IntentExecutor
+ from open_ems.engine.policy_guard import PolicyGuard
+ from open_ems.engine.retry_policy import RetryPolicy
+ from open_ems.logging_config import configure_logging
++from open_ems.services.active_constraints import ActiveConstraintsProvider
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.services.loop_liveness import LoopLiveness
+ from open_ems.services.readiness import mark_ready, sd_notify
+@@ -23,6 +24,7 @@ from open_ems.services.time_sync import check_clock
+ from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
+ from open_ems.settings import get_settings
+ from open_ems.storage.database import close_database, init_database
++from open_ems.storage.repositories.config_repo import ConfigRepo
+ from open_ems.storage.repositories.energy_repo import EnergyRepo
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
+ from open_ems.storage.repositories.session_repo import SessionRepo
+@@ -215,6 +217,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+     # Step 4: Open database connection
+     await init_database(settings.db_path)
+ 
++    # Step 4b: Hydrate the active-constraints provider BEFORE any consumer
++    # (PolicyGuard / ControlLoop) is constructed. A failure here means the
++    # process cannot determine its safety constraints — fail loud (Story 9.0b
++    # AC7), matching the migration-failure handling pattern above.
++    try:
++        active_constraints_provider = ActiveConstraintsProvider(
++            repo=ConfigRepo(), settings=settings
++        )
++        await active_constraints_provider.hydrate()
++    except Exception:
++        logger.error(
++            "startup_failed",
++            reason="constraints_hydrate_failed",
++            exc_info=True,
++            component="startup",
++        )
++        raise SystemExit(1) from None
++    app.state.active_constraints_provider = active_constraints_provider
++
+     _watchdog_task: asyncio.Task[None] | None = None
+     _cleanup_task: asyncio.Task[None] | None = None
+     _pruning_task: asyncio.Task[None] | None = None
+@@ -302,6 +323,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+             adapters={},
+             observability=observability,
+             settings=settings,
++            active_constraints=active_constraints_provider,
+         )
+         retry_policy = RetryPolicy(
+             policy_guard=policy_guard,
+@@ -317,6 +339,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+             retry_policy=retry_policy,
+             loop_liveness=loop_liveness,
+             observability=observability,
++            active_constraints=active_constraints_provider,
+         )
+ 
+         _control_loop_task = asyncio.create_task(_control_loop.run(), name="control_loop")
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 40d37da..db27449 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Generator
+ import aiosqlite
+ import pytest
+ import pytest_asyncio
++import structlog
+ 
+ from open_ems.services.readiness import reset as readiness_reset
+ from open_ems.storage.database import close_database, get_connection, init_database
+@@ -47,6 +48,21 @@ def _set_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
+     monkeypatch.setenv("SECRET_KEY", "test-secret-key-32-chars-xxxxxxxxxx")
+ 
+ 
++@pytest.fixture(autouse=True)
++def _reset_structlog_config() -> None:
++    """Ensure tests start with structlog at its library defaults.
++
++    ``open_ems.logging_config.configure_logging`` enables
++    ``cache_logger_on_first_use=True`` which makes ``capture_logs()`` miss
++    events for loggers bound before the capture context started. Tests that
++    drive the production lifespan (e.g. ``test_migrations``,
++    ``test_constraints_reload``) reconfigure structlog; without this reset
++    those reconfigurations would leak into every subsequent test that uses
++    ``capture_logs()``.
++    """
++    structlog.reset_defaults()
++
++
+ @pytest.fixture
+ def tmp_db_path(tmp_path: pathlib.Path) -> str:
+     """Temporary SQLite file path for tests that need an on-disk DB."""
+diff --git a/tests/fixtures/active_constraints.py b/tests/fixtures/active_constraints.py
+new file mode 100644
+index 0000000..a00d31c
+--- /dev/null
++++ b/tests/fixtures/active_constraints.py
+@@ -0,0 +1,36 @@
++"""Shared test fixture: pre-hydrated ``ActiveConstraintsProvider``.
++
++Story 9.0b adds an ``ActiveConstraintsProvider`` parameter to ``PolicyGuard``
++and ``ControlLoop``. Most tests don't exercise hydration / reload — they
++just need a hydrated provider whose ``get()`` returns values seeded from a
++``Settings`` instance. This helper builds one synchronously by setting the
++cached snapshot directly, bypassing the async ``hydrate()`` path.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from unittest.mock import MagicMock
++
++from open_ems.core.constraints import ActiveConstraints
++from open_ems.services.active_constraints import ActiveConstraintsProvider
++from open_ems.settings import Settings
++from open_ems.storage.repositories.config_repo import ConfigRepo
++
++_DEFAULT_ACTIVATED_AT = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
++
++
++def make_active_constraints_provider(
++    settings: Settings,
++    *,
++    activated_at: datetime = _DEFAULT_ACTIVATED_AT,
++) -> ActiveConstraintsProvider:
++    """Return a hydrated provider seeded from ``settings`` (sync; no DB)."""
++    provider = ActiveConstraintsProvider(repo=MagicMock(spec=ConfigRepo), settings=settings)
++    provider._current = ActiveConstraints(  # noqa: SLF001
++        peak_limit_kw=settings.peak_limit_kw,
++        battery_reserve_floor_percent=settings.battery_reserve_floor_percent,
++        config_version=0,
++        activated_at=activated_at,
++    )
++    return provider
+diff --git a/tests/integration/adapters/test_battery_send_command.py b/tests/integration/adapters/test_battery_send_command.py
+index c0ccae8..39e5330 100644
+--- a/tests/integration/adapters/test_battery_send_command.py
++++ b/tests/integration/adapters/test_battery_send_command.py
+@@ -37,6 +37,7 @@ from open_ems.engine import PolicyGuard, RetryPolicy
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.settings import Settings
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from tests.fixtures.active_constraints import make_active_constraints_provider
+ 
+ _NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+ 
+@@ -198,6 +199,7 @@ async def test_end_to_end_battery_charge_success_writes_register() -> None:
+         adapters={DeviceRole.battery: battery},
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+@@ -239,6 +241,7 @@ async def test_end_to_end_battery_timeout_reaches_policy_guard_with_modbus_reaso
+         adapters={DeviceRole.battery: battery},
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+ 
+     cmd = _charge_command()
+@@ -289,6 +292,7 @@ async def test_end_to_end_battery_retry_recovers_after_transient_modbus_error()
+         adapters={DeviceRole.battery: battery},
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+@@ -357,6 +361,7 @@ async def test_end_to_end_battery_adapter_internal_error_wrapped_not_propagated(
+         adapters={DeviceRole.battery: battery},
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+ 
+     cmd = _charge_command()
+diff --git a/tests/integration/adapters/test_ev_charger_send_command.py b/tests/integration/adapters/test_ev_charger_send_command.py
+index 3f463ba..0b8555e 100644
+--- a/tests/integration/adapters/test_ev_charger_send_command.py
++++ b/tests/integration/adapters/test_ev_charger_send_command.py
+@@ -34,6 +34,7 @@ from open_ems.engine import PolicyGuard, RetryPolicy
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.settings import Settings
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from tests.fixtures.active_constraints import make_active_constraints_provider
+ 
+ _NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+ 
+@@ -152,6 +153,7 @@ async def test_end_to_end_ev_charge_rate_success_via_set_charging_profile() -> N
+             adapters={DeviceRole.ev_charger: ev_adapter},
+             observability=obs,
+             settings=settings,
++            active_constraints=make_active_constraints_provider(settings),
+         )
+         retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+@@ -208,6 +210,7 @@ async def test_end_to_end_ev_rejected_response_returns_rejected_no_retry() -> No
+             adapters={DeviceRole.ev_charger: ev_adapter},
+             observability=obs,
+             settings=settings,
++            active_constraints=make_active_constraints_provider(settings),
+         )
+         retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+@@ -249,6 +252,7 @@ async def test_end_to_end_ev_stop_without_active_transaction_returns_failed() ->
+             adapters={DeviceRole.ev_charger: ev_adapter},
+             observability=obs,
+             settings=settings,
++            active_constraints=make_active_constraints_provider(settings),
+         )
+ 
+         stop_cmd = StopEVChargingCommand(
+@@ -293,6 +297,7 @@ async def test_end_to_end_ev_stop_after_start_transaction_dispatches_remote_stop
+             adapters={DeviceRole.ev_charger: ev_adapter},
+             observability=obs,
+             settings=settings,
++            active_constraints=make_active_constraints_provider(settings),
+         )
+ 
+         stop_cmd = StopEVChargingCommand(
+@@ -342,6 +347,7 @@ async def test_end_to_end_ev_charge_rate_timeout_returns_ocpp_command_timeout()
+             adapters={DeviceRole.ev_charger: ev_adapter},
+             observability=obs,
+             settings=settings,
++            active_constraints=make_active_constraints_provider(settings),
+         )
+ 
+         cmd = _ev_rate_command()
+diff --git a/tests/integration/engine/test_command_pipeline.py b/tests/integration/engine/test_command_pipeline.py
+index 280aa41..9b7c15b 100644
+--- a/tests/integration/engine/test_command_pipeline.py
++++ b/tests/integration/engine/test_command_pipeline.py
+@@ -30,6 +30,7 @@ from open_ems.engine import EvaluationResult, IntentExecutor, PolicyGuard, Retry
+ from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.settings import Settings
++from tests.fixtures.active_constraints import make_active_constraints_provider
+ 
+ _NOW = datetime(2026, 5, 6, 12, 0, 0, tzinfo=UTC)
+ 
+@@ -139,6 +140,7 @@ async def test_full_pipeline_allowed_path() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+@@ -165,11 +167,13 @@ async def test_full_pipeline_rejected_path() -> None:
+     store = await _state_store_with_battery(soc_percent=20.0)  # at reserve floor
+     adapter = SimulatedBatteryAdapter()
+     obs, audit_spy = _observability_with_audit_spy()
++    settings = _settings()
+     guard = PolicyGuard(
+         state_store=store,
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+-        settings=_settings(),
++        settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+ 
+     discharge = SetBatteryDischargeRateCommand(
+diff --git a/tests/integration/engine/test_constraints_reload.py b/tests/integration/engine/test_constraints_reload.py
+new file mode 100644
+index 0000000..148a456
+--- /dev/null
++++ b/tests/integration/engine/test_constraints_reload.py
+@@ -0,0 +1,353 @@
++"""Integration tests for the DB-backed active-constraints reload (Story 9.0b).
++
++Covers AC8 end-to-end + AC10 #20-#23 against the real Alembic-migrated SQLite
++test DB. No mocked repos — drift between unit-test mocks and the real schema
++would otherwise be invisible.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import pathlib
++import uuid
++from collections.abc import AsyncGenerator
++from datetime import UTC, datetime
++
++import pytest
++import pytest_asyncio
++from alembic import command as alembic_command
++from alembic.config import Config
++
++from open_ems.core import (
++    BatteryState,
++    DeviceAdapter,
++    DeviceRole,
++    EVChargerState,
++    StateStore,
++)
++from open_ems.core.commands import (
++    CommandOrigin,
++    CommandResult,
++    CommandStatus,
++    SetBatteryDischargeRateCommand,
++    SetEVChargingRateCommand,
++)
++from open_ems.core.constraints import ActiveConstraintsInput
++from open_ems.core.devices import (
++    DeviceCapabilityProfile,
++    ReadCapability,
++    WriteCapability,
++)
++from open_ems.engine.policy_guard import PolicyGuard
++from open_ems.services.active_constraints import ActiveConstraintsProvider
++from open_ems.services.audit_log import ObservabilityService
++from open_ems.settings import Settings
++from open_ems.storage.database import close_database, init_database
++from open_ems.storage.repositories.config_repo import ConfigRepo
++
++_NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
++
++
++def _settings() -> Settings:
++    return Settings(_env_file=None)  # type: ignore[call-arg]
++
++
++@pytest_asyncio.fixture
++async def migrated_db(tmp_path: pathlib.Path) -> AsyncGenerator[str, None]:
++    """Apply Alembic head migrations to a fresh on-disk SQLite DB and open it."""
++    db_path = str(tmp_path / "constraints_reload.db")
++    cfg = Config("alembic.ini")
++    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
++    alembic_command.upgrade(cfg, "head")
++    await init_database(db_path)
++    yield db_path
++    await close_database()
++
++
++# ── Stub EV adapter that always succeeds ──────────────────────────────────────
++
++
++class _StubEVAdapter:
++    def __init__(self, device_id: str = "ev-001") -> None:
++        self.device_id = device_id
++        self.send_command_calls: list[object] = []
++
++    async def connect(self) -> None: ...
++    async def disconnect(self) -> None: ...
++
++    async def get_state(self) -> EVChargerState:
++        return EVChargerState(
++            device_id=self.device_id,
++            connected=True,
++            charging=False,
++            charge_rate_kw=0.0,
++            energy_session_kwh=0.0,
++            read_at=_NOW,
++        )
++
++    async def get_capabilities(self) -> DeviceCapabilityProfile:
++        return DeviceCapabilityProfile(
++            device_id=self.device_id,
++            model="StubEV",
++            read_capabilities=frozenset({ReadCapability.state}),
++            write_capabilities=frozenset({WriteCapability.set_ev_charge_current}),
++        )
++
++    async def send_command(self, command: object) -> CommandResult:
++        self.send_command_calls.append(command)
++        cid = getattr(command, "correlation_id", uuid.uuid4())
++        return CommandResult(
++            correlation_id=cid,
++            device_id=self.device_id,
++            status=CommandStatus.success,
++            applied=True,
++            reason="ok",
++        )
++
++
++def _ev_charge_command(rate_kw: float) -> SetEVChargingRateCommand:
++    return SetEVChargingRateCommand(
++        device_id="ev-001",
++        device_role=DeviceRole.ev_charger,
++        origin=CommandOrigin.decision_engine,
++        rate_kw=rate_kw,
++    )
++
++
++def _build_state_store() -> StateStore:
++    return StateStore(system_clock_status="valid")
++
++
++def _observability() -> ObservabilityService:
++    # Real ObservabilityService backed by EventLogRepo on the connected DB —
++    # the audit emission path runs against a real INSERT into event_log.
++    return ObservabilityService()
++
++
++# ── AC10 #20: peak-limit reload ──────────────────────────────────────────────
++
++
++async def test_reload_picks_up_new_peak_limit(
++    migrated_db: str,
++) -> None:
++    """AC8 end-to-end: a higher peak limit becomes effective after reload()."""
++    settings = _settings()
++    repo = ConfigRepo()
++    provider = ActiveConstraintsProvider(repo=repo, settings=settings)
++
++    # Seed: peak_limit_kw=25.0 (Settings default; provider hydrates from
++    # Settings since no DB row exists yet).
++    await provider.hydrate()
++    assert provider.get().peak_limit_kw == 25.0
++
++    adapter: DeviceAdapter = _StubEVAdapter()  # type: ignore[assignment]
++    state_store = _build_state_store()
++    guard = PolicyGuard(
++        state_store=state_store,
++        adapters={DeviceRole.ev_charger: adapter},
++        observability=_observability(),
++        settings=settings,
++        active_constraints=provider,
++    )
++
++    # Step 2: PolicyGuard rejects 30 kW > 25 kW
++    cmd_too_high = _ev_charge_command(rate_kw=30.0)
++    rejected = await guard.authorize_and_dispatch(cmd_too_high)
++    assert rejected.status is CommandStatus.rejected
++    assert rejected.reason == "commanded_rate_exceeds_peak_limit"
++
++    # Step 3: activate peak_limit_kw=40.0
++    new_version = await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=40.0, battery_reserve_floor_percent=20.0),
++        actor="installer",
++    )
++    assert new_version == 1
++
++    # Step 4: reload — provider snapshot now reflects the DB row
++    await provider.reload()
++    assert provider.get().peak_limit_kw == 40.0
++    assert provider.get().config_version == 1
++
++    # Step 5: same command now allowed
++    cmd_ok = _ev_charge_command(rate_kw=30.0)
++    allowed = await guard.authorize_and_dispatch(cmd_ok)
++    assert allowed.status is CommandStatus.success
++    assert allowed.applied is True
++
++
++# ── AC10 #21: reserve-floor reload ───────────────────────────────────────────
++
++
++class _StubBatteryAdapter:
++    def __init__(self, device_id: str = "bat-001") -> None:
++        self.device_id = device_id
++
++    async def connect(self) -> None: ...
++    async def disconnect(self) -> None: ...
++
++    async def get_state(self) -> BatteryState:  # type: ignore[override]
++        # Not used directly by PolicyGuard — battery is read from StateStore.
++        raise NotImplementedError
++
++    async def get_capabilities(self) -> DeviceCapabilityProfile:
++        return DeviceCapabilityProfile(
++            device_id=self.device_id,
++            model="StubBattery",
++            read_capabilities=frozenset({ReadCapability.state}),
++            write_capabilities=frozenset({WriteCapability.set_discharge_rate}),
++        )
++
++    async def send_command(self, command: object) -> CommandResult:
++        cid = getattr(command, "correlation_id", uuid.uuid4())
++        return CommandResult(
++            correlation_id=cid,
++            device_id=self.device_id,
++            status=CommandStatus.success,
++            applied=True,
++            reason="ok",
++        )
++
++
++async def test_reload_picks_up_new_reserve_floor(
++    migrated_db: str,
++) -> None:
++    """Battery discharge below the active reserve floor is rejected; after
++    activation+reload of a lower floor, the same command is allowed."""
++    settings = _settings()
++    repo = ConfigRepo()
++    provider = ActiveConstraintsProvider(repo=repo, settings=settings)
++    await provider.hydrate()
++    assert provider.get().battery_reserve_floor_percent == 20.0
++
++    adapter: DeviceAdapter = _StubBatteryAdapter()  # type: ignore[assignment]
++    state_store = _build_state_store()
++    # Battery at 25% — above default reserve floor (20%) but below a
++    # hypothetical higher floor we'll activate first.
++    battery = BatteryState(
++        device_id="bat-001",
++        soc_percent=25.0,
++        battery_power_kw=0.0,
++        capacity_kwh=10.0,
++        operating_mode="normal",
++        read_at=_NOW,
++    )
++    await state_store.publish({DeviceRole.battery: battery})
++
++    guard = PolicyGuard(
++        state_store=state_store,
++        adapters={DeviceRole.battery: adapter},
++        observability=_observability(),
++        settings=settings,
++        active_constraints=provider,
++    )
++
++    # Activate a HIGHER reserve floor (30%) — battery at 25% is now BELOW floor.
++    await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=30.0),
++        actor="installer",
++    )
++    await provider.reload()
++    assert provider.get().battery_reserve_floor_percent == 30.0
++
++    discharge = SetBatteryDischargeRateCommand(
++        device_id="bat-001",
++        device_role=DeviceRole.battery,
++        origin=CommandOrigin.decision_engine,
++        rate_kw=1.0,
++    )
++    result_blocked = await guard.authorize_and_dispatch(discharge)
++    assert result_blocked.status is CommandStatus.rejected
++    assert result_blocked.reason == "battery_soc_at_or_below_reserve_floor"
++
++    # Activate a lower reserve floor (10%) — battery at 25% is now ABOVE floor.
++    await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=10.0),
++        actor="installer",
++    )
++    await provider.reload()
++    assert provider.get().battery_reserve_floor_percent == 10.0
++
++    # Same command now allowed.
++    discharge_ok = SetBatteryDischargeRateCommand(
++        device_id="bat-001",
++        device_role=DeviceRole.battery,
++        origin=CommandOrigin.decision_engine,
++        rate_kw=1.0,
++    )
++    result_ok = await guard.authorize_and_dispatch(discharge_ok)
++    assert result_ok.status is CommandStatus.success
++    assert result_ok.applied is True
++
++
++# ── AC10 #22: lifespan ordering ──────────────────────────────────────────────
++
++
++async def test_lifespan_hydrates_before_control_loop(
++    tmp_path: pathlib.Path,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """``provider.is_hydrated`` MUST be True at the moment the control_loop
++    task is created via ``asyncio.create_task``. We spy on
++    ``asyncio.create_task`` and assert ``is_hydrated`` at the point the
++    spy sees the loop being scheduled."""
++    import structlog
++
++    import open_ems.web.app as app_module
++    from open_ems.web.app import create_app, lifespan
++
++    structlog.reset_defaults()
++
++    db_path = str(tmp_path / "lifespan_ordering.db")
++    monkeypatch.setenv("DB_PATH", db_path)
++    monkeypatch.setenv("SECRET_KEY", "test-secret-key-32-chars-xxxxxxxxxx")
++    monkeypatch.setenv("INITIAL_ADMIN_PASSWORD", "ChangeMe!1234")
++    # Force fresh Settings load.
++    monkeypatch.setattr(app_module, "get_settings", lambda: Settings())  # type: ignore[call-arg]
++
++    real_create_task = asyncio.create_task
++    is_hydrated_at_control_loop_create: list[bool] = []
++    original_app: object | None = None
++
++    def spy_create_task(coro, *args, **kwargs):  # type: ignore[no-untyped-def]
++        name = kwargs.get("name")
++        if name == "control_loop":
++            assert original_app is not None
++            provider = getattr(
++                original_app.state,
++                "active_constraints_provider",
++                None,  # type: ignore[attr-defined]
++            )
++            is_hydrated_at_control_loop_create.append(provider is not None and provider.is_hydrated)
++        return real_create_task(coro, *args, **kwargs)
++
++    monkeypatch.setattr(asyncio, "create_task", spy_create_task)
++
++    app = create_app()
++    original_app = app
++    async with lifespan(app):
++        # Inside the running lifespan context — the control loop is alive
++        # and dispatch is happening. The spy already recorded the answer.
++        pass
++
++    assert is_hydrated_at_control_loop_create == [True], (
++        f"control_loop task was scheduled with is_hydrated="
++        f"{is_hydrated_at_control_loop_create}; expected [True] — "
++        "provider.hydrate() must complete BEFORE asyncio.create_task("
++        "control_loop) runs."
++    )
++
++
++# ── AC10 #23: cold-start seeds from Settings ─────────────────────────────────
++
++
++async def test_cold_start_seeds_from_settings(migrated_db: str) -> None:
++    """Fresh DB (post-migration, zero rows in active_constraints) →
++    ``provider.get().config_version == 0`` and values match Settings defaults."""
++    settings = _settings()
++    provider = ActiveConstraintsProvider(repo=ConfigRepo(), settings=settings)
++    await provider.hydrate()
++
++    snapshot = provider.get()
++    assert snapshot.config_version == 0
++    assert snapshot.peak_limit_kw == settings.peak_limit_kw
++    assert snapshot.battery_reserve_floor_percent == settings.battery_reserve_floor_percent
+diff --git a/tests/integration/engine/test_decision_engine_simulation.py b/tests/integration/engine/test_decision_engine_simulation.py
+index 53aa4b8..b344909 100644
+--- a/tests/integration/engine/test_decision_engine_simulation.py
++++ b/tests/integration/engine/test_decision_engine_simulation.py
+@@ -35,6 +35,7 @@ from open_ems.engine.result import EvaluationResult
+ from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from tests.fixtures.active_constraints import make_active_constraints_provider
+ from tests.fixtures.scenarios import (
+     SimulationScenario,
+     _StubBatteryAdapter,
+@@ -163,6 +164,7 @@ async def run_simulation_cycle(
+         adapters=adapters,
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+@@ -303,6 +305,7 @@ async def test_below_reserve_policy_guard_rejection_isolated() -> None:
+         adapters=adapters,
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+diff --git a/tests/integration/engine/test_fail_safe_lifecycle.py b/tests/integration/engine/test_fail_safe_lifecycle.py
+index d707872..19932a1 100644
+--- a/tests/integration/engine/test_fail_safe_lifecycle.py
++++ b/tests/integration/engine/test_fail_safe_lifecycle.py
+@@ -34,6 +34,7 @@ from open_ems.services.loop_liveness import LoopLiveness
+ from open_ems.settings import Settings
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
+ from open_ems.web.app import make_on_control_loop_done
++from tests.fixtures.active_constraints import make_active_constraints_provider
+ 
+ _NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
+ 
+@@ -199,11 +200,13 @@ async def test_fail_safe_full_lifecycle() -> None:
+         DeviceRole.grid_meter: grid,
+         DeviceRole.battery: battery,
+     }
++    active_constraints = make_active_constraints_provider(settings)
+     policy_guard = PolicyGuard(
+         state_store=state_store,
+         adapters=adapters,
+         observability=obs,
+         settings=settings,
++        active_constraints=active_constraints,
+     )
+     retry_policy = RetryPolicy(
+         policy_guard=policy_guard,
+@@ -224,6 +227,7 @@ async def test_fail_safe_full_lifecycle() -> None:
+         retry_policy=retry_policy,
+         loop_liveness=liveness,
+         observability=obs,
++        active_constraints=active_constraints,
+     )
+ 
+     # Cycle 1: grid_meter + battery degraded → engine recommends fail_safe → enter
+diff --git a/tests/integration/engine/test_retry_pipeline.py b/tests/integration/engine/test_retry_pipeline.py
+index 61ccc19..0aba633 100644
+--- a/tests/integration/engine/test_retry_pipeline.py
++++ b/tests/integration/engine/test_retry_pipeline.py
+@@ -35,6 +35,7 @@ from open_ems.engine.rules.ev_scheduling import EVChargerIntent, EVChargerIntent
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.settings import Settings
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from tests.fixtures.active_constraints import make_active_constraints_provider
+ 
+ _NOW = datetime(2026, 5, 6, 12, 0, 0, tzinfo=UTC)
+ 
+@@ -237,6 +238,7 @@ async def test_full_pipeline_with_idempotent_retry_recovery() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+@@ -269,6 +271,7 @@ async def test_full_pipeline_with_non_idempotent_fail_closed() -> None:
+         adapters={DeviceRole.ev_charger: adapter},
+         observability=obs,
+         settings=settings,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
+ 
+diff --git a/tests/unit/core/test_constraints.py b/tests/unit/core/test_constraints.py
+new file mode 100644
+index 0000000..3825a87
+--- /dev/null
++++ b/tests/unit/core/test_constraints.py
+@@ -0,0 +1,147 @@
++"""Unit tests for ``open_ems.core.constraints`` — Story 9.0b AC3.
++
++Covers field validators, ``frozen=True`` immutability, ``extra="forbid"``,
++and UTC timezone-awareness for ``activated_at``.
++
++Note on ``config_version`` lower bound: the story header AC3 reads
++``config_version: int, ge=1`` but AC4/AC10/R3/R6 explicitly require seed-from-
++Settings to produce an in-memory ``ActiveConstraints`` instance with
++``config_version=0`` (DB has no row yet). The single ``ActiveConstraints``
++shape covers BOTH the seed and the DB-row case, so the lower bound is
++relaxed to ``ge=0``; DB-row values are guaranteed ``>= 1`` by the schema's
++``AUTOINCREMENT + UNIQUE`` and the seed value of 0 is in-memory only.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime, timedelta, timezone
++
++import pytest
++from pydantic import ValidationError
++
++from open_ems.core.constraints import ActiveConstraints, ActiveConstraintsInput
++
++_NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
++
++
++def test_active_constraints_input_accepts_valid_values() -> None:
++    inp = ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=20.0)
++    assert inp.peak_limit_kw == 25.0
++    assert inp.battery_reserve_floor_percent == 20.0
++
++
++def test_active_constraints_input_rejects_zero_peak_limit() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraintsInput(peak_limit_kw=0.0, battery_reserve_floor_percent=20.0)
++
++
++def test_active_constraints_input_rejects_negative_peak_limit() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraintsInput(peak_limit_kw=-1.0, battery_reserve_floor_percent=20.0)
++
++
++def test_active_constraints_input_rejects_reserve_floor_below_range() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=-0.1)
++
++
++def test_active_constraints_input_rejects_reserve_floor_above_range() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=100.01)
++
++
++def test_active_constraints_input_accepts_boundary_values() -> None:
++    a = ActiveConstraintsInput(peak_limit_kw=0.0001, battery_reserve_floor_percent=0.0)
++    b = ActiveConstraintsInput(peak_limit_kw=1000.0, battery_reserve_floor_percent=100.0)
++    assert a.battery_reserve_floor_percent == 0.0
++    assert b.battery_reserve_floor_percent == 100.0
++
++
++def test_active_constraints_input_is_frozen() -> None:
++    inp = ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=20.0)
++    with pytest.raises(ValidationError):
++        inp.peak_limit_kw = 30.0  # type: ignore[misc]
++
++
++def test_active_constraints_input_forbids_extra_fields() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraintsInput(  # type: ignore[call-arg]
++            peak_limit_kw=25.0,
++            battery_reserve_floor_percent=20.0,
++            config_version=1,
++        )
++
++
++def test_active_constraints_full_model_constructs() -> None:
++    c = ActiveConstraints(
++        peak_limit_kw=25.0,
++        battery_reserve_floor_percent=20.0,
++        config_version=1,
++        activated_at=_NOW,
++    )
++    assert c.config_version == 1
++    assert c.activated_at == _NOW
++
++
++def test_active_constraints_allows_seed_config_version_zero() -> None:
++    """Seed-from-Settings path produces config_version=0 (AC4); model must accept it."""
++    c = ActiveConstraints(
++        peak_limit_kw=25.0,
++        battery_reserve_floor_percent=20.0,
++        config_version=0,
++        activated_at=_NOW,
++    )
++    assert c.config_version == 0
++
++
++def test_active_constraints_rejects_negative_config_version() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraints(
++            peak_limit_kw=25.0,
++            battery_reserve_floor_percent=20.0,
++            config_version=-1,
++            activated_at=_NOW,
++        )
++
++
++def test_active_constraints_is_frozen() -> None:
++    c = ActiveConstraints(
++        peak_limit_kw=25.0,
++        battery_reserve_floor_percent=20.0,
++        config_version=1,
++        activated_at=_NOW,
++    )
++    with pytest.raises(ValidationError):
++        c.peak_limit_kw = 30.0  # type: ignore[misc]
++
++
++def test_active_constraints_forbids_extra_fields() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraints(  # type: ignore[call-arg]
++            peak_limit_kw=25.0,
++            battery_reserve_floor_percent=20.0,
++            config_version=1,
++            activated_at=_NOW,
++            actor="installer",
++        )
++
++
++def test_active_constraints_rejects_naive_datetime() -> None:
++    with pytest.raises(ValidationError):
++        ActiveConstraints(
++            peak_limit_kw=25.0,
++            battery_reserve_floor_percent=20.0,
++            config_version=1,
++            activated_at=datetime(2026, 5, 10, 12, 0, 0),  # naive
++        )
++
++
++def test_active_constraints_rejects_non_utc_timezone() -> None:
++    paris = timezone(timedelta(hours=2))
++    with pytest.raises(ValidationError):
++        ActiveConstraints(
++            peak_limit_kw=25.0,
++            battery_reserve_floor_percent=20.0,
++            config_version=1,
++            activated_at=datetime(2026, 5, 10, 14, 0, 0, tzinfo=paris),
++        )
+diff --git a/tests/unit/engine/test_control_loop.py b/tests/unit/engine/test_control_loop.py
+index aec1948..0f5c812 100644
+--- a/tests/unit/engine/test_control_loop.py
++++ b/tests/unit/engine/test_control_loop.py
+@@ -27,6 +27,7 @@ from open_ems.engine.rules.ev_scheduling import EVChargerIntent, EVChargerIntent
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.services.loop_liveness import LoopLiveness
+ from open_ems.settings import Settings
++from tests.fixtures.active_constraints import make_active_constraints_provider
+ 
+ _NOW = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
+ 
+@@ -124,15 +125,17 @@ def _control_loop(
+     if observability is None:
+         observability = MagicMock(spec=ObservabilityService)
+         observability.audit = AsyncMock(return_value=None)
++    settings = _settings()
+     return ControlLoop(
+         state_store=state_store or _state_store(),
+         adapters=adapters or {},
+         energy_repo=energy_repo,
+-        settings=_settings(),
++        settings=settings,
+         intent_executor=intent_executor or IntentExecutor(),
+         retry_policy=retry_policy or _default_retry_policy_mock(),
+         loop_liveness=loop_liveness,
+         observability=observability,
++        active_constraints=make_active_constraints_provider(settings),
+     )
+ 
+ 
+@@ -159,6 +162,71 @@ async def test_poll_failure_converts_to_degraded_state() -> None:
+     assert "read timed out" in state.reason
+ 
+ 
++async def test_evaluation_input_reads_constraints_from_provider_not_settings() -> None:
++    """AC10 #18: when the provider holds different values than ``Settings``,
++    ``_build_evaluation_input`` must use the PROVIDER values."""
++    from datetime import UTC, datetime
++    from unittest.mock import MagicMock
++
++    from open_ems.core.constraints import ActiveConstraints
++    from open_ems.services.active_constraints import ActiveConstraintsProvider
++    from open_ems.storage.repositories.config_repo import ConfigRepo
++
++    grid_adapter = MagicMock()
++    grid_adapter.device_id = "grid-001"
++    grid_adapter.get_state = AsyncMock(return_value=_grid_meter_state())
++    inverter_adapter = MagicMock()
++    inverter_adapter.device_id = "inv-001"
++    inverter_adapter.get_state = AsyncMock(return_value=_inverter_state())
++
++    settings = _settings()
++    # Build a provider whose snapshot disagrees with Settings on both fields.
++    provider = ActiveConstraintsProvider(repo=MagicMock(spec=ConfigRepo), settings=settings)
++    provider._current = ActiveConstraints(  # noqa: SLF001
++        peak_limit_kw=99.0,  # ≠ settings default
++        battery_reserve_floor_percent=42.0,  # ≠ settings default
++        config_version=7,
++        activated_at=datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC),
++    )
++    energy_repo = AsyncMock()
++    energy_repo.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
++    energy_repo.write_peak_interval = AsyncMock()
++    loop = ControlLoop(
++        state_store=_state_store(),
++        adapters={
++            DeviceRole.grid_meter: grid_adapter,
++            DeviceRole.inverter: inverter_adapter,
++        },
++        energy_repo=energy_repo,
++        settings=settings,
++        intent_executor=IntentExecutor(),
++        retry_policy=_default_retry_policy_mock(),
++        loop_liveness=LoopLiveness(
++            missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0
++        ),
++        observability=MagicMock(spec=ObservabilityService),
++        active_constraints=provider,
++    )
++    interval_start = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
++    _set_tracker_to_boundary(loop, interval_start)
++    now = datetime(2026, 5, 5, 12, 5, 0, tzinfo=UTC)
++
++    device_states = await loop._poll_adapters()  # noqa: SLF001
++    snapshot = await loop._state_store.publish(  # noqa: SLF001
++        device_states, operating_mode=None
++    )
++    eval_input = loop._build_evaluation_input(snapshot, now)  # noqa: SLF001
++
++    # PROVIDER values, not settings defaults.
++    assert eval_input.peak_context.configured_peak_limit_kw == 99.0
++    assert eval_input.battery_control.reserve_floor_percent == 42.0
++    # And those are NOT the Settings defaults.
++    assert eval_input.peak_context.configured_peak_limit_kw != settings.peak_limit_kw
++    assert (
++        eval_input.battery_control.reserve_floor_percent != settings.battery_reserve_floor_percent
++    )
++
++
+ async def test_evaluation_input_constructed_from_fresh_snapshot() -> None:
+     """EvaluationInput is built from the published snapshot's fields and current peak context."""
+     grid_adapter = MagicMock()
+diff --git a/tests/unit/engine/test_policy_guard.py b/tests/unit/engine/test_policy_guard.py
+index fa93eb2..dbae9a0 100644
+--- a/tests/unit/engine/test_policy_guard.py
++++ b/tests/unit/engine/test_policy_guard.py
+@@ -24,14 +24,17 @@ from open_ems.core.commands import (
+     SetEVChargingRateCommand,
+     StopEVChargingCommand,
+ )
++from open_ems.core.constraints import ActiveConstraints
+ from open_ems.core.devices import (
+     DeviceCapabilityProfile,
+     ReadCapability,
+     WriteCapability,
+ )
+ from open_ems.engine.policy_guard import PolicyGuard
++from open_ems.services.active_constraints import ActiveConstraintsProvider
+ from open_ems.services.audit_log import ObservabilityService
+ from open_ems.settings import Settings
++from open_ems.storage.repositories.config_repo import ConfigRepo
+ 
+ _NOW = datetime(2026, 5, 6, 12, 0, 0, tzinfo=UTC)
+ 
+@@ -40,6 +43,22 @@ def _settings() -> Settings:
+     return Settings(_env_file=None)  # type: ignore[call-arg]
+ 
+ 
++def _active_constraints_provider(
++    settings: Settings | None = None,
++) -> ActiveConstraintsProvider:
++    """Build a pre-hydrated provider seeded from ``Settings`` for sync test fixtures."""
++    s = settings if settings is not None else _settings()
++    provider = ActiveConstraintsProvider(repo=MagicMock(spec=ConfigRepo), settings=s)
++    # Bypass async hydrate() in sync test setup by setting the cached snapshot directly.
++    provider._current = ActiveConstraints(  # noqa: SLF001
++        peak_limit_kw=s.peak_limit_kw,
++        battery_reserve_floor_percent=s.battery_reserve_floor_percent,
++        config_version=0,
++        activated_at=_NOW,
++    )
++    return provider
++
++
+ def _state_store(operating_mode: SystemOperatingMode = SystemOperatingMode.normal) -> StateStore:
+     return StateStore(system_clock_status="valid", operating_mode=operating_mode)
+ 
+@@ -160,6 +179,7 @@ async def test_constraint_violation_rejected_with_audit_event() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     cmd = _discharge_command()
+@@ -192,6 +212,7 @@ async def test_capability_missing_blocks_send_command() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -222,6 +243,7 @@ async def test_command_result_applied_false_is_not_treated_as_success() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -252,6 +274,7 @@ async def test_fail_safe_mode_rejects_all_commands() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_charge_command())
+@@ -280,6 +303,7 @@ async def test_peak_limit_bounds_check_rejects_excessive_rate() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_charge_command(rate_kw=999.0))
+@@ -303,6 +327,7 @@ async def test_adapter_exception_is_wrapped_as_failed_command_result() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -324,6 +349,7 @@ async def test_adapter_timeout_is_wrapped_as_timeout_command_result() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -342,6 +368,7 @@ async def test_adapter_not_registered_is_rejected() -> None:
+         adapters={},  # no adapter for battery role
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -366,6 +393,7 @@ async def test_capability_check_failure_is_rejected() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -399,6 +427,7 @@ async def test_conservative_mode_blocks_discharge() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -421,6 +450,7 @@ async def test_successful_dispatch_returns_adapter_result_no_audit() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_discharge_command())
+@@ -456,6 +486,7 @@ async def test_stop_ev_command_requires_set_ev_charge_current_capability() -> No
+         adapters={DeviceRole.ev_charger: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     result = await guard.authorize_and_dispatch(_stop_ev_command())
+@@ -483,6 +514,7 @@ async def test_command_dispatch_timeout_is_caught_via_wait_for() -> None:
+             adapters={DeviceRole.battery: adapter},
+             observability=obs,
+             settings=_settings(),
++            active_constraints=_active_constraints_provider(),
+         )
+         result = await guard.authorize_and_dispatch(_discharge_command())
+ 
+@@ -510,6 +542,7 @@ async def test_reject_audit_includes_correlation_id_in_detail() -> None:
+         adapters={DeviceRole.battery: adapter},
+         observability=obs,
+         settings=_settings(),
++        active_constraints=_active_constraints_provider(),
+     )
+ 
+     cmd = _discharge_command()
+diff --git a/tests/unit/services/test_active_constraints.py b/tests/unit/services/test_active_constraints.py
+new file mode 100644
+index 0000000..7f75022
+--- /dev/null
++++ b/tests/unit/services/test_active_constraints.py
+@@ -0,0 +1,234 @@
++"""Unit tests for ``ActiveConstraintsProvider`` — Story 9.0b AC4 + AC10 #10-#16."""
++
++from __future__ import annotations
++
++import asyncio
++from collections.abc import AsyncGenerator
++from unittest.mock import patch
++
++import aiosqlite
++import pytest
++import pytest_asyncio
++
++from open_ems.core.constraints import ActiveConstraintsInput
++from open_ems.services.active_constraints import ActiveConstraintsProvider
++from open_ems.settings import Settings
++from open_ems.storage.repositories.config_audit_repo import ConfigAuditRepo
++from open_ems.storage.repositories.config_repo import ConfigRepo
++
++_CREATE_ACTIVE_CONSTRAINTS = """
++    CREATE TABLE active_constraints (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        peak_limit_kw REAL NOT NULL CHECK (peak_limit_kw > 0),
++        battery_reserve_floor_percent REAL NOT NULL
++            CHECK (battery_reserve_floor_percent >= 0
++                   AND battery_reserve_floor_percent <= 100),
++        config_version INTEGER NOT NULL UNIQUE,
++        activated_at TEXT NOT NULL,
++        actor TEXT NOT NULL CHECK (actor IN ('system', 'installer'))
++    )
++"""
++_CREATE_CONFIG_AUDIT_LOG = """
++    CREATE TABLE config_audit_log (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        actor TEXT NOT NULL,
++        timestamp TEXT NOT NULL,
++        field TEXT NOT NULL,
++        previous_value TEXT NOT NULL,
++        new_value TEXT NOT NULL,
++        config_version INTEGER NOT NULL
++    )
++"""
++
++
++def _settings() -> Settings:
++    return Settings(_env_file=None)  # type: ignore[call-arg]
++
++
++@pytest_asyncio.fixture
++async def conn_with_schema() -> AsyncGenerator[aiosqlite.Connection, None]:
++    async with aiosqlite.connect(":memory:") as conn:
++        conn.row_factory = aiosqlite.Row
++        await conn.execute(_CREATE_ACTIVE_CONSTRAINTS)
++        await conn.execute(_CREATE_CONFIG_AUDIT_LOG)
++        await conn.commit()
++        yield conn
++
++
++@pytest_asyncio.fixture
++async def provider_repo(
++    conn_with_schema: aiosqlite.Connection,
++) -> AsyncGenerator[tuple[ActiveConstraintsProvider, ConfigRepo], None]:
++    repo = ConfigRepo(conn_with_schema, audit_repo=ConfigAuditRepo(conn_with_schema))
++    provider = ActiveConstraintsProvider(repo=repo, settings=_settings())
++    yield provider, repo
++
++
++# AC10 #10
++async def test_get_before_hydrate_raises_runtime_error(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, _ = provider_repo
++    with pytest.raises(RuntimeError, match="before hydrate"):
++        provider.get()
++    assert provider.is_hydrated is False
++
++
++# AC10 #11
++async def test_hydrate_empty_db_seeds_from_settings_with_version_zero(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, _ = provider_repo
++    settings = _settings()
++
++    with patch("open_ems.services.active_constraints.logger") as mock_logger:
++        await provider.hydrate()
++
++    assert provider.is_hydrated is True
++    snapshot = provider.get()
++    assert snapshot.config_version == 0
++    assert snapshot.peak_limit_kw == settings.peak_limit_kw
++    assert snapshot.battery_reserve_floor_percent == settings.battery_reserve_floor_percent
++    # Structured event name asserted via direct logger mock — robust to whether
++    # configure_logging() has been called elsewhere in the test session.
++    seed_calls = [
++        c
++        for c in mock_logger.info.call_args_list
++        if c.args and c.args[0] == "constraints_hydrate_seeded_from_settings"
++    ]
++    assert len(seed_calls) == 1
++
++
++# AC10 #12
++async def test_hydrate_with_db_row_uses_db_values(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, repo = provider_repo
++    await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=42.5, battery_reserve_floor_percent=15.0),
++        actor="installer",
++    )
++    await provider.hydrate()
++    snapshot = provider.get()
++    assert snapshot.config_version == 1
++    assert snapshot.peak_limit_kw == 42.5
++    assert snapshot.battery_reserve_floor_percent == 15.0
++
++
++# AC10 #13
++async def test_hydrate_called_twice_is_noop_with_warning(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, _ = provider_repo
++    await provider.hydrate()
++    first = provider.get()
++
++    with patch("open_ems.services.active_constraints.logger") as mock_logger:
++        await provider.hydrate()
++
++    second = provider.get()
++    assert second is first  # snapshot unchanged
++    warning_calls = [
++        c
++        for c in mock_logger.warning.call_args_list
++        if c.args and c.args[0] == "constraints_provider_already_hydrated"
++    ]
++    assert len(warning_calls) == 1
++
++
++# AC10 #14
++async def test_reload_after_activate_replaces_snapshot_atomically(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, repo = provider_repo
++    await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=20.0),
++        actor="installer",
++    )
++    await provider.hydrate()
++    old = provider.get()
++    assert old.peak_limit_kw == 25.0
++
++    await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=40.0, battery_reserve_floor_percent=25.0),
++        actor="installer",
++    )
++    await provider.reload()
++
++    new = provider.get()
++    assert new is not old  # snapshot replaced, not mutated
++    assert new.peak_limit_kw == 40.0
++    assert new.config_version == 2
++    # Old reference is immutable proof — Pydantic frozen guarantees it
++    assert old.peak_limit_kw == 25.0
++
++
++# AC10 #15
++async def test_reload_with_empty_db_post_hydrate_preserves_snapshot(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++    conn_with_schema: aiosqlite.Connection,
++) -> None:
++    provider, repo = provider_repo
++    await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=30.0, battery_reserve_floor_percent=10.0),
++        actor="installer",
++    )
++    await provider.hydrate()
++    before = provider.get()
++    assert before.config_version == 1
++
++    # Simulate a DB regression: delete the row out from under the provider.
++    await conn_with_schema.execute("DELETE FROM active_constraints")
++    await conn_with_schema.commit()
++
++    with patch("open_ems.services.active_constraints.logger") as mock_logger:
++        await provider.reload()
++
++    after = provider.get()
++    assert after is before  # snapshot unchanged
++    warning_calls = [
++        c
++        for c in mock_logger.warning.call_args_list
++        if c.args and c.args[0] == "constraints_reload_found_empty"
++    ]
++    assert len(warning_calls) == 1
++
++
++# AC10 #16
++async def test_concurrent_reload_is_serialized(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, repo = provider_repo
++    await repo.activate(
++        ActiveConstraintsInput(peak_limit_kw=25.0, battery_reserve_floor_percent=20.0),
++        actor="installer",
++    )
++    await provider.hydrate()
++
++    # Two concurrent reloads must complete without raising; the lock serializes them.
++    await asyncio.gather(provider.reload(), provider.reload())
++
++    snapshot = provider.get()
++    assert snapshot.config_version == 1
++
++
++async def test_is_hydrated_starts_false(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, _ = provider_repo
++    assert provider.is_hydrated is False
++    await provider.hydrate()
++    assert provider.is_hydrated is True
++
++
++async def test_get_returns_immutable_pydantic_instance(
++    provider_repo: tuple[ActiveConstraintsProvider, ConfigRepo],
++) -> None:
++    provider, _ = provider_repo
++    await provider.hydrate()
++    snapshot = provider.get()
++    # frozen=True — direct mutation must raise pydantic ValidationError.
++    from pydantic import ValidationError
++
++    with pytest.raises(ValidationError):
++        snapshot.peak_limit_kw = 999.0  # type: ignore[misc]
+diff --git a/tests/unit/storage/repositories/test_config_repo.py b/tests/unit/storage/repositories/test_config_repo.py
+new file mode 100644
+index 0000000..5de854b
+--- /dev/null
++++ b/tests/unit/storage/repositories/test_config_repo.py
+@@ -0,0 +1,232 @@
++"""Unit tests for ``ConfigRepo`` — Story 9.0b AC2 + AC10 #1-#9, #24.
++
++Drives the real SQLite engine (in-memory) via the same conftest pattern
++established for ``ConfigAuditRepo`` so CHECK constraints, BEGIN IMMEDIATE
++semantics, and atomicity are exercised end-to-end rather than mocked.
++"""
++
++from __future__ import annotations
++
++import json
++from collections.abc import AsyncGenerator
++from typing import cast
++from unittest.mock import AsyncMock
++
++import aiosqlite
++import pytest
++import pytest_asyncio
++
++from open_ems.core.constraints import ActiveConstraintsInput
++from open_ems.storage.repositories.config_repo import ConfigRepo
++
++# Schema mirrors migrations/versions/0008_add_active_constraints_table.py and
++# 0006_add_config_audit_log_table.py — kept in sync as a unit-test convenience.
++_CREATE_ACTIVE_CONSTRAINTS = """
++    CREATE TABLE active_constraints (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        peak_limit_kw REAL NOT NULL CHECK (peak_limit_kw > 0),
++        battery_reserve_floor_percent REAL NOT NULL
++            CHECK (battery_reserve_floor_percent >= 0
++                   AND battery_reserve_floor_percent <= 100),
++        config_version INTEGER NOT NULL UNIQUE,
++        activated_at TEXT NOT NULL,
++        actor TEXT NOT NULL CHECK (actor IN ('system', 'installer'))
++    )
++"""
++_CREATE_CONFIG_AUDIT_LOG = """
++    CREATE TABLE config_audit_log (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        actor TEXT NOT NULL,
++        timestamp TEXT NOT NULL,
++        field TEXT NOT NULL,
++        previous_value TEXT NOT NULL,
++        new_value TEXT NOT NULL,
++        config_version INTEGER NOT NULL
++    )
++"""
++
++
++@pytest_asyncio.fixture
++async def repo_with_conn() -> AsyncGenerator[tuple[ConfigRepo, aiosqlite.Connection], None]:
++    async with aiosqlite.connect(":memory:") as conn:
++        conn.row_factory = aiosqlite.Row
++        await conn.execute(_CREATE_ACTIVE_CONSTRAINTS)
++        await conn.execute(_CREATE_CONFIG_AUDIT_LOG)
++        await conn.commit()
++        yield ConfigRepo(conn), conn
++
++
++def _input(peak: float = 25.0, floor: float = 20.0) -> ActiveConstraintsInput:
++    return ActiveConstraintsInput(peak_limit_kw=peak, battery_reserve_floor_percent=floor)
++
++
++async def _audit_count(conn: aiosqlite.Connection) -> int:
++    async with conn.execute("SELECT COUNT(*) FROM config_audit_log") as cur:
++        row = await cur.fetchone()
++    return int(cast(aiosqlite.Row, row)[0])
++
++
++async def _active_count(conn: aiosqlite.Connection) -> int:
++    async with conn.execute("SELECT COUNT(*) FROM active_constraints") as cur:
++        row = await cur.fetchone()
++    return int(cast(aiosqlite.Row, row)[0])
++
++
++# AC10 #1
++async def test_get_active_on_empty_table_returns_none(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    assert await repo.get_active() is None
++
++
++# AC10 #2
++async def test_get_active_after_one_activate_returns_inserted_row(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    version = await repo.activate(_input(25.0, 20.0), actor="system")
++    assert version == 1
++    active = await repo.get_active()
++    assert active is not None
++    assert active.peak_limit_kw == 25.0
++    assert active.battery_reserve_floor_percent == 20.0
++    assert active.config_version == 1
++
++
++# AC10 #3
++async def test_get_active_after_two_activations_returns_highest_version(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    await repo.activate(_input(25.0, 20.0), actor="installer")
++    await repo.activate(_input(40.0, 25.0), actor="installer")
++    active = await repo.get_active()
++    assert active is not None
++    assert active.config_version == 2
++    assert active.peak_limit_kw == 40.0
++    assert active.battery_reserve_floor_percent == 25.0
++
++
++# AC10 #4
++async def test_activate_writes_one_audit_row_per_changed_field(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, conn = repo_with_conn
++    # First activation: previous is None, both fields are "changed" → 2 rows
++    await repo.activate(_input(25.0, 20.0), actor="installer")
++    assert await _audit_count(conn) == 2
++
++    # Second activation: only peak_limit changes → 1 audit row, with the right field
++    await repo.activate(_input(30.0, 20.0), actor="installer")
++    assert await _audit_count(conn) == 3
++    async with conn.execute(
++        "SELECT field, previous_value, new_value, config_version FROM config_audit_log"
++        " WHERE config_version = 2"
++    ) as cur:
++        rows = list(await cur.fetchall())
++    assert len(rows) == 1
++    assert rows[0]["field"] == "peak_consumption_limit"
++    assert json.loads(rows[0]["previous_value"]) == {"kw": 25.0}
++    assert json.loads(rows[0]["new_value"]) == {"kw": 30.0}
++
++    # Third activation: only reserve floor changes → 1 audit row labelled battery_reserve_floor
++    await repo.activate(_input(30.0, 25.0), actor="installer")
++    async with conn.execute("SELECT field FROM config_audit_log WHERE config_version = 3") as cur:
++        fields = [cast(aiosqlite.Row, r)[0] for r in await cur.fetchall()]
++    assert fields == ["battery_reserve_floor"]
++
++
++# AC10 #5
++async def test_activate_with_no_changes_raises(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, conn = repo_with_conn
++    await repo.activate(_input(25.0, 20.0), actor="installer")
++    before_active = await _active_count(conn)
++    before_audit = await _audit_count(conn)
++    with pytest.raises(ValueError, match="no changed fields"):
++        await repo.activate(_input(25.0, 20.0), actor="installer")
++    # No DB write
++    assert await _active_count(conn) == before_active
++    assert await _audit_count(conn) == before_audit
++
++
++# AC10 #6
++async def test_activate_with_invalid_actor_raises_no_db_write(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, conn = repo_with_conn
++    with pytest.raises(ValueError, match="Invalid actor"):
++        await repo.activate(_input(25.0, 20.0), actor="bogus")  # type: ignore[arg-type]
++    assert await _active_count(conn) == 0
++    assert await _audit_count(conn) == 0
++
++
++# AC10 #7 + #24 — atomicity under audit-insert failure
++async def test_activate_atomic_under_audit_failure(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, conn = repo_with_conn
++    # Hand the repo a stub audit_repo that raises mid-transaction
++    audit_stub = AsyncMock()
++    audit_stub.append_activation = AsyncMock(side_effect=RuntimeError("audit explode"))
++    repo_with_failing_audit = ConfigRepo(conn, audit_repo=audit_stub)
++
++    with pytest.raises(RuntimeError, match="audit explode"):
++        await repo_with_failing_audit.activate(_input(25.0, 20.0), actor="installer")
++
++    # Both tables must be unchanged — atomicity verified
++    assert await _active_count(conn) == 0
++    assert await _audit_count(conn) == 0
++
++
++# AC10 #8 — DB-side CHECK guard for peak_limit_kw
++async def test_db_check_constraint_rejects_zero_peak_limit_at_db_layer(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, conn = repo_with_conn
++    # Pydantic catches it earlier — bypass with a raw INSERT to verify the DB CHECK
++    with pytest.raises(aiosqlite.IntegrityError):
++        await conn.execute(
++            "INSERT INTO active_constraints"
++            " (peak_limit_kw, battery_reserve_floor_percent, config_version,"
++            "  activated_at, actor) VALUES (?, ?, ?, ?, ?)",
++            (0.0, 50.0, 1, "2026-05-10T00:00:00+00:00", "system"),
++        )
++
++
++# AC10 #9
++@pytest.mark.parametrize("n", [5])
++async def test_config_version_monotonic_across_n_activations(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++    n: int,
++) -> None:
++    repo, _ = repo_with_conn
++    versions: list[int] = []
++    for i in range(n):
++        v = await repo.activate(_input(25.0 + i, 20.0), actor="installer")
++        versions.append(v)
++    assert versions == list(range(1, n + 1))
++
++
++async def test_get_active_returns_active_constraints_typed_model(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    await repo.activate(_input(25.0, 20.0), actor="system")
++    active = await repo.get_active()
++    assert active is not None
++    # Pydantic frozen invariants preserved on retrieval
++    assert active.activated_at.tzinfo is not None
++    assert active.activated_at.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
++
++
++async def test_actor_value_is_persisted_on_active_row(
++    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
++) -> None:
++    repo, conn = repo_with_conn
++    await repo.activate(_input(25.0, 20.0), actor="installer")
++    async with conn.execute("SELECT actor FROM active_constraints") as cur:
++        rows = list(await cur.fetchall())
++    assert rows[0]["actor"] == "installer"
+diff --git a/tests/unit/test_settings_seed_only.py b/tests/unit/test_settings_seed_only.py
+new file mode 100644
+index 0000000..f817128
+--- /dev/null
++++ b/tests/unit/test_settings_seed_only.py
+@@ -0,0 +1,99 @@
++"""AC9: Settings.peak_limit_kw / Settings.battery_reserve_floor_percent are seed-only.
++
++Story 9.0b: at runtime PolicyGuard and ControlLoop read the two safety values
++via ``ActiveConstraintsProvider``; the only legal read of the ``Settings``
++fields is inside ``ActiveConstraintsProvider.hydrate()`` (the cold-start
++fallback when no installer activation has happened yet).
++
++This test greps the ``src/`` tree and fails if any module other than the
++allowed ones references ``settings.peak_limit_kw`` or
++``settings.battery_reserve_floor_percent``. CI failure on violation prevents
++the source-of-truth fragmentation R6 calls out.
++
++Allowed modules:
++
++* ``src/open_ems/settings.py`` — the field definitions themselves
++* ``src/open_ems/services/active_constraints.py`` — the provider's
++  cold-start seed branch
++* ``src/open_ems/__init__.py`` and any package ``__init__.py`` re-exports
++"""
++
++from __future__ import annotations
++
++import re
++from pathlib import Path
++
++# Forbidden pattern: a read of ``peak_limit_kw`` or
++# ``battery_reserve_floor_percent`` whose LHS identifier ends with
++# ``settings`` (e.g. ``settings.peak_limit_kw``,
++# ``self._settings.peak_limit_kw``). Reads of these attributes on an
++# ``ActiveConstraints`` / ``ActiveConstraintsInput`` instance (e.g.
++# ``constraints.peak_limit_kw``, ``input.peak_limit_kw``) are NOT flagged —
++# those are the contract by which the provider's snapshot is consumed.
++_FORBIDDEN_RE = re.compile(
++    r"(?:^|[^A-Za-z0-9_])"
++    r"_?settings"
++    r"\.(?:peak_limit_kw|battery_reserve_floor_percent)\b"
++)
++
++_PROJECT_ROOT = Path(__file__).resolve().parents[2]
++_SRC_ROOT = _PROJECT_ROOT / "src" / "open_ems"
++
++_ALLOWED_FILES: frozenset[Path] = frozenset(
++    {
++        _SRC_ROOT / "settings.py",
++        _SRC_ROOT / "services" / "active_constraints.py",
++        _SRC_ROOT / "core" / "constraints.py",
++    }
++)
++
++
++def _is_allowed(path: Path) -> bool:
++    if path in _ALLOWED_FILES:
++        return True
++    # Allow package re-export files (`__init__.py`) — they don't contain real
++    # logic, just imports / __all__ declarations.
++    if path.name == "__init__.py":
++        return True
++    return False
++
++
++def test_no_forbidden_settings_reads_at_runtime() -> None:
++    violations: list[tuple[Path, int, str]] = []
++    for py_path in _SRC_ROOT.rglob("*.py"):
++        if _is_allowed(py_path):
++            continue
++        text = py_path.read_text(encoding="utf-8")
++        for line_no, line in enumerate(text.splitlines(), start=1):
++            stripped = line.lstrip()
++            if stripped.startswith("#"):
++                continue
++            if _FORBIDDEN_RE.search(line):
++                violations.append((py_path, line_no, line.strip()))
++    assert not violations, (
++        "Forbidden Settings reads found — Story 9.0b AC9. "
++        "Runtime reads of peak_limit_kw / battery_reserve_floor_percent MUST "
++        "go through ActiveConstraintsProvider:\n"
++        + "\n".join(
++            f"  {path.relative_to(_PROJECT_ROOT)}:{ln}: {line}" for path, ln, line in violations
++        )
++    )
++
++
++def test_grep_test_actually_fails_on_a_seeded_violation() -> None:
++    """Sentinel: prove the grep is not a no-op.
++
++    The regex must match canonical forbidden reads AND must NOT match reads
++    against an ``ActiveConstraints`` / ``ActiveConstraintsInput`` instance
++    (which are the legal provider-snapshot reads).
++    """
++    # Forbidden patterns — the regex MUST match these.
++    assert _FORBIDDEN_RE.search("value = self._settings.peak_limit_kw\n")
++    assert _FORBIDDEN_RE.search("x = settings.battery_reserve_floor_percent + 1\n")
++    assert _FORBIDDEN_RE.search("if settings.peak_limit_kw > 0:\n")
++
++    # Allowed patterns — the regex MUST NOT match these.
++    assert not _FORBIDDEN_RE.search("limit = constraints.peak_limit_kw\n")
++    assert not _FORBIDDEN_RE.search("v = input.peak_limit_kw\n")
++    assert not _FORBIDDEN_RE.search("p = previous.battery_reserve_floor_percent\n")
++    assert not _FORBIDDEN_RE.search("q = snapshot.peak_limit_kw\n")

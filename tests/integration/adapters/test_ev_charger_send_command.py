@@ -34,6 +34,7 @@ from open_ems.engine import PolicyGuard, RetryPolicy
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
+from tests.fixtures.active_constraints import make_active_constraints_provider
 
 _NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
 
@@ -152,6 +153,7 @@ async def test_end_to_end_ev_charge_rate_success_via_set_charging_profile() -> N
             adapters={DeviceRole.ev_charger: ev_adapter},
             observability=obs,
             settings=settings,
+            active_constraints=make_active_constraints_provider(settings),
         )
         retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
@@ -208,6 +210,7 @@ async def test_end_to_end_ev_rejected_response_returns_rejected_no_retry() -> No
             adapters={DeviceRole.ev_charger: ev_adapter},
             observability=obs,
             settings=settings,
+            active_constraints=make_active_constraints_provider(settings),
         )
         retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
@@ -249,6 +252,7 @@ async def test_end_to_end_ev_stop_without_active_transaction_returns_failed() ->
             adapters={DeviceRole.ev_charger: ev_adapter},
             observability=obs,
             settings=settings,
+            active_constraints=make_active_constraints_provider(settings),
         )
 
         stop_cmd = StopEVChargingCommand(
@@ -293,6 +297,7 @@ async def test_end_to_end_ev_stop_after_start_transaction_dispatches_remote_stop
             adapters={DeviceRole.ev_charger: ev_adapter},
             observability=obs,
             settings=settings,
+            active_constraints=make_active_constraints_provider(settings),
         )
 
         stop_cmd = StopEVChargingCommand(
@@ -342,6 +347,7 @@ async def test_end_to_end_ev_charge_rate_timeout_returns_ocpp_command_timeout() 
             adapters={DeviceRole.ev_charger: ev_adapter},
             observability=obs,
             settings=settings,
+            active_constraints=make_active_constraints_provider(settings),
         )
 
         cmd = _ev_rate_command()

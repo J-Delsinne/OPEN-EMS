@@ -27,6 +27,7 @@ from open_ems.engine.rules.ev_scheduling import EVChargerIntent, EVChargerIntent
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.settings import Settings
+from tests.fixtures.active_constraints import make_active_constraints_provider
 
 _NOW = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
 
@@ -124,15 +125,17 @@ def _control_loop(
     if observability is None:
         observability = MagicMock(spec=ObservabilityService)
         observability.audit = AsyncMock(return_value=None)
+    settings = _settings()
     return ControlLoop(
         state_store=state_store or _state_store(),
         adapters=adapters or {},
         energy_repo=energy_repo,
-        settings=_settings(),
+        settings=settings,
         intent_executor=intent_executor or IntentExecutor(),
         retry_policy=retry_policy or _default_retry_policy_mock(),
         loop_liveness=loop_liveness,
         observability=observability,
+        active_constraints=make_active_constraints_provider(settings),
     )
 
 
@@ -157,6 +160,71 @@ async def test_poll_failure_converts_to_degraded_state() -> None:
     assert state.device_id == "grid-001"
     assert state.role is DeviceRole.grid_meter
     assert "read timed out" in state.reason
+
+
+async def test_evaluation_input_reads_constraints_from_provider_not_settings() -> None:
+    """AC10 #18: when the provider holds different values than ``Settings``,
+    ``_build_evaluation_input`` must use the PROVIDER values."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from open_ems.core.constraints import ActiveConstraints
+    from open_ems.services.active_constraints import ActiveConstraintsProvider
+    from open_ems.storage.repositories.config_repo import ConfigRepo
+
+    grid_adapter = MagicMock()
+    grid_adapter.device_id = "grid-001"
+    grid_adapter.get_state = AsyncMock(return_value=_grid_meter_state())
+    inverter_adapter = MagicMock()
+    inverter_adapter.device_id = "inv-001"
+    inverter_adapter.get_state = AsyncMock(return_value=_inverter_state())
+
+    settings = _settings()
+    # Build a provider whose snapshot disagrees with Settings on both fields.
+    provider = ActiveConstraintsProvider(repo=MagicMock(spec=ConfigRepo), settings=settings)
+    provider._current = ActiveConstraints(  # noqa: SLF001
+        peak_limit_kw=99.0,  # ≠ settings default
+        battery_reserve_floor_percent=42.0,  # ≠ settings default
+        config_version=7,
+        activated_at=datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC),
+    )
+    energy_repo = AsyncMock()
+    energy_repo.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
+    energy_repo.write_peak_interval = AsyncMock()
+    loop = ControlLoop(
+        state_store=_state_store(),
+        adapters={
+            DeviceRole.grid_meter: grid_adapter,
+            DeviceRole.inverter: inverter_adapter,
+        },
+        energy_repo=energy_repo,
+        settings=settings,
+        intent_executor=IntentExecutor(),
+        retry_policy=_default_retry_policy_mock(),
+        loop_liveness=LoopLiveness(
+            missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0
+        ),
+        observability=MagicMock(spec=ObservabilityService),
+        active_constraints=provider,
+    )
+    interval_start = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
+    _set_tracker_to_boundary(loop, interval_start)
+    now = datetime(2026, 5, 5, 12, 5, 0, tzinfo=UTC)
+
+    device_states = await loop._poll_adapters()  # noqa: SLF001
+    snapshot = await loop._state_store.publish(  # noqa: SLF001
+        device_states, operating_mode=None
+    )
+    eval_input = loop._build_evaluation_input(snapshot, now)  # noqa: SLF001
+
+    # PROVIDER values, not settings defaults.
+    assert eval_input.peak_context.configured_peak_limit_kw == 99.0
+    assert eval_input.battery_control.reserve_floor_percent == 42.0
+    # And those are NOT the Settings defaults.
+    assert eval_input.peak_context.configured_peak_limit_kw != settings.peak_limit_kw
+    assert (
+        eval_input.battery_control.reserve_floor_percent != settings.battery_reserve_floor_percent
+    )
 
 
 async def test_evaluation_input_constructed_from_fresh_snapshot() -> None:

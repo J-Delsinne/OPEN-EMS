@@ -1151,6 +1151,8 @@ The control loop evaluates the current set of `DegradedDeviceState` objects in e
 
 **Constraint that cannot be activated:** if validation returns a FAIL result, the `POST /actions/activate-constraints` endpoint returns 409 with a structured error body. The draft remains staged but inactive. The installer must revise the draft and re-validate.
 
+**Story 9.0b implementation note (2026-05-10):** Step 5's activation surface and step 6's "PolicyGuard reads active constraints" are implemented by `ActiveConstraintsProvider` (`open_ems.services.active_constraints`) and `ConfigRepo` (`open_ems.storage.repositories.config_repo`). `ConfigRepo.activate()` is a single `BEGIN IMMEDIATE` transaction that inserts a new row into `active_constraints` AND emits one `config_audit_log` row per changed field (delegating to `ConfigAuditRepo.append_activation` with `commit=False`), so the two tables can never disagree on `config_version`. The provider is hydrated once at lifespan startup (fail-loud `SystemExit(1)` on hydrate failure) and refreshed via `provider.reload()` after each activation commit — the reload is change-triggered, not TTL-based, because the activation endpoint is the only legitimate change source. `PolicyGuard` and `ControlLoop` share the same provider instance, eliminating the source-of-truth fragmentation the deferred Story 6.3 finding called out. The cold-start fallback (no DB row yet) seeds the in-memory snapshot from `Settings.peak_limit_kw` / `Settings.battery_reserve_floor_percent` with `config_version=0`; after the first installer activation those Settings fields are unread (enforced by `tests/unit/test_settings_seed_only.py`). Story 9.3 owns the draft / validate halves of the flow above.
+
 ---
 
 ### BAD-4: Deployment Validation Service

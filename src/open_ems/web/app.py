@@ -16,6 +16,7 @@ from open_ems.engine.intent_executor import IntentExecutor
 from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.logging_config import configure_logging
+from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.services.readiness import mark_ready, sd_notify
@@ -23,6 +24,7 @@ from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
+from open_ems.storage.repositories.config_repo import ConfigRepo
 from open_ems.storage.repositories.energy_repo import EnergyRepo
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
 from open_ems.storage.repositories.session_repo import SessionRepo
@@ -188,15 +190,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Step 1: Configure logging — all subsequent logs must be JSON
     configure_logging(settings.log_level)
 
-    # Step 2: Run Alembic migrations — fatal on failure (exits with code 1)
-    db_url = f"sqlite:///{settings.db_path}"
-    try:
-        await asyncio.to_thread(_run_alembic_upgrade, db_url, settings.alembic_ini_path)
-        logger.info("migrations_applied", component="startup")
-    except Exception:
-        logger.error("migration_failed", exc_info=True, component="startup")
-        raise SystemExit(1) from None
-
     # Step 3: Check system clock / NTP (blocking UDP — run in thread)
     clock_status = await asyncio.to_thread(
         check_clock, settings.ntp_host, settings.ntp_drift_threshold_seconds
@@ -212,14 +205,46 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         stale_threshold_seconds=settings.stale_threshold_seconds,
     )
 
-    # Step 4: Open database connection
-    await init_database(settings.db_path)
-
     _watchdog_task: asyncio.Task[None] | None = None
     _cleanup_task: asyncio.Task[None] | None = None
     _pruning_task: asyncio.Task[None] | None = None
     _control_loop_task: asyncio.Task[None] | None = None
+    db_initialized = False
     try:
+        # Step 2: Run Alembic migrations — fatal on failure (exits with code 1).
+        # Inside the outer try so close_database() in the `finally` cleans up
+        # any partial state if a later step raises before we've reached `yield`.
+        db_url = f"sqlite:///{settings.db_path}"
+        try:
+            await asyncio.to_thread(_run_alembic_upgrade, db_url, settings.alembic_ini_path)
+            logger.info("migrations_applied", component="startup")
+        except Exception:
+            logger.error("migration_failed", exc_info=True, component="startup")
+            raise SystemExit(1) from None
+
+        # Step 4: Open database connection
+        await init_database(settings.db_path)
+        db_initialized = True
+
+        # Step 4b: Hydrate the active-constraints provider BEFORE any consumer
+        # (PolicyGuard / ControlLoop) is constructed. A failure here means the
+        # process cannot determine its safety constraints — fail loud (Story
+        # 9.0b AC7), matching the migration-failure handling pattern.
+        try:
+            active_constraints_provider = ActiveConstraintsProvider(
+                repo=ConfigRepo(), settings=settings
+            )
+            await active_constraints_provider.hydrate()
+        except Exception:
+            logger.error(
+                "startup_failed",
+                reason="constraints_hydrate_failed",
+                exc_info=True,
+                component="startup",
+            )
+            raise SystemExit(1) from None
+        app.state.active_constraints_provider = active_constraints_provider
+
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
 
@@ -302,6 +327,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             adapters={},
             observability=observability,
             settings=settings,
+            active_constraints=active_constraints_provider,
         )
         retry_policy = RetryPolicy(
             policy_guard=policy_guard,
@@ -317,6 +343,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             retry_policy=retry_policy,
             loop_liveness=loop_liveness,
             observability=observability,
+            active_constraints=active_constraints_provider,
         )
 
         _control_loop_task = asyncio.create_task(_control_loop.run(), name="control_loop")
@@ -358,7 +385,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             except asyncio.CancelledError:
                 pass
     finally:
-        await close_database()
+        if db_initialized:
+            await close_database()
 
 
 def create_app() -> FastAPI:

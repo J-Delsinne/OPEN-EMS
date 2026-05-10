@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import aiosqlite
 
 from open_ems.engine.partial_interval_tracker import CompletedInterval
-from open_ems.storage.database import get_connection
+from open_ems.storage.database import get_connection, get_write_lock
 
 
 class EnergyRepo:
@@ -18,19 +18,20 @@ class EnergyRepo:
         *,
         data_quality: str = "complete",
     ) -> None:
-        async with self._conn.execute(
-            "INSERT OR REPLACE INTO peak_intervals"
-            " (interval_start_utc, avg_power_kw, sample_count, data_quality)"
-            " VALUES (?, ?, ?, ?)",
-            (
-                completed.interval_start_utc.isoformat(),
-                completed.avg_power_kw,
-                completed.sample_count,
-                data_quality,
-            ),
-        ):
-            pass
-        await self._conn.commit()
+        async with get_write_lock():
+            async with self._conn.execute(
+                "INSERT OR REPLACE INTO peak_intervals"
+                " (interval_start_utc, avg_power_kw, sample_count, data_quality)"
+                " VALUES (?, ?, ?, ?)",
+                (
+                    completed.interval_start_utc.isoformat(),
+                    completed.avg_power_kw,
+                    completed.sample_count,
+                    data_quality,
+                ),
+            ):
+                pass
+            await self._conn.commit()
 
     async def get_current_monthly_peak_kw(self) -> float:
         now = datetime.now(UTC)

@@ -34,7 +34,23 @@ class ConfigAuditRepo:
     def __init__(self, conn: aiosqlite.Connection | None = None) -> None:
         self._conn = conn if conn is not None else get_connection()
 
-    async def append_activation(self, *, actor: str, changes: Sequence[ConfigAuditChange]) -> int:
+    async def append_activation(
+        self,
+        *,
+        actor: str,
+        changes: Sequence[ConfigAuditChange],
+        config_version: int | None = None,
+        commit: bool = True,
+    ) -> int:
+        """Append one config_audit_log row per change.
+
+        ``config_version`` and ``commit`` exist so ``ConfigRepo.activate``
+        can drive a single atomic transaction that spans both
+        ``active_constraints`` and ``config_audit_log`` (Story 9.0b AC2):
+        the caller passes the version it has already chosen and skips the
+        local commit so the outer transaction commits both inserts together.
+        Direct callers (no outer transaction) get the legacy semantics.
+        """
         if actor not in VALID_CONFIG_AUDIT_ACTORS:
             raise ValueError(f"Invalid actor {actor!r}")
         if not changes:
@@ -52,13 +68,14 @@ class ConfigAuditRepo:
                 )
             )
 
-        async with self._conn.execute(
-            "SELECT COALESCE(MAX(config_version), 0) + 1 FROM config_audit_log"
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            raise RuntimeError("SQLite did not return a config version.")
-        config_version = int(row[0])
+        if config_version is None:
+            async with self._conn.execute(
+                "SELECT COALESCE(MAX(config_version), 0) + 1 FROM config_audit_log"
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                raise RuntimeError("SQLite did not return a config version.")
+            config_version = int(row[0])
         timestamp = datetime.now(UTC).isoformat()
 
         await self._conn.executemany(
@@ -70,7 +87,8 @@ class ConfigAuditRepo:
                 for field, previous_value, new_value in serialized_changes
             ],
         )
-        await self._conn.commit()
+        if commit:
+            await self._conn.commit()
         return config_version
 
 

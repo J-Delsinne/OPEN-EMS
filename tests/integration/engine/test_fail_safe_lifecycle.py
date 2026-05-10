@@ -34,6 +34,7 @@ from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.settings import Settings
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
 from open_ems.web.app import make_on_control_loop_done
+from tests.fixtures.active_constraints import make_active_constraints_provider
 
 _NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
 
@@ -199,11 +200,13 @@ async def test_fail_safe_full_lifecycle() -> None:
         DeviceRole.grid_meter: grid,
         DeviceRole.battery: battery,
     }
+    active_constraints = make_active_constraints_provider(settings)
     policy_guard = PolicyGuard(
         state_store=state_store,
         adapters=adapters,
         observability=obs,
         settings=settings,
+        active_constraints=active_constraints,
     )
     retry_policy = RetryPolicy(
         policy_guard=policy_guard,
@@ -224,6 +227,7 @@ async def test_fail_safe_full_lifecycle() -> None:
         retry_policy=retry_policy,
         loop_liveness=liveness,
         observability=obs,
+        active_constraints=active_constraints,
     )
 
     # Cycle 1: grid_meter + battery degraded → engine recommends fail_safe → enter

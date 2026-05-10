@@ -7,7 +7,8 @@ before any adapter ``send_command()`` is invoked. PolicyGuard:
 - rejects all commands when ``SystemOperatingMode.fail_safe`` is active,
 - enforces the declared device capability profile (no write without capability),
 - enforces safety constraints (battery reserve floor, peak limit bounds,
-  conservative-mode load suppression),
+  conservative-mode load suppression) — Story 9.0b: the two safety values
+  are read via ``ActiveConstraintsProvider``, not ``Settings``,
 - wraps adapter exceptions and timeouts as typed ``CommandResult`` values so
   raw exceptions never propagate to the control loop (AR16),
 - emits a ``CONSTRAINT`` audit event for every rejection (mandatory).
@@ -38,6 +39,7 @@ from open_ems.core.commands import (
 )
 from open_ems.core.devices import WriteCapability
 from open_ems.core.state import SystemSnapshot
+from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings
 
@@ -57,11 +59,13 @@ class PolicyGuard:
         adapters: Mapping[DeviceRole, DeviceAdapter],
         observability: ObservabilityService,
         settings: Settings,
+        active_constraints: ActiveConstraintsProvider,
     ) -> None:
         self._state_store = state_store
         self._adapters = adapters
         self._observability = observability
         self._settings = settings
+        self._active_constraints = active_constraints
 
     async def authorize_and_dispatch(self, command: DeviceCommand) -> CommandResult:
         snapshot = self._state_store.get_snapshot()
@@ -143,14 +147,16 @@ class PolicyGuard:
         command: DeviceCommand,
         snapshot: SystemSnapshot,
     ) -> str | None:
+        constraints = self._active_constraints.get()
+
         if isinstance(command, SetBatteryDischargeRateCommand) and isinstance(
             snapshot.battery, BatteryState
         ):
-            if snapshot.battery.soc_percent <= self._settings.battery_reserve_floor_percent:
+            if snapshot.battery.soc_percent <= constraints.battery_reserve_floor_percent:
                 return "battery_soc_at_or_below_reserve_floor"
 
         if isinstance(command, (SetBatteryChargeRateCommand, SetEVChargingRateCommand)):
-            if command.rate_kw > self._settings.peak_limit_kw:
+            if command.rate_kw > constraints.peak_limit_kw:
                 return "commanded_rate_exceeds_peak_limit"
 
         if snapshot.operating_mode is SystemOperatingMode.conservative and isinstance(

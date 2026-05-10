@@ -12,6 +12,13 @@ on ``recommended_operating_mode=fail_safe`` and emits a SYSTEM audit event on
 fresh fail-safe entry; and it gates fail-safe exit on the entry-time degraded
 roles having recovered AND the engine's recommendation no longer being
 ``fail_safe``.
+
+Story 9.0b update: ``_build_evaluation_input`` reads ``peak_limit_kw`` and
+``battery_reserve_floor_percent`` from the injected
+``ActiveConstraintsProvider`` rather than from ``Settings``. The provider is
+hydrated once at lifespan startup and atomically refreshed by the installer
+activation endpoint; this loop and ``PolicyGuard`` share the same provider
+instance, so within one evaluation cycle both layers see the same values.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from open_ems.engine import (
 )
 from open_ems.engine.intent_executor import IntentExecutor
 from open_ems.engine.retry_policy import RetryPolicy
+from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.settings import Settings
@@ -83,6 +91,7 @@ class ControlLoop:
         retry_policy: RetryPolicy,
         loop_liveness: LoopLiveness,
         observability: ObservabilityService,
+        active_constraints: ActiveConstraintsProvider,
     ) -> None:
         self._state_store = state_store
         self._adapters = adapters
@@ -92,6 +101,7 @@ class ControlLoop:
         self._retry_policy = retry_policy
         self._loop_liveness = loop_liveness
         self._observability = observability
+        self._active_constraints = active_constraints
         self._tracker = PartialIntervalTracker.from_current_time(at=datetime.now(UTC))
         self._monthly_peak_kw: float = 0.0
         self._last_mode: SystemOperatingMode | None = None
@@ -166,8 +176,9 @@ class ControlLoop:
         snapshot: SystemSnapshot,
         now: datetime,
     ) -> EvaluationInput:
+        constraints = self._active_constraints.get()
         peak_context = self._tracker.build_peak_context(
-            configured_peak_limit_kw=self._settings.peak_limit_kw,
+            configured_peak_limit_kw=constraints.peak_limit_kw,
             current_monthly_recorded_peak_kw=self._monthly_peak_kw,
             at=now,
         )
@@ -176,7 +187,7 @@ class ControlLoop:
             peak_context=peak_context,
             strategy=EnergyStrategy.maximize_self_consumption,
             battery_control=BatteryControlContext(
-                reserve_floor_percent=self._settings.battery_reserve_floor_percent,
+                reserve_floor_percent=constraints.battery_reserve_floor_percent,
                 capability_profile=None,
             ),
             ev_scheduling=EVSchedulingContext(

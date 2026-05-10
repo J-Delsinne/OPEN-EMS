@@ -35,6 +35,7 @@ from open_ems.engine.rules.ev_scheduling import EVChargerIntent, EVChargerIntent
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
+from tests.fixtures.active_constraints import make_active_constraints_provider
 
 _NOW = datetime(2026, 5, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -237,6 +238,7 @@ async def test_full_pipeline_with_idempotent_retry_recovery() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
@@ -269,6 +271,7 @@ async def test_full_pipeline_with_non_idempotent_fail_closed() -> None:
         adapters={DeviceRole.ev_charger: adapter},
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 

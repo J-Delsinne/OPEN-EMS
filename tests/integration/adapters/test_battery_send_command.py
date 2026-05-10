@@ -37,6 +37,7 @@ from open_ems.engine import PolicyGuard, RetryPolicy
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
+from tests.fixtures.active_constraints import make_active_constraints_provider
 
 _NOW = datetime(2026, 5, 10, 12, 0, 0, tzinfo=UTC)
 
@@ -198,6 +199,7 @@ async def test_end_to_end_battery_charge_success_writes_register() -> None:
         adapters={DeviceRole.battery: battery},
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
@@ -239,6 +241,7 @@ async def test_end_to_end_battery_timeout_reaches_policy_guard_with_modbus_reaso
         adapters={DeviceRole.battery: battery},
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
 
     cmd = _charge_command()
@@ -289,6 +292,7 @@ async def test_end_to_end_battery_retry_recovers_after_transient_modbus_error() 
         adapters={DeviceRole.battery: battery},
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
@@ -357,6 +361,7 @@ async def test_end_to_end_battery_adapter_internal_error_wrapped_not_propagated(
         adapters={DeviceRole.battery: battery},
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
 
     cmd = _charge_command()

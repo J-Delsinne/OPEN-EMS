@@ -35,6 +35,7 @@ from open_ems.engine.result import EvaluationResult
 from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
+from tests.fixtures.active_constraints import make_active_constraints_provider
 from tests.fixtures.scenarios import (
     SimulationScenario,
     _StubBatteryAdapter,
@@ -163,6 +164,7 @@ async def run_simulation_cycle(
         adapters=adapters,
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
@@ -303,6 +305,7 @@ async def test_below_reserve_policy_guard_rejection_isolated() -> None:
         adapters=adapters,
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 

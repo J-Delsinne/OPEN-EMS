@@ -24,20 +24,39 @@ from open_ems.core.commands import (
     SetEVChargingRateCommand,
     StopEVChargingCommand,
 )
+from open_ems.core.constraints import ActiveConstraints
 from open_ems.core.devices import (
     DeviceCapabilityProfile,
     ReadCapability,
     WriteCapability,
 )
 from open_ems.engine.policy_guard import PolicyGuard
+from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings
+from open_ems.storage.repositories.config_repo import ConfigRepo
 
 _NOW = datetime(2026, 5, 6, 12, 0, 0, tzinfo=UTC)
 
 
 def _settings() -> Settings:
     return Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def _active_constraints_provider(
+    settings: Settings | None = None,
+) -> ActiveConstraintsProvider:
+    """Build a pre-hydrated provider seeded from ``Settings`` for sync test fixtures."""
+    s = settings if settings is not None else _settings()
+    provider = ActiveConstraintsProvider(repo=MagicMock(spec=ConfigRepo), settings=s)
+    # Bypass async hydrate() in sync test setup by setting the cached snapshot directly.
+    provider._current = ActiveConstraints(  # noqa: SLF001
+        peak_limit_kw=s.peak_limit_kw,
+        battery_reserve_floor_percent=s.battery_reserve_floor_percent,
+        config_version=0,
+        activated_at=_NOW,
+    )
+    return provider
 
 
 def _state_store(operating_mode: SystemOperatingMode = SystemOperatingMode.normal) -> StateStore:
@@ -160,6 +179,7 @@ async def test_constraint_violation_rejected_with_audit_event() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     cmd = _discharge_command()
@@ -192,6 +212,7 @@ async def test_capability_missing_blocks_send_command() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -222,6 +243,7 @@ async def test_command_result_applied_false_is_not_treated_as_success() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -252,6 +274,7 @@ async def test_fail_safe_mode_rejects_all_commands() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_charge_command())
@@ -280,6 +303,7 @@ async def test_peak_limit_bounds_check_rejects_excessive_rate() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_charge_command(rate_kw=999.0))
@@ -303,6 +327,7 @@ async def test_adapter_exception_is_wrapped_as_failed_command_result() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -324,6 +349,7 @@ async def test_adapter_timeout_is_wrapped_as_timeout_command_result() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -342,6 +368,7 @@ async def test_adapter_not_registered_is_rejected() -> None:
         adapters={},  # no adapter for battery role
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -366,6 +393,7 @@ async def test_capability_check_failure_is_rejected() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -399,6 +427,7 @@ async def test_conservative_mode_blocks_discharge() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -421,6 +450,7 @@ async def test_successful_dispatch_returns_adapter_result_no_audit() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_discharge_command())
@@ -456,6 +486,7 @@ async def test_stop_ev_command_requires_set_ev_charge_current_capability() -> No
         adapters={DeviceRole.ev_charger: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     result = await guard.authorize_and_dispatch(_stop_ev_command())
@@ -483,6 +514,7 @@ async def test_command_dispatch_timeout_is_caught_via_wait_for() -> None:
             adapters={DeviceRole.battery: adapter},
             observability=obs,
             settings=_settings(),
+            active_constraints=_active_constraints_provider(),
         )
         result = await guard.authorize_and_dispatch(_discharge_command())
 
@@ -510,6 +542,7 @@ async def test_reject_audit_includes_correlation_id_in_detail() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=_settings(),
+        active_constraints=_active_constraints_provider(),
     )
 
     cmd = _discharge_command()

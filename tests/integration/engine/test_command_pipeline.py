@@ -30,6 +30,7 @@ from open_ems.engine import EvaluationResult, IntentExecutor, PolicyGuard, Retry
 from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings
+from tests.fixtures.active_constraints import make_active_constraints_provider
 
 _NOW = datetime(2026, 5, 6, 12, 0, 0, tzinfo=UTC)
 
@@ -139,6 +140,7 @@ async def test_full_pipeline_allowed_path() -> None:
         adapters={DeviceRole.battery: adapter},
         observability=obs,
         settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
     retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
@@ -165,11 +167,13 @@ async def test_full_pipeline_rejected_path() -> None:
     store = await _state_store_with_battery(soc_percent=20.0)  # at reserve floor
     adapter = SimulatedBatteryAdapter()
     obs, audit_spy = _observability_with_audit_spy()
+    settings = _settings()
     guard = PolicyGuard(
         state_store=store,
         adapters={DeviceRole.battery: adapter},
         observability=obs,
-        settings=_settings(),
+        settings=settings,
+        active_constraints=make_active_constraints_provider(settings),
     )
 
     discharge = SetBatteryDischargeRateCommand(
