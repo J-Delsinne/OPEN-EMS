@@ -1,4 +1,10 @@
-"""Runtime control loop: polls adapters, publishes StateStore, runs decision engine each tick."""
+"""Runtime control loop: polls adapters, publishes StateStore, runs decision engine each tick.
+
+Story 8.3 update: the loop dispatches commands through ``RetryPolicy.execute()``
+rather than calling ``PolicyGuard.authorize_and_dispatch()`` directly. RetryPolicy
+owns retry behaviour, idempotency gating, and the final-failure DEVICE audit
+event; this module no longer logs per-command outcomes.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +35,7 @@ from open_ems.engine import (
     evaluate_cycle,
 )
 from open_ems.engine.intent_executor import IntentExecutor
-from open_ems.engine.policy_guard import PolicyGuard
+from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.settings import Settings
 from open_ems.storage.repositories.energy_repo import EnergyRepo
 
@@ -49,14 +55,14 @@ class ControlLoop:
         energy_repo: EnergyRepo,
         settings: Settings,
         intent_executor: IntentExecutor,
-        policy_guard: PolicyGuard,
+        retry_policy: RetryPolicy,
     ) -> None:
         self._state_store = state_store
         self._adapters = adapters
         self._energy_repo = energy_repo
         self._settings = settings
         self._intent_executor = intent_executor
-        self._policy_guard = policy_guard
+        self._retry_policy = retry_policy
         self._tracker = PartialIntervalTracker.from_current_time(at=datetime.now(UTC))
         self._monthly_peak_kw: float = 0.0
         self._last_mode: SystemOperatingMode | None = None
@@ -153,7 +159,7 @@ class ControlLoop:
         result: EvaluationResult,
         snapshot: SystemSnapshot,
     ) -> None:
-        """Translate intents to commands and dispatch them through PolicyGuard."""
+        """Translate intents to commands and dispatch them through RetryPolicy."""
         self._last_mode = result.recommended_operating_mode
         logger.debug(
             "evaluation_cycle_complete",
@@ -165,15 +171,7 @@ class ControlLoop:
         )
         commands = self._intent_executor.translate(result, snapshot)
         for cmd in commands:
-            cmd_result = await self._policy_guard.authorize_and_dispatch(cmd)
-            if not cmd_result.applied:
-                logger.warning(
-                    "command_not_applied",
-                    device_id=cmd_result.device_id,
-                    status=cmd_result.status.value,
-                    reason=cmd_result.reason,
-                    component="engine",
-                )
+            await self._retry_policy.execute(cmd)
 
 
 def _extract_grid_power(

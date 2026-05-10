@@ -1,15 +1,27 @@
 """Device command and result models for the Epic 8 control execution layer.
 
-Two-stage pipeline (Story 8.2):
+Three-stage pipeline (Story 8.3 adds RetryPolicy on top of Story 8.2):
 
     EvaluationResult.intents
         ↓ IntentExecutor.translate()
     list[DeviceCommand]
-        ↓ PolicyGuard.authorize_and_dispatch()
-    CommandResult
+        ↓ RetryPolicy.execute()                 (calls PolicyGuard 1..N times)
+            ↓ PolicyGuard.authorize_and_dispatch()
+                ↓ adapter.send_command()
+    CommandResult (final, after all retries)
 
 PolicyGuard is the single mandatory dispatch path (AR15). Adapters never receive
 ``send_command()`` calls from any other component.
+
+Idempotency classification (``is_idempotent: ClassVar[bool]``) is intrinsic to
+the command type and lives at the class level — NOT as a Pydantic field — so it
+cannot be overridden per instance and so ``ConfigDict(extra="forbid")`` does not
+reject it as an unexpected init kwarg. Setpoint commands (battery / EV rate)
+are idempotent: re-applying converges to the same physical state. Session
+transitions (``StopEVChargingCommand``) are NOT idempotent: re-issuing a stop
+risks affecting a subsequent OCPP session that started between attempts. Any
+new command subtype MUST declare ``is_idempotent`` explicitly — the base does
+not provide a default to force the author to think about it.
 
 CommandResult.status uses these values per Story 8.2 acceptance criteria:
 ``success``, ``failed``, ``timeout``, ``rejected``.
@@ -19,9 +31,9 @@ from __future__ import annotations
 
 import enum
 import uuid
-from typing import Annotated, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from open_ems.core.devices import DegradedDeviceState, DeviceRole, DeviceState, NonEmptyStr
 
@@ -54,23 +66,39 @@ class DeviceCommandBase(BaseModel):
     origin: CommandOrigin
     correlation_id: uuid.UUID = Field(default_factory=uuid.uuid4)
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Force every concrete command subtype to declare ``is_idempotent`` in its OWN
+        # ``__dict__`` — silent inheritance from a sibling subtype would let a future
+        # "stop-like" command auto-classify as idempotent if it inherited from a
+        # rate-setpoint command. Idempotency is intrinsic to each command type and
+        # must be a deliberate choice.
+        super().__init_subclass__(**kwargs)
+        if "is_idempotent" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} must declare ``is_idempotent: ClassVar[bool]`` in its own body"
+            )
+
 
 class SetBatteryChargeRateCommand(DeviceCommandBase):
+    is_idempotent: ClassVar[bool] = True
     command_type: Literal["set_battery_charge_rate"] = "set_battery_charge_rate"
     rate_kw: Annotated[float, Field(ge=0.0)]
 
 
 class SetBatteryDischargeRateCommand(DeviceCommandBase):
+    is_idempotent: ClassVar[bool] = True
     command_type: Literal["set_battery_discharge_rate"] = "set_battery_discharge_rate"
     rate_kw: Annotated[float, Field(ge=0.0)]
 
 
 class SetEVChargingRateCommand(DeviceCommandBase):
+    is_idempotent: ClassVar[bool] = True
     command_type: Literal["set_ev_charging_rate"] = "set_ev_charging_rate"
     rate_kw: Annotated[float, Field(ge=0.0)]
 
 
 class StopEVChargingCommand(DeviceCommandBase):
+    is_idempotent: ClassVar[bool] = False
     command_type: Literal["stop_ev_charging"] = "stop_ev_charging"
 
 
@@ -97,3 +125,16 @@ class CommandResult(BaseModel):
     applied: bool
     reason: str
     observed_state: DeviceState | DegradedDeviceState | None = None
+
+    @model_validator(mode="after")
+    def _applied_iff_success(self) -> CommandResult:
+        # ``applied`` and ``status==success`` must agree. A malformed adapter result
+        # like ``applied=True, status=failed`` would otherwise short-circuit RetryPolicy
+        # into treating the command as successful.
+        if self.applied and self.status is not CommandStatus.success:
+            raise ValueError(
+                f"applied=True requires status=success (got status={self.status.value!r})"
+            )
+        if not self.applied and self.status is CommandStatus.success:
+            raise ValueError("status=success requires applied=True")
+        return self

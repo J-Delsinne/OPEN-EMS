@@ -14,6 +14,7 @@ from open_ems.core import StateStore
 from open_ems.engine.control_loop import ControlLoop
 from open_ems.engine.intent_executor import IntentExecutor
 from open_ems.engine.policy_guard import PolicyGuard
+from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.logging_config import configure_logging
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.services.readiness import mark_ready, sd_notify
@@ -220,10 +221,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("event_log_pruning_task_started", component="observability")
 
         intent_executor = IntentExecutor()
+        observability = ObservabilityService()
         policy_guard = PolicyGuard(
             state_store=app.state.state_store,
             adapters={},
-            observability=ObservabilityService(),
+            observability=observability,
+            settings=settings,
+        )
+        retry_policy = RetryPolicy(
+            policy_guard=policy_guard,
+            observability=observability,
             settings=settings,
         )
         _control_loop = ControlLoop(
@@ -232,7 +239,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             energy_repo=EnergyRepo(),
             settings=settings,
             intent_executor=intent_executor,
-            policy_guard=policy_guard,
+            retry_policy=retry_policy,
         )
 
         def _on_control_loop_done(t: asyncio.Task[None]) -> None:

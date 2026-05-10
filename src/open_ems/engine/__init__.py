@@ -14,6 +14,7 @@ from open_ems.engine.operating_mode import derive_recommended_operating_mode
 from open_ems.engine.partial_interval_tracker import CompletedInterval, PartialIntervalTracker
 from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.engine.result import EvaluationResult
+from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.engine.rules.battery_control import (
     BatteryIntent,
     BatteryIntentAction,
@@ -59,6 +60,7 @@ __all__ = [
     "PeakLimitDecision",
     "PolicyGuard",
     "PriorityBand",
+    "RetryPolicy",
     "StrategyEvaluation",
     "derive_recommended_operating_mode",
     "evaluate_cycle",

@@ -13,12 +13,13 @@ from open_ems.core import (
     StateStore,
     SystemOperatingMode,
 )
+from open_ems.core.commands import CommandResult, CommandStatus
 from open_ems.core.state import ClockStatus
 from open_ems.engine import (
     EvaluationResult,
     IntentExecutor,
     PartialIntervalTracker,
-    PolicyGuard,
+    RetryPolicy,
 )
 from open_ems.engine.control_loop import ControlLoop
 from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
@@ -86,13 +87,27 @@ def _evaluation_result(
     )
 
 
+def _default_retry_policy_mock() -> MagicMock:
+    rp = MagicMock(spec=RetryPolicy)
+    rp.execute = AsyncMock(
+        return_value=CommandResult(
+            correlation_id=uuid.uuid4(),
+            device_id="x",
+            status=CommandStatus.success,
+            applied=True,
+            reason="ok",
+        )
+    )
+    return rp
+
+
 def _control_loop(
     *,
     adapters: dict[DeviceRole, Any] | None = None,
     energy_repo: AsyncMock | None = None,
     state_store: StateStore | None = None,
     intent_executor: IntentExecutor | None = None,
-    policy_guard: PolicyGuard | MagicMock | None = None,
+    retry_policy: RetryPolicy | MagicMock | None = None,
 ) -> ControlLoop:
     if energy_repo is None:
         energy_repo = AsyncMock()
@@ -104,7 +119,7 @@ def _control_loop(
         energy_repo=energy_repo,
         settings=_settings(),
         intent_executor=intent_executor or IntentExecutor(),
-        policy_guard=policy_guard or MagicMock(spec=PolicyGuard),
+        retry_policy=retry_policy or _default_retry_policy_mock(),
     )
 
 
@@ -285,45 +300,38 @@ async def test_peak_intervals_not_skipped_in_degraded_mode() -> None:
     loop._energy_repo.write_peak_interval.assert_called_once()  # noqa: SLF001
 
 
-async def test_handle_evaluation_result_logs_warning_when_command_not_applied() -> None:
-    """ControlLoop logs 'command_not_applied' when PolicyGuard returns applied=False (AC6, AC8)."""
-    from open_ems.core.commands import (
-        CommandOrigin,
-        CommandResult,
-        CommandStatus,
-        SetBatteryChargeRateCommand,
-    )
+async def test_control_loop_dispatches_via_retry_policy_not_policy_guard() -> None:
+    """AC7 + AC10 #15: loop awaits RetryPolicy.execute per command; never calls PolicyGuard."""
+    from open_ems.core.commands import CommandOrigin, SetBatteryChargeRateCommand
+    from open_ems.engine import PolicyGuard
 
-    not_applied = CommandResult(
-        correlation_id=uuid.uuid4(),
-        device_id="bat-001",
-        status=CommandStatus.failed,
-        applied=False,
-        reason="device_not_ready",
-    )
     cmd = SetBatteryChargeRateCommand(
         device_id="bat-001",
         device_role=DeviceRole.battery,
         origin=CommandOrigin.decision_engine,
         rate_kw=2.0,
     )
-    mock_guard = AsyncMock(spec=PolicyGuard)
-    mock_guard.authorize_and_dispatch = AsyncMock(return_value=not_applied)
+    success = CommandResult(
+        correlation_id=cmd.correlation_id,
+        device_id="bat-001",
+        status=CommandStatus.success,
+        applied=True,
+        reason="ok",
+    )
+    mock_retry = MagicMock(spec=RetryPolicy)
+    mock_retry.execute = AsyncMock(return_value=success)
+    mock_guard = MagicMock(spec=PolicyGuard)
+    mock_guard.authorize_and_dispatch = AsyncMock()
     mock_executor = MagicMock(spec=IntentExecutor)
     mock_executor.translate = MagicMock(return_value=[cmd])
 
-    loop = _control_loop(intent_executor=mock_executor, policy_guard=mock_guard)
+    loop = _control_loop(intent_executor=mock_executor, retry_policy=mock_retry)
     snapshot = loop._state_store.get_snapshot()  # noqa: SLF001
 
-    with patch("open_ems.engine.control_loop.logger") as mock_logger:
-        await loop._handle_evaluation_result(_evaluation_result(), snapshot)  # noqa: SLF001
+    await loop._handle_evaluation_result(_evaluation_result(), snapshot)  # noqa: SLF001
 
-    mock_logger.warning.assert_called_once()
-    call = mock_logger.warning.call_args
-    assert call.args[0] == "command_not_applied"
-    assert call.kwargs["device_id"] == "bat-001"
-    assert call.kwargs["status"] == CommandStatus.failed.value
-    assert call.kwargs["reason"] == "device_not_ready"
+    mock_retry.execute.assert_awaited_once_with(cmd)
+    mock_guard.authorize_and_dispatch.assert_not_called()
 
 
 async def test_peak_intervals_not_skipped_in_fail_safe_mode() -> None:

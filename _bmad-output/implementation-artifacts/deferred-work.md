@@ -1,5 +1,11 @@
 # Deferred Work Log
 
+## Deferred from: code review of 8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement (2026-05-06)
+
+- **`asyncio.sleep` between attempts not shielded against cancellation** [`src/open_ems/engine/retry_policy.py:82-83`] — control-loop shutdown or task cancellation while RetryPolicy is in a backoff sleep propagates `CancelledError` immediately; the in-flight retry is silently dropped and no DEVICE audit is emitted, so post-mortem cannot reconstruct that a command was partially attempted before shutdown; broader cancellation policy belongs to Story 8.4 watchdog work.
+- **No test for heterogeneous retry-status sequences** [`tests/unit/engine/test_retry_policy.py`] — all multi-failure tests use homogeneous `_failed_result` sequences; transient → timeout → rejected progressions are not exercised, and the audit summary only carries the final reason so operators cannot diagnose drift across retries; coverage gap, not a bug.
+- **`RetryPolicy.execute` has no per-device serialization** [`src/open_ems/engine/retry_policy.py`] — the control loop dispatches sequentially today, but a future external caller (Epic 9 installer overrides, Epic 10 homeowner overrides) could call `execute()` concurrently with the control loop for the same device; competing retry cycles would race and the safety re-check window between attempts is shared; deliberately out of scope per Dev Notes "deferred items".
+
 ## Deferred from: code review of 8-2-implement-intentexecutor-policyguard-and-command-dispatch (2026-05-06)
 
 - **Control loop crash not restarted after unhandled exception** [`control_loop.py`, `app.py:_on_control_loop_done`] — callback logs `control_loop_died` at ERROR but takes no recovery action; a single unhandled exception permanently halts device control for the process lifetime; Story 8.4 (watchdog + fail-safe transition) is the correct fix scope.

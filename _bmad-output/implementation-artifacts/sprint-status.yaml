@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-06'  # 8-2 done: code review complete, all patches applied
+last_updated: '2026-05-07'  # 8-3 done: code review applied 6 patches; 822 tests passing
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -108,7 +108,7 @@ development_status:
   8-0b-implement-partialintervaltracker-contract-and-implementation: done
   8-1-implement-the-runtime-control-loop-with-adapter-polling-and-statestore-publishing: done
   8-2-implement-intentexecutor-policyguard-and-command-dispatch: done
-  8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement: backlog
+  8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement: done
   8-4-implement-watchdog-heartbeat-stalled-loop-detection-fail-safe-transition-and-recovery: backlog
   8-5-end-to-end-decision-engine-simulation: backlog
   epic-8-retrospective: optional
