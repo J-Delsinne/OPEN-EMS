@@ -162,7 +162,8 @@ async def test_constraint_violation_rejected_with_audit_event() -> None:
         settings=_settings(),
     )
 
-    result = await guard.authorize_and_dispatch(_discharge_command())
+    cmd = _discharge_command()
+    result = await guard.authorize_and_dispatch(cmd)
 
     assert result.status is CommandStatus.rejected
     assert result.applied is False
@@ -171,6 +172,11 @@ async def test_constraint_violation_rejected_with_audit_event() -> None:
     kwargs = audit_spy.await_args.kwargs
     assert kwargs["event_type"] == "CONSTRAINT"
     assert kwargs["actor"] == "system"
+    # Story 8.5 AC9: rejection audit detail carries correlation_id
+    detail = kwargs["detail"]
+    assert detail["correlation_id"] == str(cmd.correlation_id)
+    assert detail["command_type"] == "SetBatteryDischargeRateCommand"
+    assert detail["rejection_reason"] == "battery_soc_at_or_below_reserve_floor"
     adapter.send_command.assert_not_awaited()
 
 
@@ -482,3 +488,38 @@ async def test_command_dispatch_timeout_is_caught_via_wait_for() -> None:
 
     assert result.status is CommandStatus.timeout
     assert result.applied is False
+
+
+# ─── Story 8.5 AC12 #7 — _reject audit detail.correlation_id ───────────────────
+
+
+async def test_reject_audit_includes_correlation_id_in_detail() -> None:
+    """AC12 #7: any PolicyGuard rejection branch carries correlation_id in audit detail.
+
+    Drives the capability-missing branch (cheapest to set up) — the detail-field
+    contract is identical across all rejection branches because it's centralised
+    in ``_reject``.
+    """
+    store = _state_store()
+    await _publish_battery(store, soc_percent=80.0)
+    adapter = _adapter(write_caps=frozenset())  # no write capabilities
+    obs, audit_spy = _observability_with_audit_spy()
+
+    guard = PolicyGuard(
+        state_store=store,
+        adapters={DeviceRole.battery: adapter},
+        observability=obs,
+        settings=_settings(),
+    )
+
+    cmd = _discharge_command()
+    result = await guard.authorize_and_dispatch(cmd)
+
+    assert result.status is CommandStatus.rejected
+    audit_spy.assert_awaited_once()
+    kwargs = audit_spy.await_args.kwargs
+    assert kwargs["event_type"] == "CONSTRAINT"
+    detail = kwargs["detail"]
+    assert detail["correlation_id"] == str(cmd.correlation_id)
+    assert detail["command_type"] == "SetBatteryDischargeRateCommand"
+    assert "capability_missing" in detail["rejection_reason"]

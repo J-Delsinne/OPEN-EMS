@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-10'  # 8-4 code review applied: 13 patches landed (1 dismissed, 1 deferred); 858 tests, all gates green
+last_updated: '2026-05-10'  # 8-5 review complete (end-to-end decision engine simulation → done)
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -110,7 +110,7 @@ development_status:
   8-2-implement-intentexecutor-policyguard-and-command-dispatch: done
   8-3-implement-retry-policy-timeout-handling-and-idempotency-enforcement: done
   8-4-implement-watchdog-heartbeat-stalled-loop-detection-fail-safe-transition-and-recovery: done
-  8-5-end-to-end-decision-engine-simulation: backlog
+  8-5-end-to-end-decision-engine-simulation: done
   epic-8-retrospective: optional
 
   # ─── Epic 9: Installer Site Setup and Deployment Validation ────────────────

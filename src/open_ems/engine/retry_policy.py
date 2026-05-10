@@ -19,8 +19,14 @@ Behaviour summary (see story 8.3 ACs for full details):
   emits exactly ONE ``ObservabilityService.audit(event_type="DEVICE")`` event
   and returns the last result. PolicyGuard's separate ``CONSTRAINT`` audit
   events for rejections are unchanged.
-- Successful commands (any attempt count) emit NO audit event from this
-  layer — only a debug log (event-log flooding would defeat its purpose).
+- Successful commands (any attempt count) emit exactly ONE
+  ``ObservabilityService.audit(event_type="DECISION")`` event from this layer
+  per Story 8.5 AC1 — closing the audit_log gap for control decisions called
+  out in architecture.md:312-316. DEVICE and DECISION are mutually exclusive
+  per command: a successful command emits ONE DECISION audit, a terminal-
+  failure command emits ONE DEVICE audit, never both, never neither. A
+  cancellation emits a DEVICE audit per Story 8.4 AC7 (the indeterminate
+  outcome) — never a DECISION audit.
 
 Per-attempt timeout is owned by PolicyGuard
 (``COMMAND_DISPATCH_TIMEOUT_SECONDS``). RetryPolicy does NOT add another
@@ -92,6 +98,17 @@ class RetryPolicy:
                         correlation_id=str(command.correlation_id),
                         component="engine",
                     )
+                    # Structured-log floor — emitted BEFORE the audit so the
+                    # dispatch is recorded even if the audit DB write fails.
+                    logger.info(
+                        "command_dispatched",
+                        device_id=command.device_id,
+                        command_type=type(command).__name__,
+                        correlation_id=str(command.correlation_id),
+                        attempts=attempt,
+                        component="engine",
+                    )
+                    await self._emit_success_audit(command, last_result, attempts=attempt)
                     return last_result
                 if not command.is_idempotent:
                     logger.debug(
@@ -113,6 +130,50 @@ class RetryPolicy:
         except asyncio.CancelledError:
             await self._emit_cancellation_audit(command, attempts=attempt)
             raise
+
+    async def _emit_success_audit(
+        self,
+        command: DeviceCommand,
+        result: CommandResult,
+        *,
+        attempts: int,
+    ) -> None:
+        """Emit a DECISION audit event on the success path (Story 8.5 AC1).
+
+        Mirrors the failure-audit shielding pattern: any exception from the
+        audit DB write is logged via ``audit_emit_failed`` and swallowed so
+        the dispatch return is never blocked by audit-layer faults. The
+        ``command_dispatched`` info log emitted upstream is the floor.
+        """
+        summary = (
+            f"Command {type(command).__name__} for {command.device_id} "
+            f"dispatched: success (applied={result.applied}) after {attempts} attempt(s)"
+        )
+        try:
+            await self._observability.audit(
+                actor="system",
+                event_type="DECISION",
+                summary=summary,
+                device_id=command.device_id,
+                detail={
+                    "correlation_id": str(command.correlation_id),
+                    "command_type": type(command).__name__,
+                    "command_status": "success",
+                    "applied": result.applied,
+                    "attempts": attempts,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — audit failure must not mask successful dispatch
+            logger.error(
+                "audit_emit_failed",
+                device_id=command.device_id,
+                command_type=type(command).__name__,
+                attempts=attempts,
+                correlation_id=str(command.correlation_id),
+                error=repr(exc),
+                exc_info=True,
+                component="engine",
+            )
 
     async def _emit_cancellation_audit(
         self,
@@ -150,6 +211,12 @@ class RetryPolicy:
                 event_type="DEVICE",
                 summary=audit_summary,
                 device_id=command.device_id,
+                detail={
+                    "correlation_id": str(command.correlation_id),
+                    "command_type": type(command).__name__,
+                    "command_status": "cancelled",
+                    "attempts": attempts,
+                },
             )
         except Exception as exc:  # noqa: BLE001 — audit failure must not mask cancellation
             logger.error(
@@ -186,6 +253,14 @@ class RetryPolicy:
                 event_type="DEVICE",
                 summary=summary,
                 device_id=command.device_id,
+                detail={
+                    "correlation_id": str(command.correlation_id),
+                    "command_type": type(command).__name__,
+                    "command_status": result.status.value,
+                    "applied": result.applied,
+                    "attempts": attempts,
+                    "final_reason": result.reason,
+                },
             )
         except Exception as exc:  # noqa: BLE001 — audit failure must not mask command failure
             logger.error(

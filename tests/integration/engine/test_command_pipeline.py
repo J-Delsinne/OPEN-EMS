@@ -26,7 +26,7 @@ from open_ems.core.devices import (
     ReadCapability,
     WriteCapability,
 )
-from open_ems.engine import EvaluationResult, IntentExecutor, PolicyGuard
+from open_ems.engine import EvaluationResult, IntentExecutor, PolicyGuard, RetryPolicy
 from open_ems.engine.rules.battery_control import BatteryIntent, BatteryIntentAction
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings
@@ -123,17 +123,24 @@ def _observability_with_audit_spy() -> tuple[ObservabilityService, AsyncMock]:
 
 
 async def test_full_pipeline_allowed_path() -> None:
-    """BatteryIntent(charge) → IntentExecutor → command → PolicyGuard → adapter (success)."""
+    """BatteryIntent(charge) → IntentExecutor → RetryPolicy → PolicyGuard → adapter (success).
+
+    Story 8.5 AC11 / AC1: the success path now emits exactly ONE DECISION audit
+    via RetryPolicy. The full pipeline is therefore wired through RetryPolicy so
+    the audit contract is exercised end-to-end.
+    """
     store = await _state_store_with_battery(soc_percent=80.0)
     adapter = SimulatedBatteryAdapter()
     obs, audit_spy = _observability_with_audit_spy()
     executor = IntentExecutor()
+    settings = _settings()
     guard = PolicyGuard(
         state_store=store,
         adapters={DeviceRole.battery: adapter},
         observability=obs,
-        settings=_settings(),
+        settings=settings,
     )
+    retry = RetryPolicy(policy_guard=guard, observability=obs, settings=settings)
 
     snapshot = store.get_snapshot()
     commands = executor.translate(_result_with(_battery_charge_intent()), snapshot)
@@ -141,12 +148,16 @@ async def test_full_pipeline_allowed_path() -> None:
     assert isinstance(commands[0], SetBatteryChargeRateCommand)
     assert commands[0].origin is CommandOrigin.decision_engine
 
-    cmd_result = await guard.authorize_and_dispatch(commands[0])
+    cmd_result = await retry.execute(commands[0])
 
     assert cmd_result.status is CommandStatus.success
     assert cmd_result.applied is True
     assert len(adapter.send_command_calls) == 1
-    audit_spy.assert_not_awaited()  # success path emits NO CONSTRAINT event
+    audit_spy.assert_awaited_once()
+    kwargs = audit_spy.await_args.kwargs
+    assert kwargs["event_type"] == "DECISION"
+    assert kwargs["device_id"] == "bat-001"
+    assert kwargs["detail"]["correlation_id"] == str(commands[0].correlation_id)
 
 
 async def test_full_pipeline_rejected_path() -> None:
@@ -177,3 +188,7 @@ async def test_full_pipeline_rejected_path() -> None:
     kwargs = audit_spy.await_args.kwargs
     assert kwargs["event_type"] == "CONSTRAINT"
     assert kwargs["actor"] == "system"
+    # Story 8.5 AC9: rejection audit detail carries correlation_id
+    assert kwargs["detail"]["correlation_id"] == str(discharge.correlation_id)
+    assert kwargs["detail"]["command_type"] == "SetBatteryDischargeRateCommand"
+    assert kwargs["detail"]["rejection_reason"] == "battery_soc_at_or_below_reserve_floor"

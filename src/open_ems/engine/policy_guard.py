@@ -167,6 +167,11 @@ class PolicyGuard:
                 event_type="CONSTRAINT",
                 summary=f"Command rejected: {reason}",
                 device_id=command.device_id,
+                detail={
+                    "correlation_id": str(command.correlation_id),
+                    "command_type": type(command).__name__,
+                    "rejection_reason": reason,
+                },
             )
         except Exception:  # noqa: BLE001 — audit failure must not prevent rejection return
             logger.error(

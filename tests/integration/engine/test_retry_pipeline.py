@@ -220,7 +220,12 @@ def _audit_spy_observability() -> tuple[ObservabilityService, AsyncMock]:
 
 
 async def test_full_pipeline_with_idempotent_retry_recovery() -> None:
-    """AC10 #16: BatteryIntent(charge) recovers after 2 transient failures; ZERO audit events."""
+    """AC10 #16 / Story 8.5 AC11: BatteryIntent(charge) recovers after 2 transient failures.
+
+    Story 8.5 AC1 changed the success-path contract: a recovered command now
+    emits exactly ONE DECISION audit (with attempts=3: 2 failures + 1 success)
+    instead of ZERO audit events.
+    """
     store = await _state_store_with_battery()
     adapter = SimulatedBatteryAdapter(failure_count=2)
     obs, audit_spy = _audit_spy_observability()
@@ -244,7 +249,11 @@ async def test_full_pipeline_with_idempotent_retry_recovery() -> None:
     assert cmd_result.status is CommandStatus.success
     assert cmd_result.applied is True
     assert len(adapter.send_command_calls) == 3  # 2 failures + 1 success
-    audit_spy.assert_not_awaited()  # ZERO DEVICE events; ZERO CONSTRAINT events
+    audit_spy.assert_awaited_once()
+    kwargs = audit_spy.await_args.kwargs
+    assert kwargs["event_type"] == "DECISION"
+    assert kwargs["detail"]["attempts"] == 3
+    assert kwargs["detail"]["correlation_id"] == str(commands[0].correlation_id)
 
 
 async def test_full_pipeline_with_non_idempotent_fail_closed() -> None:
@@ -279,3 +288,10 @@ async def test_full_pipeline_with_non_idempotent_fail_closed() -> None:
     assert kwargs["device_id"] == "ev-001"
     assert "after 1 attempt(s)" in kwargs["summary"]
     assert "ocpp_call_failed" in kwargs["summary"]
+    # Story 8.5 AC10: failure audit detail carries correlation_id
+    detail = kwargs["detail"]
+    assert detail["correlation_id"] == str(commands[0].correlation_id)
+    assert detail["command_status"] == "failed"
+    assert detail["applied"] is False
+    assert detail["attempts"] == 1
+    assert detail["final_reason"] == "ocpp_call_failed"
