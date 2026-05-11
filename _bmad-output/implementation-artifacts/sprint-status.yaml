@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-11'  # Story 9-5 (Installer Handoff Guide) code review complete. Status: review → done. /bmad-code-review 3-layer adversarial pass: 3 decision-needed (D1 HIGH success-page state-gate + D2 MEDIUM today_iso semantics split into install_iso/printed_iso + D3 MEDIUM JSON 400 → HTML 400) all resolved as patches; 5 patches applied (P1 MEDIUM screen styles moved into partial + P2 JS-disabled fallback hint + P3 @media print hide of wizard chrome + P4 missing running-state 400 test + P5 button label "Print this page" → "Print handoff guide"); 2 deferred (DF1 pre-existing is_outdated=False on unhydrated constraints provider; DF2 homeowner-rejection test redirect-target tightening — both logged to deferred-work.md); 11 dismissed (incl. B3 `is_running` IS defined; A1 `component=` IS project-wide structlog convention; B6 inline JS is documented project pattern). New file: installer/handoff_guide_unavailable.html (HTML 400 page preserving the AC1 exact-match `handoff_guide_not_available: <reason>` token verbatim in a <code> block). Quality gates re-validated: pytest 1413p/5xfail (+1 new P4 test), mypy 0 issues across 96 files, ruff check + format clean across 243 files. Epic 9 deliverables now all `done` — `epic-9` itself can transition to `done` once retrospective is decided.
+last_updated: '2026-05-11'  # Epic 9 retrospective complete (2026-05-11). Document: _bmad-output/implementation-artifacts/epic-9-retro-2026-05-11.md. Headline: "Epic 9 proved the architecture can handle installer orchestration, but proved the review-closure workflow needs the same structural enforcement as story creation." Retro key flipped: epic-9-retrospective optional → done. `epic-9` itself remains `in-progress` (NOT transitioned to done) per retro Part 2 — five hard gates before Epic 10: R1 (audit/repair 9-4 review-checkbox state vs current code), R2 (resolve 9-3 file-Status `in-progress` vs sprint-status `done` discrepancy), R3 (triage 9-Y-a..f carry-over sub-stories per must-before / safe-during / acceptable-post framework), 9-Y-a (HIGH-severity FAIL-abort E2E coverage from 9-3 round 2), 9-X-wire-adapter-map-into-policy-guard-and-control-loop (full BMAD story; A2-triggered T1+T5+T7; closes 8-2's adapters={} gap; hard before Story 10.2, preferably before Epic 10 planning). Headline retro action items: A7 — codify review-closure enforcement in bmad-code-review (mechanical block on Status: review → done unless every review-finding checkbox is resolved/dismissed/linked-to-deferred-work.md; same enforcement class as A1/A2 in bmad-create-story); A8 — story-file Status ↔ sprint-status.yaml consistency check (script or pre-commit hook); A9 — deferred-findings triage applied at moment of deferral, not retroactively. Do NOT start Epic 10 story work until R1/R2/R3/9-Y-a are resolved and 9-X is created as the prep gate.
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -127,7 +127,7 @@ development_status:
   9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: done
   9-4-implement-deployment-validation-with-safe-readiness-probing-and-persisted-results: done
   9-5-installer-handoff-guide: done
-  epic-9-retrospective: optional
+  epic-9-retrospective: done
 
   # ─── Epic 10: Homeowner Dashboard and Controls ─────────────────────────────
   epic-10: backlog

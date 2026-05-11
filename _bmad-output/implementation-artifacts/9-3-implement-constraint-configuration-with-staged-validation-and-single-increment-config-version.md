@@ -1,8 +1,10 @@
 # Story 9.3: Implement constraint configuration with staged validation and single-increment config_version
 
-Status: in-progress
+Status: done
 
-_Round 2 code review (2026-05-11) applied 14 focused patches in this session; 6 substantive findings carried over to dedicated sub-stories (see Round 2 Patches section). All 1300 unit + integration tests pass; mypy + ruff clean. Status reverts from `done` to `in-progress` per bmad-code-review workflow because patch findings remain as deferred sub-stories._
+_**Final status — Epic 9 retro R2 audit (2026-05-11):** `done`. Story 9.3's implementation is complete: all AC1–AC10 satisfied; 1300 unit + integration tests pass; mypy + ruff clean; every review-finding checkbox (66 items across round 1 + round 2) is resolved; the 6 carry-over sub-stories (`9-Y-a` through `9-Y-f`) are formally entered in `deferred-work.md` with severity, and triaged in the Epic 9 retrospective ([`epic-9-retro-2026-05-11.md`](epic-9-retro-2026-05-11.md), Part 2) per Jordan's classification framework — must-before-Epic-10: `9-Y-a` (HIGH FAIL-abort E2E); safe-during-Epic-10: `9-Y-c`, `9-Y-d`, `9-Y-e`, `9-Y-f`; acceptable-post-Epic-10: `9-Y-b`. Inline classification labels in `deferred-work.md` follow as part of Epic 9 retro R3. The carry-overs are net-new follow-up stories driven by Round-2 review findings, not unfinished 9.3 work._
+
+_**Historical record (superseded):** Round 2 code review (2026-05-11) applied 14 focused patches in this session; 6 substantive findings carried over to dedicated sub-stories (see Round 2 Patches section). The `bmad-code-review` workflow had reverted Status from `done` to `in-progress` because patch findings remained as deferred sub-stories — this revert semantic is the trigger for Epic 9 retro action item A12 (document the revert semantic in the skill's user-facing description) and is partially redressed by A7 (codify review-closure structural enforcement). The revert was historically valid but is superseded by this R2 audit: once carry-overs are formally entered in `deferred-work.md` with classification, the source story is `done`._
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
