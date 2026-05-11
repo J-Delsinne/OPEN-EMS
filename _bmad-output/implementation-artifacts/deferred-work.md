@@ -1,5 +1,10 @@
 # Deferred Work Log
 
+## Deferred from: code review of 9-5-installer-handoff-guide (2026-05-11)
+
+- **DF1 — `is_outdated=False` when constraints provider unhydrated** [MEDIUM] [`src/open_ems/services/deployment_validation.py:206-212` — Story 9.4 surface] — `_current_config_version_safe()` returns `None` on `RuntimeError` (post-restart, pre-hydration); the `is_outdated` derivation returns `False` if `current_version is None`. During the hydration window after restart the "Download handoff guide" button is shown and the standalone route 200s even though the persisted result may be from a different `config_version`. Pre-existing semantic gap from Story 9.4; the validation page button visibility and route both inherit the bug. Resolution path: treat `current_version is None` as `is_outdated = True`, OR mirror the existing 503 pattern at `setup.py:773-776` and block the button/route when the provider is unavailable.
+- **DF2 — Homeowner-rejection test for `/installer/handoff/guide` asserts status only, not redirect destination** [LOW] [`tests/unit/web/test_handoff_guide_route.py:435-443`] — `test_homeowner_rejected_on_handoff_guide` asserts `response.status_code == 302` without asserting the `Location` header points at the homeowner home. Other 302 tests in the same file DO assert redirect targets via `.endswith(...)`. A regression in `_ROLE_HOME["homeowner"]` would not be caught here. Test-tightening cosmetic; pick up during the next test-quality sweep.
+
 ## Deferred from: code review of story-9-4 (2026-05-11)
 
 - **W1 — GET handler stale-`running` row heal (R3 case 5)** [`src/open_ems/web/routes/setup.py:2485-2521`] — Dev explicitly deferred from Story 9.4 scope. After process crash mid-`run()`, a `running` row persists; GET should finalize the row to `complete-FAIL` when `now - result.started_at > 2 × check_timeout_seconds`. Carry as `9-Y-h-deployment-validation-stale-run-heal`; add startup-hydration consideration (heal on lifespan as well).

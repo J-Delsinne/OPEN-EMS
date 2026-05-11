@@ -1,6 +1,36 @@
 {% extends "installer/setup_layout.html" %}
-{# Story 9.4 placeholder for the handoff page; Story 9.5 will replace the
-   body with the printable installer guide. The route + URL stay put. #}
+{# Story 9.5 — handoff success page.
+
+   Replaces the Story 9.4 placeholder body. Same route + URL (/installer/handoff)
+   as the placeholder. Extends setup_layout.html so the wizard chrome stays
+   visible on the terminal screen of the 4-step flow.
+
+   This page is the landing site for a successful POST /installer/setup/validation/handoff.
+   It renders:
+     1. A confirmation block (continuity with the 9.4 placeholder copy).
+     2. A "Print handoff guide" affordance (P5 — 2026-05-11 code-review resolution: button
+        label aligned with AC3 contract) + a link to the standalone /installer/handoff/guide
+        page (also linked from the validation result screen's "Download handoff guide" link).
+     3. The full handoff-guide body inlined via the shared `_handoff_guide_body.html` partial
+        — single source of truth for guide content. The installer can read or print right here
+        without an additional click.
+
+   P3 (2026-05-11 code-review resolution): `@media print` rules in the head block now hide
+   the wizard chrome (header + step indicator) so an in-place print produces a clean printout
+   equivalent to the standalone page. The link to the standalone page remains for installers
+   who prefer that flow. #}
+
+{% block head %}
+{{ super() }}
+<style>
+  /* P3 — hide the wizard chrome when printing the success page so the in-place
+     "Print handoff guide" button produces a clean printout. */
+  @media print {
+    header { display: none; }
+    main { margin: 0; padding: 0; }
+  }
+</style>
+{% endblock %}
 
 {% block setup_body %}
 <section aria-labelledby="handoff-heading">
@@ -9,9 +39,24 @@
     Deployment validation passed and handoff has been recorded at
     config_version {{ step_4_completed_config_version }}.
   </p>
+</section>
+
+<section aria-labelledby="handoff-print-heading" class="guide-print-actions">
+  <h2 id="handoff-print-heading">Homeowner quick-start guide</h2>
   <p>
-    The full printable installer handoff guide will be available once
-    Story 9.5 ships. For now you can safely close this window.
+    The full quick-start guide for the homeowner is shown below. For a clean printable copy
+    (without the wizard chrome above), open the
+    <a href="/installer/handoff/guide" target="_blank" rel="noopener">standalone guide page</a>
+    and print from there.
+  </p>
+  <p>
+    <button type="button" onclick="window.print()">Print handoff guide</button>
+    {# P2 — JS-disabled fallback hint matches the standalone page. #}
+    <small>Use your browser's Print dialog to print on letter or A4 paper, or save as PDF.</small>
   </p>
 </section>
+
+<article id="handoff-guide-content">
+  {% include "installer/_handoff_guide_body.html" %}
+</article>
 {% endblock %}

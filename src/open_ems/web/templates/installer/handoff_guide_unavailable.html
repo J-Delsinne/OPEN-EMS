@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{# Story 9.5 D3 — HTML 400 page for the standalone /installer/handoff/guide route
+   and (D1) the /installer/handoff success page when validation state is not in
+   {complete-PASS, complete-WARN}.
+
+   The exact-match `handoff_guide_not_available: <reason>` token from AC1 is
+   preserved verbatim inside a <code> block so contract tests can assert on
+   response.text without depending on JSON-shaped detail. #}
+
+{% block title %}Handoff guide unavailable — OPEN-EMS{% endblock %}
+
+{% block content %}
+<main>
+  <h1>Handoff guide not available</h1>
+  <p>{{ reason_message }}</p>
+  <p>
+    <a href="/installer/setup/validation">Back to deployment validation</a>
+  </p>
+  <p>
+    <small>Reason: <code>{{ detail }}</code></small>
+  </p>
+</main>
+{% endblock %}

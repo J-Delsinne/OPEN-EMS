@@ -35,6 +35,7 @@ from open_ems.services.constraints import (
 from open_ems.services.deployment_validation import (
     CheckNotWarnableError,
     DeploymentValidationService,
+    DeploymentValidationView,
     NoCurrentResultError,
     NotAckEligibleError,
     NotHandoffEligibleError,
@@ -61,7 +62,7 @@ from open_ems.storage.repositories.device_repo import (
     DeviceRegistryEntry,
     DeviceRepo,
 )
-from open_ems.storage.repositories.wizard_state_repo import WizardStateRepo
+from open_ems.storage.repositories.wizard_state_repo import WizardState, WizardStateRepo
 from open_ems.web.dependencies import InstallerUser, require_installer
 
 logger = structlog.get_logger(__name__)
@@ -1133,14 +1134,29 @@ async def get_handoff_success(
     request: Request,
     user: InstallerUser = Depends(require_installer),  # noqa: B008
     wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
 ) -> Response:
-    """Story 9.4 placeholder — minimal success page after the handoff gate
-    passes. Story 9.5 will replace the body with the printable installer
-    guide; this route stays put.
+    """Story 9.4 + 9.5 — success page after the handoff gate passes.
+
+    The route + URL are unchanged from the 9.4 placeholder; 9.5 enriches the
+    template body with the inlined handoff-guide partial (rendered via the
+    same `_handoff_guide_body.html` partial as the standalone download page).
+    The handler fetches the current validation view so the guide body can
+    render the conditional outdated notice (section 2) and the footer
+    config_version (section 9).
     """
     state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
     if not state.step_4_complete:
         return RedirectResponse(url="/installer/setup/validation", status_code=302)
+    view = await svc.get_current_view()
+    # D1 (2026-05-11 code-review resolution): gate the success page on the same
+    # validation states as the standalone /installer/handoff/guide route. If
+    # state has degraded since handoff (e.g. someone re-ran validation to FAIL,
+    # or a stale `running` row remains), the inlined guide would misrepresent
+    # the deployment — render the unavailable page instead.
+    unavailable_reason = _handoff_guide_unavailable_reason(view)
+    if unavailable_reason is not None:
+        return _render_handoff_guide_unavailable(request, user.csrf_token, unavailable_reason)
     return _templates.TemplateResponse(
         request,
         "installer/_setup_validation_handoff_success.html",
@@ -1152,8 +1168,144 @@ async def get_handoff_success(
             "step_3_complete": state.step_3_complete,
             "step_4_complete": state.step_4_complete,
             "step_4_completed_config_version": state.step_4_completed_config_version,
+            # Story 9.5 — context for the inlined guide body partial.
+            "view": view,
+            "result": view.result,
+            "is_outdated": view.is_outdated,
+            # D2 (2026-05-11): install_iso = when the installer completed step 4;
+            # printed_iso = request-time (when this copy of the page was rendered).
+            "install_iso": _install_iso(state, view),
+            "printed_iso": datetime.now(UTC).date().isoformat(),
         },
     )
+
+
+@router.get("/installer/handoff/guide", response_class=HTMLResponse)
+async def get_handoff_guide(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
+) -> Response:
+    """Story 9.5 — standalone printable handoff guide page.
+
+    Side-effect-free read path. The handler:
+      1. Step-gates on step_1 / step_2 / step_3 (mirrors get_validation_page).
+      2. Reads validation state via `DeploymentValidationService.get_current_view()`
+         — the sole single-evaluator surface for "what is the validation in?".
+      3. Gates on validation status: 400 with exact-match
+         `handoff_guide_not_available: <reason>` when never_run, running, or
+         complete-FAIL. 200 for PASS / WARN (including outdated, which renders
+         with the inline notice — route tolerates, button on the validation
+         page hides for UX clarity).
+      4. Emits one structlog event `installer_handoff_guide_rendered`.
+
+    The handler does NOT call any service method that issues a device command,
+    mutates any repo, or emits an event_log row — AC1 side-effect-free contract.
+    """
+    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    if not state.step_1_complete:
+        return RedirectResponse(url="/installer/setup/discovery", status_code=302)
+    if not state.step_2_complete:
+        return RedirectResponse(url="/installer/setup/roles", status_code=302)
+    if not state.step_3_complete:
+        return RedirectResponse(url="/installer/setup/constraints", status_code=302)
+    view = await svc.get_current_view()
+    # D3 (2026-05-11 code-review resolution): render an HTML 400 page instead of
+    # the FastAPI-default JSON exception body. The exact-match
+    # `handoff_guide_not_available: <reason>` token is preserved verbatim in the
+    # response body (inside a <code> block) so the AC1 contract still holds.
+    unavailable_reason = _handoff_guide_unavailable_reason(view)
+    if unavailable_reason is not None:
+        return _render_handoff_guide_unavailable(request, user.csrf_token, unavailable_reason)
+    assert view.result is not None  # narrowed by the reason check above
+    logger.info(
+        "installer_handoff_guide_rendered",
+        component="installer_setup",
+        session_id=user.session_id,
+        overall_status=view.result.overall_status,
+        is_outdated=view.is_outdated,
+    )
+    return _templates.TemplateResponse(
+        request,
+        "installer/handoff_guide_page.html",
+        {
+            "csrf_token": user.csrf_token,
+            "view": view,
+            "result": view.result,
+            "is_outdated": view.is_outdated,
+            # D2 (2026-05-11): see get_handoff_success for the install_iso / printed_iso split.
+            "install_iso": _install_iso(state, view),
+            "printed_iso": datetime.now(UTC).date().isoformat(),
+        },
+    )
+
+
+_HANDOFF_GUIDE_UNAVAILABLE_REASONS: dict[str, str] = {
+    "never_run": (
+        "Deployment validation has not been run yet. Run validation to enable the handoff guide."
+    ),
+    "running": (
+        "Deployment validation is in progress. Wait for the run to complete to view the "
+        "handoff guide."
+    ),
+    "complete-FAIL": (
+        "Deployment validation failed. Resolve the failing checks and re-run validation to view "
+        "the handoff guide."
+    ),
+}
+
+
+def _handoff_guide_unavailable_reason(view: DeploymentValidationView) -> str | None:
+    """Return the AC1 rejection reason for the handoff guide, or None if the
+    current validation view qualifies for guide rendering (complete-PASS or
+    complete-WARN). Shared between the standalone route (D3) and the success
+    page (D1) so both surfaces apply identical gating semantics."""
+    if view.result is None:
+        return "never_run"
+    if view.result.overall_status == "running":
+        return "running"
+    if view.result.overall_status == "complete-FAIL":
+        return "complete-FAIL"
+    return None
+
+
+def _render_handoff_guide_unavailable(
+    request: Request,
+    csrf_token: str,
+    reason: str,
+) -> Response:
+    """Render the D3 HTML 400 page with the exact-match
+    `handoff_guide_not_available: <reason>` detail string embedded verbatim."""
+    return _templates.TemplateResponse(
+        request,
+        "installer/handoff_guide_unavailable.html",
+        {
+            "csrf_token": csrf_token,
+            "reason": reason,
+            "reason_message": _HANDOFF_GUIDE_UNAVAILABLE_REASONS[reason],
+            "detail": f"handoff_guide_not_available: {reason}",
+        },
+        status_code=400,
+    )
+
+
+def _install_iso(state: WizardState, view: DeploymentValidationView) -> str:
+    """D2 (2026-05-11 code-review resolution): install date as shown in section 1
+    of the handoff guide. Sources in priority order:
+
+    1. ``wizard_state.step_4_completed_at`` — authoritative when handoff has
+       been recorded.
+    2. ``view.result.started_at`` — approximation when the guide is viewed
+       before handoff (validation start ≈ install moment).
+    3. Request-time date — last-resort fallback; in practice unreachable
+       because callers gate on validation states that imply ``result`` is set.
+    """
+    if state.step_4_completed_at is not None:
+        return state.step_4_completed_at.date().isoformat()
+    if view.result is not None:
+        return view.result.started_at.date().isoformat()
+    return datetime.now(UTC).date().isoformat()
 
 
 def _form_view_from_request(

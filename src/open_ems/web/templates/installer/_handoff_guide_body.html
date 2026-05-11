@@ -1,0 +1,221 @@
+{# Story 9.5 — shared handoff guide body partial.
+
+   Rendered into TWO outer wrappers:
+     - ``handoff_guide_page.html`` (standalone print page) — served by GET /installer/handoff/guide
+     - ``_setup_validation_handoff_success.html`` (in-flow success page) — served by GET /installer/handoff after a successful POST /installer/setup/validation/handoff
+
+   Context expected:
+     - ``result``: DeploymentValidationResult | None  (None tolerated by section 9 footer)
+     - ``install_iso``: str — install / handoff completion date (e.g. "2026-05-11")
+     - ``printed_iso``: str — request-time date for the footer's "printed on" line
+     - ``is_outdated``: bool
+
+   D2 (2026-05-11 code-review resolution): split the previous single ``today_iso`` into
+   ``install_iso`` (section 1 — when the system was set up) and ``printed_iso`` (section 9 —
+   when this copy was rendered).
+
+   This partial is the single source of truth for guide content; any change here flows to both
+   pages atomically. Screen styles for the ``.guide-*`` classes ride with the partial so the
+   styling is identical wherever the partial is included. #}
+
+{# P1 (2026-05-11 code-review resolution): screen styles travel with the partial so both
+   the standalone page and the in-flow success page render the guide body with the same
+   visual treatment. Wrapper-specific styles (body width, print rules, skip-link) remain in
+   the standalone page's <head>. #}
+<style>
+  .guide-subhead { color: #555; font-style: italic; }
+  .guide-outdated-notice {
+    border: 1px solid #475569;  /* slate-600 — UX spec line 2092: never amber */
+    background: #f1f5f9;        /* slate-50 */
+    color: #475569;
+    padding: 0.75em 1em;
+    margin: 1em 0;
+    border-radius: 4px;
+  }
+  .guide-installer-note {
+    border-left: 4px solid #475569;
+    background: #f8fafc;
+    padding: 0.75em 1em;
+    margin: 1.6em 0;
+  }
+  .guide-card-list dt, .guide-contact-list dt { font-weight: bold; margin-top: 0.5em; }
+  .guide-card-list dd, .guide-contact-list dd { margin-left: 0; margin-bottom: 0.4em; }
+  .guide-fill-line {
+    display: inline-block;
+    border-bottom: 1px solid #333;
+    width: 18em;
+    height: 1.2em;
+  }
+  .guide-footer {
+    margin-top: 2em;
+    padding-top: 1em;
+    border-top: 1px solid #ccc;
+    color: #94a3b8;  /* slate-400 — footer surfaces config_version but small */
+    font-size: 0.85em;
+  }
+</style>
+
+{# Section 1 — Title block. ``install_iso`` is the date the installer completed handoff
+   (or, if accessed before handoff, the validation run start time). NOT request time. #}
+<section aria-labelledby="guide-heading-1">
+  <h2 id="guide-heading-1">OPEN-EMS Homeowner Quick-Start Guide</h2>
+  <p class="guide-subhead">
+    Your installer set up this system on {{ install_iso }}. Keep this page for quick reference.
+  </p>
+</section>
+
+{# Section 2 — Outdated-configuration notice (conditional). Slate-600 neutral styling per UX spec
+   line 2092: degraded headlines use slate-600, never amber. role="note" so screen readers treat
+   it as advisory, not alert. #}
+{% if is_outdated %}
+<section aria-labelledby="guide-heading-2" role="note" class="guide-outdated-notice">
+  <h2 id="guide-heading-2">Configuration changed since validation</h2>
+  <p>
+    Note: the system configuration changed after validation. Ask your installer to re-run
+    validation before printing this guide.
+  </p>
+</section>
+{% endif %}
+
+{# Section 3 — First-time access (HTTPS certificate acceptance). Addresses UX spec lines 1689-1692
+   + 2026-05-01 readiness-report Condition 3. #}
+<section aria-labelledby="guide-heading-3">
+  <h2 id="guide-heading-3">First-time access — accepting the security certificate</h2>
+  <p>
+    OPEN-EMS runs in your home and uses an in-home security certificate. The first time you open
+    the dashboard from a new device or browser, you will see a warning that says
+    <em>"Not Secure"</em> or <em>"Your connection is not private"</em>. This is expected — the
+    warning means your browser is checking that you trust the system on your local network. Accept
+    it once on each device you use, and the warning will not reappear unless the certificate is
+    re-issued.
+  </p>
+  <h3>One-time acceptance per browser</h3>
+  <ul>
+    <li>
+      <strong>Chrome / Edge:</strong> click <em>"Advanced"</em>, then
+      <em>"Proceed to &lt;site&gt;"</em>.
+    </li>
+    <li>
+      <strong>Safari:</strong> click <em>"Show Details"</em>, then <em>"visit this website"</em>,
+      and confirm.
+    </li>
+    <li>
+      <strong>Firefox:</strong> click <em>"Advanced"</em>, then <em>"Accept the Risk and Continue"</em>.
+    </li>
+  </ul>
+  <p>
+    Once accepted, the warning will not reappear unless the certificate is re-issued.
+  </p>
+</section>
+
+{# Section 4 — The dashboard at a glance. Plain language, no technical jargon. #}
+<section aria-labelledby="guide-heading-4">
+  <h2 id="guide-heading-4">The dashboard at a glance</h2>
+  <p>
+    When you open the dashboard, you will see a status sentence at the top and a small group of
+    cards below it. Here is what each part shows:
+  </p>
+  <dl class="guide-card-list">
+    <dt>Status headline</dt>
+    <dd>
+      A single sentence describing what the system is doing right now — for example,
+      <em>"Your home is running on solar · Minimize Cost"</em>.
+    </dd>
+    <dt>Battery card</dt>
+    <dd>How much of your battery is currently charged, in percent.</dd>
+    <dt>Solar card</dt>
+    <dd>How much electricity your panels are producing right now, in kilowatts (kW).</dd>
+    <dt>Grid card</dt>
+    <dd>
+      How much electricity is flowing to or from the public grid, in kilowatts. A positive
+      number means you are drawing from the grid; a negative number means you are exporting.
+    </dd>
+    <dt>EV card</dt>
+    <dd>
+      The next scheduled EV charging session, and a <em>"Charge EV now"</em> button to start
+      charging immediately.
+    </dd>
+  </dl>
+</section>
+
+{# Section 5 — How to change your energy strategy. Three-step walkthrough for Story 10.3. #}
+<section aria-labelledby="guide-heading-5">
+  <h2 id="guide-heading-5">How to change your energy strategy</h2>
+  <ol>
+    <li>Tap the strategy text in the status headline.</li>
+    <li>
+      Pick one of the three options:
+      <ul>
+        <li>
+          <strong>Minimize Cost</strong> — the system tries to use the cheapest electricity
+          available across the day.
+        </li>
+        <li>
+          <strong>Maximize Self-Consumption</strong> — the system prefers your own solar and
+          battery before drawing from the grid.
+        </li>
+        <li>
+          <strong>Prioritize EV</strong> — the system gives the car charger priority when there is
+          energy available.
+        </li>
+      </ul>
+    </li>
+    <li>
+      The status headline updates within a few seconds to confirm the new strategy is active.
+    </li>
+  </ol>
+</section>
+
+{# Section 6 — Degraded-mode messages and when to call the installer. #}
+<section aria-labelledby="guide-heading-6">
+  <h2 id="guide-heading-6">Understanding "limited functionality" messages and when to call your installer</h2>
+  <p>
+    The dashboard sometimes shows <em>"Running with limited functionality"</em> instead of the
+    normal status sentence. This is normal — the system is still safe, and you can continue using
+    the dashboard. It usually means one device is briefly unavailable and the rest of the system
+    is carrying on without it.
+  </p>
+  <h3>Call your installer if:</h3>
+  <ul>
+    <li>The "limited functionality" message stays visible for more than 24 hours.</li>
+    <li>One of the cards shows <em>"Unavailable"</em> for a specific device.</li>
+    <li>You cannot reach the dashboard at all from a browser that has worked before.</li>
+  </ul>
+  <p>
+    You do <strong>not</strong> need to call about brief, automatic recovery — the system handles
+    short device hiccups on its own.
+  </p>
+</section>
+
+{# Section 7 — Known v1 limitation: control commands. INSTALLER-facing tone (the only such
+   section). Closes Story 9.4 R7 carry-over from Story 8-2 (adapters={} runtime deferral). #}
+<section aria-labelledby="guide-heading-7" class="guide-installer-note">
+  <h2 id="guide-heading-7">Installer note — v1 limitation: control commands</h2>
+  <p>
+    The dashboard's <em>"Charge EV now"</em> button and inline strategy selector display correctly
+    in this release, but commands may not yet reach connected devices on every site (deferred
+    Story 8-2 follow-up). Verify with the homeowner during handoff which controls are wired live
+    on this site, so they know what to expect.
+  </p>
+</section>
+
+{# Section 8 — Installer contact placeholder fields. Printed underlines for handwriting. #}
+<section aria-labelledby="guide-heading-8">
+  <h2 id="guide-heading-8">Installer contact</h2>
+  <p>If something looks wrong, contact your installer:</p>
+  <dl class="guide-contact-list">
+    <dt>Installer name</dt>
+    <dd><span class="guide-fill-line" aria-hidden="true"></span></dd>
+    <dt>Phone</dt>
+    <dd><span class="guide-fill-line" aria-hidden="true"></span></dd>
+    <dt>Email</dt>
+    <dd><span class="guide-fill-line" aria-hidden="true"></span></dd>
+  </dl>
+</section>
+
+{# Section 9 — Footer. config_version is the only place the technical detail surfaces.
+   ``printed_iso`` is the request-time date (when this copy of the page was rendered). #}
+<footer class="guide-footer">
+  OPEN-EMS · printed {{ printed_iso }} · site config_version
+  {{ result.config_version if result else 'unknown' }}.
+</footer>

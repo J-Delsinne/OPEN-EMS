@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-11'  # Story 9-4 round-2 code review: P10 (ack/revoke row partial + OOB handoff swap), P25 (new test_protocol_adapter_factory.py + test_evaluate_safety_pre_check_public_wrapper), and spec amendment for D3+D5 all landed. Round-2 adversarial scope: ack/revoke OOB swap correctness, run-lock + cancellation finalization, factory safe-probe tests, /run spec/code sync, no regression in DeploymentValidationService.run — zero new findings. P18 (module-level timeout constants — low priority) and P19 (repo transaction discipline — pre-existing 9.0b pattern, Epic 11 hardening) remain LOW/deferred. Tests pass; mypy + ruff clean. Status: in-progress → done.
+last_updated: '2026-05-11'  # Story 9-5 (Installer Handoff Guide) code review complete. Status: review → done. /bmad-code-review 3-layer adversarial pass: 3 decision-needed (D1 HIGH success-page state-gate + D2 MEDIUM today_iso semantics split into install_iso/printed_iso + D3 MEDIUM JSON 400 → HTML 400) all resolved as patches; 5 patches applied (P1 MEDIUM screen styles moved into partial + P2 JS-disabled fallback hint + P3 @media print hide of wizard chrome + P4 missing running-state 400 test + P5 button label "Print this page" → "Print handoff guide"); 2 deferred (DF1 pre-existing is_outdated=False on unhydrated constraints provider; DF2 homeowner-rejection test redirect-target tightening — both logged to deferred-work.md); 11 dismissed (incl. B3 `is_running` IS defined; A1 `component=` IS project-wide structlog convention; B6 inline JS is documented project pattern). New file: installer/handoff_guide_unavailable.html (HTML 400 page preserving the AC1 exact-match `handoff_guide_not_available: <reason>` token verbatim in a <code> block). Quality gates re-validated: pytest 1413p/5xfail (+1 new P4 test), mypy 0 issues across 96 files, ruff check + format clean across 243 files. Epic 9 deliverables now all `done` — `epic-9` itself can transition to `done` once retrospective is decided.
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -126,7 +126,7 @@ development_status:
   9-2-implement-role-assignment-with-inline-conflict-detection-and-gap-acknowledgment: done
   9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: done
   9-4-implement-deployment-validation-with-safe-readiness-probing-and-persisted-results: done
-  9-5-installer-handoff-guide: backlog
+  9-5-installer-handoff-guide: done
   epic-9-retrospective: optional
 
   # ─── Epic 10: Homeowner Dashboard and Controls ─────────────────────────────

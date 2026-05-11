@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{# Story 9.5 — standalone printable handoff guide page.
+
+   Served by GET /installer/handoff/guide. Does NOT extend setup_layout.html
+   because the printed page does not need the wizard step indicator — it is a
+   reference artifact for the homeowner, viewed inline or printed via the
+   browser's File → Print dialog.
+
+   The page is self-contained: the only JavaScript is the "Print this page"
+   button's onclick="window.print()" call (type="button" — no form submission
+   and no other side effects). Without JS the homeowner can still use the
+   browser's native Print menu. #}
+
+{% block title %}OPEN-EMS Homeowner Quick-Start Guide{% endblock %}
+
+{% block head %}
+<style>
+  /* Wrapper-specific styles. Body-content `.guide-*` styles travel with
+     `_handoff_guide_body.html` (P1 — 2026-05-11 code-review resolution) so the
+     same body partial renders consistently inside the in-flow success page
+     wrapper too. */
+  body { max-width: 760px; margin: 1em auto; padding: 0 1em; font-size: 16px; line-height: 1.5; }
+  h1, h2 { color: #222; }
+  h2 { margin-top: 1.6em; border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }
+  .guide-print-bar {
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    padding: 0.5em 1em;
+    margin-bottom: 1em;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 1em;
+  }
+  .guide-print-bar button { padding: 0.4em 1em; }
+  .skip-link {
+    position: absolute;
+    top: -40px;
+    left: 0;
+    background: #1d6f42;
+    color: white;
+    padding: 0.5em 1em;
+    text-decoration: none;
+  }
+  .skip-link:focus { top: 0; }
+
+  /* Print presentation — tuned for letter / A4 without manual scaling. */
+  @media print {
+    body { max-width: none; margin: 0; padding: 0; font-size: 12pt; }
+    .guide-print-bar, .skip-link { display: none; }
+    h2 { page-break-after: avoid; }
+    section { page-break-inside: avoid; }
+    @page { margin: 15mm; }
+    a { color: inherit; text-decoration: none; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<a class="skip-link" href="#guide-content">Skip to guide content</a>
+
+<div class="guide-print-bar" aria-label="Print controls">
+  <button type="button" onclick="window.print()">Print handoff guide</button>
+  <span>Use your browser's Print dialog to print on letter or A4 paper, or save as PDF.</span>
+</div>
+
+<main id="guide-content">
+  {% include "installer/_handoff_guide_body.html" %}
+</main>
+{% endblock %}

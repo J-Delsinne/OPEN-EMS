@@ -39,4 +39,35 @@
      re-emit just this region without re-rendering the full validation
      region. #}
   {% include "installer/_setup_validation_handoff.html" %}
+
+  {# Story 9.5 — "Download handoff guide" link.
+
+     Visibility rules (AC2 exact match):
+       - Visible only when result.overall_status ∈ {complete-PASS, complete-WARN}
+         AND view.is_outdated is False.
+       - Hidden for never_run, running, complete-FAIL, and outdated states.
+
+     The outdated case is hidden here (UX clarity) even though the route at
+     /installer/handoff/guide tolerates outdated reads (200 + inline notice)
+     for direct-URL / bookmark resilience. Asymmetry documented in story dev
+     notes ("Why the route gates complete-FAIL but tolerates outdated").
+
+     Rendered as <a target="_blank">, NOT a form button — opens in a new tab
+     so the installer does not lose Step 4 wizard state when reviewing /
+     printing the guide. UX spec §Buttons line 1384: secondary-action visual
+     weight, not the accent primary-action treatment. #}
+  {% set _guide_visible = (
+       result is not none
+       and not is_running
+       and not view.is_outdated
+       and result.overall_status in ["complete-PASS", "complete-WARN"]
+  ) %}
+  {% if _guide_visible %}
+    <a
+      href="/installer/handoff/guide"
+      target="_blank"
+      rel="noopener"
+      class="secondary-action download-handoff-guide-link"
+    >Download handoff guide</a>
+  {% endif %}
 </section>
