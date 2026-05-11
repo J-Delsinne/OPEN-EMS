@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-11'  # Story 9-0d done: code review closed (1 decision-needed patched to corrupt-value guard at lifespan step 4c; 4 deferred to deferred-work.md; 12 dismissed); 1084 tests pass (baseline 1071 + 13 new); ruff/mypy clean. Hard gate before Story 9.4 cleared.
+last_updated: '2026-05-11'  # Story 9-1 code-review complete; 2 decisions resolved + 19 patches applied + 12 deferred. Quality gates: 1171 passed, 1 xfailed, mypy + ruff clean. Status: review → done.
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -122,7 +122,7 @@ development_status:
   9-0b-db-backed-active-constraints-reload: done
   9-0c-capability-profile-failure-semantics: done
   9-0d-restart-hydration-of-monthly-peak: done
-  9-1-implement-device-discovery-step-with-live-probing-capability-classification-and-manual-entry: backlog
+  9-1-implement-device-discovery-step-with-live-probing-capability-classification-and-manual-entry: done
   9-2-implement-role-assignment-with-inline-conflict-detection-and-gap-acknowledgment: backlog
   9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: backlog
   9-4-implement-deployment-validation-with-safe-readiness-probing-and-persisted-results: backlog

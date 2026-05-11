@@ -1,0 +1,86 @@
+{# Scan-result fragment swapped into #scan-results-region after every scan.
+
+   Variables:
+     csrf_token         — string
+     registry_rows      — list[DeviceRegistryEntry] (rendered above; here for completeness)
+     live_results       — tuple[LiveDiscoveryRow, ...]
+     unreachable_targets— tuple[UnreachableTarget, ...]
+     not_found_devices  — tuple[NotFoundDevice, ...]
+     last_scan_id       — optional string UUID
+#}
+{% if last_scan_id %}
+  <p>Last scan: <code>{{ last_scan_id }}</code></p>
+{% endif %}
+
+{% if live_results %}
+  <h3>Reached devices</h3>
+  <ul>
+    {% for row in live_results %}
+      <li>
+        <strong>{{ row.result.device_id }}</strong>
+        <span class="protocol">[{{ row.result.protocol }}]</span>
+        <span class="address">{{ row.result.address }}</span>
+        {% if row.badge == "FULL" %}
+          <span class="badge badge-full" role="status">FULL</span>
+        {% else %}
+          <span class="badge badge-reduced" role="status">REDUCED</span>
+          {% if row.profile.limitation_reason %}
+            <span class="limitation-reason">— {{ row.profile.limitation_reason }}</span>
+          {% endif %}
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
+{% if unreachable_targets %}
+  <h3>Unreachable targets</h3>
+  <ul>
+    {% for target in unreachable_targets %}
+      <li>
+        <strong>{{ target.device_id }}</strong>
+        <span class="protocol">[{{ target.protocol }}]</span>
+        <span class="address">{{ target.address }}</span>
+        <span class="reason">— {{ target.reason }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
+{# Dedup: a registered device whose probe failed appears in BOTH
+   ``unreachable_targets`` (with a concrete failure reason) AND
+   ``not_found_devices`` (registry-diff). Per spec AC4 both classifications
+   fire at the orchestrator layer, but the UI should not render the same
+   device twice with two competing narratives — the unreachable row is the
+   more informative version (it has the failure reason). Filter the NOT FOUND
+   list against the set of unreachable device_ids here. #}
+{% set _unreachable_ids = unreachable_targets | map(attribute="device_id") | list %}
+{% set _not_found_to_render = not_found_devices | rejectattr("device_id", "in", _unreachable_ids) | list %}
+{% if _not_found_to_render %}
+  <h3>Not found</h3>
+  <ul>
+    {% for device in _not_found_to_render %}
+      <li>
+        <strong>{{ device.device_id }}</strong>
+        <span class="protocol">[{{ device.protocol }}]</span>
+        <span class="address">{{ device.address }}</span>
+        <span class="badge badge-not-found" role="status">NOT FOUND</span>
+        <form
+          method="post"
+          action="/installer/setup/discovery/scan/{{ device.device_id }}/retry"
+          hx-post="/installer/setup/discovery/scan/{{ device.device_id }}/retry"
+          hx-target="#scan-results-region"
+          hx-swap="innerHTML"
+          style="display:inline;"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Retry scan</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+{% endif %}
+
+{% if not live_results and not unreachable_targets and not not_found_devices and not last_scan_id %}
+  <p>Press <strong>Run scan</strong> to discover devices on this site.</p>
+{% endif %}

@@ -1,0 +1,60 @@
+{# Row fragment: one device_registry entry. UX spec component #6.
+
+   Variables:
+     row                  — DeviceRegistryEntry
+     csrf_token           — string
+     probe_failure_reason — optional string surfaced after a failed manual probe
+#}
+<li class="device-row" id="device-row-{{ row.device_id }}" data-device-id="{{ row.device_id }}">
+  <strong>{{ row.device_id }}</strong>
+  <span class="protocol">[{{ row.protocol }}]</span>
+  <span class="address">{{ row.address }}</span>
+
+  {% if row.validated %}
+    {# R6: re-resolve capability profile at render time so a code-side capability
+       registry update is reflected without requiring a fresh probe. The cached
+       ``row.last_capability_status`` / ``row.last_limitation_reason`` columns
+       are written by the probe path and may lag the registry between probes. #}
+    {% set current_profile = get_profile(row.device_id, row.model or "") %}
+    {% if current_profile.capability_status == "full" %}
+      <span class="badge badge-full" role="status">FULL</span>
+    {% else %}
+      <span class="badge badge-reduced" role="status">REDUCED</span>
+      {% if current_profile.limitation_reason %}
+        <span class="limitation-reason">— {{ current_profile.limitation_reason }}</span>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    <span class="badge badge-unvalidated" role="status">
+      Not yet validated{% if row.installer_acknowledged_unvalidated_at %} (acknowledged){% endif %}
+    </span>
+    {% if probe_failure_reason %}
+      <span class="probe-failure-reason">— {{ probe_failure_reason }}</span>
+    {% endif %}
+  {% endif %}
+
+  <span class="row-actions">
+    <form
+      method="post"
+      action="/installer/setup/discovery/scan/{{ row.device_id }}/retry"
+      hx-post="/installer/setup/discovery/scan/{{ row.device_id }}/retry"
+      hx-target="#scan-results-region"
+      hx-swap="innerHTML"
+    >
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Retry</button>
+    </form>
+    {% if not row.validated and not row.installer_acknowledged_unvalidated_at %}
+      <form
+        method="post"
+        action="/installer/setup/discovery/manual/{{ row.device_id }}/acknowledge-unvalidated"
+        hx-post="/installer/setup/discovery/manual/{{ row.device_id }}/acknowledge-unvalidated"
+        hx-target="closest .device-row"
+        hx-swap="outerHTML"
+      >
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Acknowledge as not yet validated</button>
+      </form>
+    {% endif %}
+  </span>
+</li>

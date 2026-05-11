@@ -15,6 +15,7 @@ from open_ems.adapters.capabilities import (
     CapabilityRegistryDriftError,
     validate_capability_registry_alignment,
 )
+from open_ems.adapters.discovery import DiscoveryService
 from open_ems.core import StateStore
 from open_ems.engine.control_loop import ControlLoop
 from open_ems.engine.intent_executor import IntentExecutor
@@ -23,23 +24,28 @@ from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.logging_config import configure_logging
 from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.services.audit_log import ObservabilityService
+from open_ems.services.device_discovery import DeviceDiscoveryOrchestrator
 from open_ems.services.loop_liveness import LoopLiveness
+from open_ems.services.manual_entry import ManualEntryService
 from open_ems.services.readiness import mark_ready, sd_notify
 from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
 from open_ems.storage.repositories.config_repo import ConfigRepo
+from open_ems.storage.repositories.device_repo import DeviceRepo
 from open_ems.storage.repositories.energy_repo import EnergyRepo
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
 from open_ems.storage.repositories.session_repo import SessionRepo
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
+from open_ems.storage.repositories.wizard_state_repo import WizardStateRepo
 from open_ems.web.csrf import CsrfMiddleware
 from open_ems.web.routes.auth import router as auth_router
 from open_ems.web.routes.fragments import router as fragments_router
 from open_ems.web.routes.health import router as health_router
 from open_ems.web.routes.homeowner import router as homeowner_router
 from open_ems.web.routes.installer import router as installer_router
+from open_ems.web.routes.setup import router as setup_router
 from open_ems.web.routes.stream import router as stream_router
 
 logger = structlog.get_logger(__name__)
@@ -295,6 +301,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             component="startup",
         )
 
+        # Step 4d (Story 9.1): construct the installer-wizard service objects.
+        # All are stateless or in-memory caches; no DB I/O at construction time.
+        device_repo = DeviceRepo()
+        wizard_state_repo = WizardStateRepo()
+        discovery_service = DiscoveryService()
+        discovery_orchestrator = DeviceDiscoveryOrchestrator(
+            discovery_service=discovery_service,
+            ocpp_central_system=None,  # populated once OCPP wiring lands (Story 9.2/9.3)
+            registry_provider=device_repo,  # DeviceRepo.list_all() satisfies the protocol
+        )
+        manual_entry_service = ManualEntryService(
+            device_repo=device_repo,
+            discovery_service=discovery_service,
+        )
+        app.state.device_repo = device_repo
+        app.state.wizard_state_repo = wizard_state_repo
+        app.state.discovery_orchestrator = discovery_orchestrator
+        app.state.manual_entry_service = manual_entry_service
+        logger.info("device_registry_ready", component="startup")
+        logger.info("wizard_state_ready", component="startup")
+        logger.info("discovery_orchestrator_ready", component="startup")
+
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
 
@@ -445,6 +473,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(installer_router)
+    app.include_router(setup_router)
     app.include_router(homeowner_router)
     app.include_router(stream_router)
     app.include_router(fragments_router)

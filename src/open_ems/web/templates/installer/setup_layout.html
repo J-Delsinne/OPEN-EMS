@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{# UX spec component #14 — persistent setup wizard step indicator. #}
+
+{% block title %}{{ title }} — OPEN-EMS Setup{% endblock %}
+
+{% block head %}
+<style>
+  /* Minimal styling for the step indicator. Production CSS lives in static/ */
+  .wizard-step-indicator { display: flex; gap: 1em; list-style: none; padding: 0; }
+  .wizard-step-indicator li { padding: 0.25em 0.5em; border: 1px solid #888; }
+  .wizard-step-indicator li[aria-current="step"] { font-weight: bold; border-color: #1d6f42; }
+  .wizard-step-indicator li[data-status="complete"] { background: #e6f5ec; }
+  .badge { padding: 0.1em 0.5em; border: 1px solid currentColor; border-radius: 3px; font-size: 0.85em; }
+  .badge-full { color: #1d6f42; }
+  .badge-reduced { color: #8a4b00; }
+  .badge-not-found { color: #a3151e; }
+  .badge-unvalidated { color: #555; }
+  .error-banner { border: 1px solid #a3151e; background: #fdecea; padding: 0.5em; margin: 0.5em 0; }
+  .row-actions form { display: inline; }
+</style>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>{{ title }}</h1>
+  <nav aria-label="Setup wizard progress">
+    <ol class="wizard-step-indicator">
+      <li{% if active_step == "discovery" %} aria-current="step"{% endif %}>1. Device Discovery</li>
+      <li{% if active_step == "roles" %} aria-current="step"{% endif %}>2. Role Assignment</li>
+      <li{% if active_step == "constraints" %} aria-current="step"{% endif %}>3. Constraints</li>
+      <li{% if active_step == "validation" %} aria-current="step"{% endif %}>4. Deployment Validation</li>
+    </ol>
+  </nav>
+</header>
+<main>
+  {% block setup_body %}{% endblock %}
+</main>
+{% endblock %}

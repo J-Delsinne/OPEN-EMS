@@ -1,0 +1,20 @@
+{# Step-2 gate failure banner.
+
+   Variables:
+     blockers — tuple[DeviceRegistryEntry, ...] of unacknowledged unvalidated rows
+#}
+<div class="error-banner" role="alert" aria-live="polite">
+  <p>
+    Some devices are not yet validated. Validate, acknowledge, or remove the
+    following entries before continuing to Step 2.
+  </p>
+  <ul>
+    {% for row in blockers %}
+      <li>
+        <strong>{{ row.device_id }}</strong>
+        <span class="protocol">[{{ row.protocol }}]</span>
+        <span class="address">{{ row.address }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+</div>

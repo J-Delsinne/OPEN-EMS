@@ -1,0 +1,78 @@
+{# Manual entry form fragment. UX spec component #17.
+
+   Variables:
+     csrf_token   — string
+     field_errors — optional dict[str, str] of {field_name: reason}
+     form         — optional dict of previously-submitted values
+#}
+<form
+  method="post"
+  action="/installer/setup/discovery/manual"
+  hx-post="/installer/setup/discovery/manual"
+  hx-target="#device-registry-list"
+  hx-swap="beforeend"
+>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <p>
+    <label for="me-device-id">Device ID (required, ≤64 chars)</label>
+    <input
+      id="me-device-id"
+      name="device_id"
+      type="text"
+      maxlength="64"
+      required
+      value="{{ (form.device_id if form else '') }}"
+      aria-describedby="me-device-id-err"
+    >
+    {% if field_errors and field_errors.device_id %}
+      <span id="me-device-id-err" class="field-error" role="alert">{{ field_errors.device_id }}</span>
+    {% endif %}
+  </p>
+  <p>
+    <label for="me-protocol">Protocol</label>
+    <select id="me-protocol" name="protocol" required aria-describedby="me-protocol-err">
+      <option value="modbus_tcp"
+        {% if form and form.protocol == "modbus_tcp" %} selected{% endif %}>Modbus TCP</option>
+      <option value="dsmr_p1"
+        {% if form and form.protocol == "dsmr_p1" %} selected{% endif %}>DSMR P1</option>
+      <option value="ocpp_1_6"
+        {% if form and form.protocol == "ocpp_1_6" %} selected{% endif %}>OCPP 1.6 (not supported)</option>
+    </select>
+    {% if field_errors and field_errors.protocol %}
+      <span id="me-protocol-err" class="field-error" role="alert">{{ field_errors.protocol }}</span>
+    {% endif %}
+  </p>
+  <p>
+    <label for="me-address">Address</label>
+    <input
+      id="me-address"
+      name="address"
+      type="text"
+      required
+      value="{{ (form.address if form else '') }}"
+      aria-describedby="me-address-err"
+    >
+    {% if field_errors and field_errors.address %}
+      <span id="me-address-err" class="field-error" role="alert">{{ field_errors.address }}</span>
+    {% endif %}
+  </p>
+  <p>
+    <label for="me-model">Model (optional)</label>
+    <input
+      id="me-model"
+      name="model"
+      type="text"
+      value="{{ (form.model if form else '') }}"
+    >
+  </p>
+  <p>
+    <label for="me-firmware">Firmware version (optional)</label>
+    <input
+      id="me-firmware"
+      name="firmware_version"
+      type="text"
+      value="{{ (form.firmware_version if form else '') }}"
+    >
+  </p>
+  <button type="submit">Add device</button>
+</form>

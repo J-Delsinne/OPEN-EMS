@@ -56,6 +56,11 @@ class _ChargerState:
         self.last_call_error: dict[str, Any] | None = None
         self.last_meter_values_at: datetime | None = None
         self.last_meter_values_power_kw: float | None = None
+        # Story 9.1: model identifier captured from the charger's most recent
+        # BootNotification. Preserved across StatusNotifications (which overwrite
+        # last_status_notification) so list_registered_chargers() can return a
+        # stable model string after the charger has been running for a while.
+        self.charge_point_model: str | None = None
         # OCPP transaction id observed via StartTransaction. Cleared by
         # on_stop_transaction (matching id) and on_boot_notification (charger reset).
         # Preserved across WebSocket reconnects without a boot, since OCPP 1.6
@@ -94,6 +99,7 @@ class _InternalChargePoint(_BaseChargePoint):  # type: ignore[misc]
         self._state.last_known_transaction_id = None
         self._state.active_transaction_connector_id = None
         self._state.next_charging_profile_id = 1
+        self._state.charge_point_model = charge_point_model
         self._state.last_status_notification = {
             "type": "BootNotification",
             "charge_point_model": charge_point_model,
@@ -260,6 +266,10 @@ class OCPPChargerAdapter:
         state.last_known_transaction_id = previous_state.last_known_transaction_id
         state.active_transaction_connector_id = previous_state.active_transaction_connector_id
         state.next_charging_profile_id = previous_state.next_charging_profile_id
+        # Story 9.1: model identifier captured from BootNotification. Survives
+        # WebSocket reconnect because the charger only re-sends BootNotification
+        # on actual reboot — a transport flap leaves the model unchanged.
+        state.charge_point_model = previous_state.charge_point_model
         handler = _InternalChargePoint(
             self.config.charge_point_id,
             connection,
@@ -288,6 +298,15 @@ class OCPPChargerAdapter:
                 device_id=self.config.device_id,
                 charge_point_id=self.config.charge_point_id,
             )
+
+    @property
+    def charge_point_model(self) -> str | None:
+        """The most recent ``charge_point_model`` reported via BootNotification.
+
+        ``None`` until the charger boots; preserved across WebSocket reconnects.
+        Used by ``OCPPCentralSystem.list_registered_chargers()`` (Story 9.1).
+        """
+        return self._state.charge_point_model
 
     @property
     def active_transaction_id(self) -> int | None:
@@ -429,6 +448,24 @@ class OCPPChargerAdapter:
         )
 
 
+class OCPPRegisteredCharger(BaseModel):
+    """Snapshot of one OCPP charger that has self-registered via ``BootNotification``.
+
+    Returned by ``OCPPCentralSystem.list_registered_chargers()`` for the
+    installer-discovery orchestrator (Story 9.1). Pure read-only view; the
+    ``model`` field reflects the most recent ``charge_point_model`` value
+    received from the charger (or ``None`` if the charger has not yet sent a
+    ``BootNotification``).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    device_id: NonEmptyStr
+    charge_point_id: NonEmptyStr
+    address: NonEmptyStr
+    model: str | None = None
+
+
 class OCPPCentralSystem:
     """Registry of OCPPChargerAdapter instances, one per charge point ID."""
 
@@ -444,6 +481,27 @@ class OCPPCentralSystem:
     def get_adapter(self, charge_point_id: str) -> OCPPChargerAdapter | None:
         """Look up a registered adapter by OCPP charge point identity."""
         return self._adapters.get(charge_point_id)
+
+    def list_registered_chargers(self) -> tuple[OCPPRegisteredCharger, ...]:
+        """Story 9.1 AC3: snapshot every charger that has been ``register()``-ed.
+
+        Returns the chargers currently known to the central system, with the
+        most recent ``charge_point_model`` recorded by BootNotification (or
+        ``None`` if the charger has not yet booted). Pure read; never mutates
+        state. Synchronous because the underlying registry is in-memory.
+        """
+        snapshot: list[OCPPRegisteredCharger] = []
+        for cp_id, adapter in self._adapters.items():
+            model = adapter.charge_point_model
+            snapshot.append(
+                OCPPRegisteredCharger(
+                    device_id=adapter.config.device_id,
+                    charge_point_id=cp_id,
+                    address=f"/{cp_id}",
+                    model=model,
+                )
+            )
+        return tuple(snapshot)
 
     async def handle_charger(self, charge_point_id: str, connection: Any) -> None:
         """Accept an incoming OCPP WebSocket connection. Blocks until charger disconnects.

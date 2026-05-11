@@ -1,0 +1,55 @@
+{% extends "installer/setup_layout.html" %}
+
+{% block setup_body %}
+<section aria-labelledby="known-configured-heading">
+  <h2 id="known-configured-heading">Known configured devices</h2>
+  {% if registry_rows %}
+    <ul id="device-registry-list">
+      {% for row in registry_rows %}
+        {% include "installer/_setup_discovery_row.html" %}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No devices have been configured yet. Run a scan or add one manually.</p>
+  {% endif %}
+</section>
+
+<section aria-labelledby="live-scan-heading" id="scan-results-region">
+  <h2 id="live-scan-heading">Live scan results</h2>
+  {% include "installer/_scan_results.html" %}
+</section>
+
+<section aria-labelledby="actions-heading">
+  <h2 id="actions-heading">Actions</h2>
+  <form
+    method="post"
+    action="/installer/setup/discovery/scan"
+    hx-post="/installer/setup/discovery/scan"
+    hx-target="#scan-results-region"
+    hx-swap="innerHTML"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Run scan</button>
+  </form>
+
+  <details>
+    <summary>Add device manually (advanced)</summary>
+    {% include "installer/_setup_discovery_manual_form.html" %}
+  </details>
+
+  <form
+    method="post"
+    action="/installer/setup/discovery/advance"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if gate_can_advance %}
+      <button type="submit">Continue to Step 2</button>
+    {% else %}
+      <button type="submit" disabled aria-disabled="true">Continue to Step 2</button>
+      <p>
+        Acknowledge or validate the unvalidated entries listed above before continuing.
+      </p>
+    {% endif %}
+  </form>
+</section>
+{% endblock %}

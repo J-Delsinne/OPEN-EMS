@@ -115,6 +115,31 @@ async def test_lifespan_runs_validator_on_happy_path() -> None:
     mock_validator.assert_called_once()
 
 
+async def test_lifespan_wires_story_9_1_services_on_app_state(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 9.1 Task 8: ``device_repo`` / ``wizard_state_repo`` /
+    ``discovery_orchestrator`` / ``manual_entry_service`` are exposed on
+    ``app.state`` after the lifespan reaches the application body.
+    """
+    from open_ems.services.device_discovery import DeviceDiscoveryOrchestrator
+    from open_ems.services.manual_entry import ManualEntryService
+    from open_ems.storage.repositories.device_repo import DeviceRepo
+    from open_ems.storage.repositories.wizard_state_repo import WizardStateRepo
+
+    structlog.reset_defaults()
+    db_path = str(tmp_path / "story_9_1_wiring.db")
+    _seed_lifespan_env(monkeypatch, db_path)
+
+    app = create_app()
+    async with lifespan(app):
+        assert isinstance(app.state.device_repo, DeviceRepo)
+        assert isinstance(app.state.wizard_state_repo, WizardStateRepo)
+        assert isinstance(app.state.discovery_orchestrator, DeviceDiscoveryOrchestrator)
+        assert isinstance(app.state.manual_entry_service, ManualEntryService)
+
+
 # ── Story 9.0d (AC8): monthly-peak lifespan hydration ──────────────────────
 
 
