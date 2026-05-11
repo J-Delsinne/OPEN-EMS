@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-11'  # Story 9-4 round-1 code review patch pass applied: 27 of 32 patches landed (D1/D3/D4 + P1/P2-doc/P3/P4/P5/P6/P7/P8/P9/P11/P12/P13/P14/P15/P16/P17/P20/P21/P22/P23/P24/P26/P27/P28/P29). 1360 tests pass; mypy + ruff clean. Action items remaining: P10 (OOB swap for ack/revoke), P18 (module-level timeout constants — low priority), P19 (repo transaction discipline — pre-existing pattern, separate hardening task), P25 (additive AC11 test files), spec amendment for D3+D5. Status: review → in-progress.
+last_updated: '2026-05-11'  # Story 9-4 round-2 code review: P10 (ack/revoke row partial + OOB handoff swap), P25 (new test_protocol_adapter_factory.py + test_evaluate_safety_pre_check_public_wrapper), and spec amendment for D3+D5 all landed. Round-2 adversarial scope: ack/revoke OOB swap correctness, run-lock + cancellation finalization, factory safe-probe tests, /run spec/code sync, no regression in DeploymentValidationService.run — zero new findings. P18 (module-level timeout constants — low priority) and P19 (repo transaction discipline — pre-existing 9.0b pattern, Epic 11 hardening) remain LOW/deferred. Tests pass; mypy + ruff clean. Status: in-progress → done.
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -124,8 +124,8 @@ development_status:
   9-0d-restart-hydration-of-monthly-peak: done
   9-1-implement-device-discovery-step-with-live-probing-capability-classification-and-manual-entry: done
   9-2-implement-role-assignment-with-inline-conflict-detection-and-gap-acknowledgment: done
-  9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: in-progress
-  9-4-implement-deployment-validation-with-safe-readiness-probing-and-persisted-results: in-progress
+  9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: done
+  9-4-implement-deployment-validation-with-safe-readiness-probing-and-persisted-results: done
   9-5-installer-handoff-guide: backlog
   epic-9-retrospective: optional
 

@@ -424,6 +424,35 @@ async def test_warn_path_requires_ack_before_handoff(
         headers={"X-CSRF-Token": _CSRF},
     )
     assert response.status_code == 200
+    # P10 — response is the single check row + OOB-swapped handoff region,
+    # NOT a full validation-region re-render. Asserts the spec AC8 line 357
+    # contract: row partial + atomic disabled→enabled handoff swap.
+    body = response.text
+    assert 'id="check-row-connectivity"' in body
+    assert 'id="handoff-region"' in body
+    assert 'hx-swap-oob="outerHTML"' in body
+    # Negative: the full-region template's outer wrapper must NOT appear.
+    assert 'id="validation-region"' not in body
+
+    # P10 — revoke is symmetric: same row partial + OOB handoff swap shape.
+    revoke = client.post(
+        "/installer/setup/validation/revoke/connectivity",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": _CSRF},
+    )
+    assert revoke.status_code == 200
+    revoke_body = revoke.text
+    assert 'id="check-row-connectivity"' in revoke_body
+    assert 'id="handoff-region"' in revoke_body
+    assert 'hx-swap-oob="outerHTML"' in revoke_body
+    assert 'id="validation-region"' not in revoke_body
+
+    # Re-acknowledge so handoff is permitted again.
+    client.post(
+        "/installer/setup/validation/acknowledge/connectivity",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": _CSRF},
+    )
 
     # Now handoff succeeds.
     response = client.post(

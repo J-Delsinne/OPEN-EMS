@@ -1,0 +1,59 @@
+{# Story 9.4 — handoff form fragment (extracted per P10).
+
+   Rendered in two contexts:
+     - Inline inside _setup_validation_actions.html on full-region renders.
+     - As an OOB swap appended to _setup_validation_ack_response.html, so
+       the ack/revoke roundtrip atomically toggles the disabled↔enabled
+       state alongside the per-row swap (AC8 spec line 357).
+
+   The element keeps a stable id="handoff-region" in both contexts; htmx
+   matches by id when ``hx-swap-oob`` is present. #}
+{% set result = view.result %}
+{% set is_running = result and result.overall_status == "running" %}
+{% set is_outdated = view.is_outdated %}
+{% set handoff_enabled = (
+     result is not none
+     and not is_running
+     and not is_outdated
+     and (
+       result.overall_status == "complete-PASS"
+       or (
+         result.overall_status == "complete-WARN"
+         and (
+           result.checks | selectattr("status", "in", ["warn", "timeout"]) | list | length
+         ) == (result.acknowledged_warnings | length)
+       )
+     )
+) %}
+
+<form
+  id="handoff-region"
+  method="post"
+  action="/installer/setup/validation/handoff"
+  hx-post="/installer/setup/validation/handoff"
+  {% if handoff_oob is defined and handoff_oob %}hx-swap-oob="outerHTML"{% endif %}
+>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <button
+    type="submit"
+    class="handoff-button"
+    {% if not handoff_enabled %}disabled aria-disabled="true"{% endif %}
+  >
+    Complete handoff
+  </button>
+  {% if not handoff_enabled %}
+    <small class="action-explanation">
+      {% if result is none %}
+        Run validation to check deployment readiness.
+      {% elif is_running %}
+        Validation running…
+      {% elif is_outdated %}
+        Configuration changed — re-run validation before handoff.
+      {% elif result.overall_status == "complete-FAIL" %}
+        Deployment blocked. Resolve failures before handoff.
+      {% elif result.overall_status == "complete-WARN" %}
+        Acknowledge all warnings before handoff.
+      {% endif %}
+    </small>
+  {% endif %}
+</form>

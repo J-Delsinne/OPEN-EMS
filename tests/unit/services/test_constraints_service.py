@@ -638,3 +638,87 @@ async def test_activate_draft_idempotency_preserves_first_completion(
     assert state is not None
     assert state.step_3_complete is True
     assert state.step_3_activated_config_version == first.config_version
+
+
+# ---------------------------------------------------------------------------
+# evaluate_safety_pre_check public wrapper (Story 9.4 AC11 — P25)
+# ---------------------------------------------------------------------------
+
+
+async def test_evaluate_safety_pre_check_public_wrapper(
+    service_with_repos,
+) -> None:
+    """Story 9.4 AC11 — the new public wrapper ``evaluate_safety_pre_check``
+    must produce the same ``tuple[ConstraintCheckResult, ...]`` as the
+    internal ``_check_safety_pre`` for the same input snapshot + constraint
+    fields.
+
+    Both paths delegate to module-level ``_check_safety_pre_pure`` (D4
+    refactor), so the test pins the contract that
+    ``DeploymentValidationService`` (which calls the public wrapper) and
+    ``ConstraintsService.validate_draft`` (which calls the private helper)
+    cannot drift apart.
+    """
+    from open_ems.core.constraints import ActiveConstraints
+    from open_ems.storage.repositories.draft_constraints_repo import ConstraintDraft
+
+    service, *_ = service_with_repos
+    # Battery SoC below the 50% floor → safety_pre_check WARN; lets the
+    # assertion distinguish the wrapper from a trivially-pass path.
+    battery = BatteryState(
+        device_id="bat-1",
+        soc_percent=30.0,
+        battery_power_kw=0.0,
+        capacity_kwh=10.0,
+        operating_mode="idle",
+        read_at=_NOW,
+    )
+    snapshot = SystemSnapshot(
+        sequence_id=1,
+        captured_at=_NOW,
+        global_state=GlobalState.degraded,
+        operating_mode=SystemOperatingMode.degraded,
+        inverter=None,
+        battery=battery,
+        ev_charger=None,
+        grid_meter=None,
+        component_states={
+            DeviceRole.battery: ComponentState.active,
+            DeviceRole.inverter: ComponentState.unavailable,
+            DeviceRole.ev_charger: ComponentState.unavailable,
+            DeviceRole.grid_meter: ComponentState.unavailable,
+        },
+        data_age_seconds=dict.fromkeys(ALL_DEVICE_ROLES),
+        system_clock_status="valid",
+    )
+    # Sync the service's state store so the internal helper observes the
+    # same snapshot the public wrapper is called with.
+    service._state_store = _wrap(snapshot)
+
+    peak = 30.0
+    floor = 50.0
+
+    draft = ConstraintDraft(
+        session_id="session-wrapper",
+        peak_limit_kw=peak,
+        battery_reserve_floor_percent=floor,
+        validation_status="pending",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    internal = service._check_safety_pre(draft)
+
+    active = ActiveConstraints(
+        peak_limit_kw=peak,
+        battery_reserve_floor_percent=floor,
+        config_version=1,
+        activated_at=_NOW,
+    )
+    public = service.evaluate_safety_pre_check(active, snapshot)
+
+    assert public == internal
+    # Sanity — the chosen inputs really exercise the WARN branch so the
+    # equality above is not vacuously true on a single pass-result.
+    warn = next(c for c in public if c.status == "warn")
+    assert warn.name == "safety_pre_check"
+    assert warn.field == "battery_reserve_floor_percent"

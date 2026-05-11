@@ -338,9 +338,7 @@ class DeploymentValidationService:
                 # Defensive — would mean a concurrent run replaced our row.
                 # Cannot happen with the run lock in place, but kept for
                 # restart hydration safety.
-                raise RuntimeError(
-                    "validation result vanished between finalize and read"
-                )
+                raise RuntimeError("validation result vanished between finalize and read")
             return final
 
     async def acknowledge_warning(
@@ -466,9 +464,7 @@ class DeploymentValidationService:
             # stale". The previous code reported both as `outdated`, which
             # mis-classified a restart-before-hydration race.
             if current_version is None:
-                raise NotHandoffEligibleError(
-                    "handoff_not_eligible: provider_unavailable"
-                )
+                raise NotHandoffEligibleError("handoff_not_eligible: provider_unavailable")
             if current.config_version != current_version:
                 raise NotHandoffEligibleError("handoff_not_eligible: outdated")
             if current.overall_status == "complete-WARN":
@@ -489,9 +485,7 @@ class DeploymentValidationService:
                     now=now,
                 )
             except ValueError as exc:
-                raise NotHandoffEligibleError(
-                    "handoff_not_eligible: session_gone"
-                ) from exc
+                raise NotHandoffEligibleError("handoff_not_eligible: session_gone") from exc
             # P20 — read the persisted value back so idempotent re-handoff
             # returns what's actually stored (the wizard helper's CASE WHEN
             # branch preserves the prior `step_4_completed_config_version` on
@@ -576,9 +570,7 @@ class DeploymentValidationService:
                 name="validation_constraint_completeness",
             ),
             "constraint_safety_pre_check": asyncio.create_task(
-                self._check_constraint_safety_pre(
-                    active, state_snapshot=state_snapshot, now=now
-                ),
+                self._check_constraint_safety_pre(active, state_snapshot=state_snapshot, now=now),
                 name="validation_constraint_safety_pre",
             ),
             "control_readiness": asyncio.create_task(

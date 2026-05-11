@@ -169,6 +169,42 @@ def _validate_check_name(raw: str) -> DeploymentCheckName:
     return raw  # type: ignore[return-value]
 
 
+async def _render_ack_response_async(
+    request: Request,
+    svc: DeploymentValidationService,
+    csrf_token: str,
+    check_name: DeploymentCheckName,
+) -> HTMLResponse:
+    """P10 — render the row partial + OOB handoff swap for ack/revoke responses.
+
+    Spec AC8 line 357 contracts the ack/revoke roundtrip as a single-row swap
+    plus an OOB handoff-region update, NOT a full validation-region re-render.
+    Preserves the installer's focus and scroll position on the row they just
+    interacted with.
+    """
+    view = await svc.get_current_view()
+    if view.result is None:
+        # Defensive — the svc layer raises NoCurrentResultError before this
+        # point on a missing row, so this branch is unreachable in practice.
+        # Kept so a hypothetical race (concurrent run wiping the row) cannot
+        # render an empty fragment.
+        raise HTTPException(status_code=400, detail="no_current_result")
+    target = next((c for c in view.result.checks if c.name == check_name), None)
+    if target is None:
+        # Same defensive reasoning — repo invariants guarantee one entry per
+        # check_name in a complete result.
+        raise HTTPException(status_code=400, detail=f"unknown_check_name: {check_name}")
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_validation_ack_response.html",
+        {
+            "csrf_token": csrf_token,
+            "view": view,
+            "check": target,
+        },
+    )
+
+
 async def _require_step_3_complete(
     user_session_id: str,
     wizard_repo: WizardStateRepo,
@@ -1044,15 +1080,7 @@ async def post_acknowledge_warning(
         raise HTTPException(status_code=400, detail="no_current_result") from exc
     except (NotAckEligibleError, CheckNotWarnableError) as exc:
         raise HTTPException(status_code=400, detail=exc.reason) from exc
-    view = await svc.get_current_view()
-    return _templates.TemplateResponse(
-        request,
-        "installer/_setup_validation_result.html",
-        {
-            "csrf_token": user.csrf_token,
-            "view": view,
-        },
-    )
+    return await _render_ack_response_async(request, svc, user.csrf_token, name)
 
 
 @router.post(
@@ -1072,15 +1100,7 @@ async def post_revoke_warning(
         await svc.revoke_warning(check_name=name)
     except NoCurrentResultError as exc:
         raise HTTPException(status_code=400, detail="no_current_result") from exc
-    view = await svc.get_current_view()
-    return _templates.TemplateResponse(
-        request,
-        "installer/_setup_validation_result.html",
-        {
-            "csrf_token": user.csrf_token,
-            "view": view,
-        },
-    )
+    return await _render_ack_response_async(request, svc, user.csrf_token, name)
 
 
 @router.post("/installer/setup/validation/handoff")

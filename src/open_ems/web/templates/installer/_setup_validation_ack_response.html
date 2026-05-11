@@ -1,0 +1,16 @@
+{# Story 9.4 — P10 ack/revoke response.
+
+   Emits two elements:
+     1. The single updated check row (replaces #check-row-<name> by id).
+     2. The handoff region with hx-swap-oob="outerHTML" so the
+        disabled↔enabled transition lands atomically with the row swap.
+
+   Inputs:
+     check       — DeploymentCheckResult (the row whose ack state changed)
+     view        — DeploymentValidationView (post-mutation snapshot)
+     csrf_token  — string #}
+{% set acked = check.name in view.result.acknowledged_warnings %}
+{% include "installer/_setup_validation_check_row.html" %}
+
+{% set handoff_oob = true %}
+{% include "installer/_setup_validation_handoff.html" %}

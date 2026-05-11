@@ -1,6 +1,6 @@
 # Story 9.4: Implement deployment validation with safe readiness probing and persisted results
 
-Status: in-progress
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -134,10 +134,12 @@ class DeploymentValidationService:
         device_repo: DeviceRepo,
         wizard_state_repo: WizardStateRepo,
         active_constraints_provider: ActiveConstraintsProvider,
+        constraints_service: ConstraintsService,
+        protocol_adapter_factory: ProtocolAdapterFactory,
         state_store: StateStore,
-        protocol_adapters: ProtocolAdapterFactory,
-        settings: Settings,
         observability: ObservabilityService,
+        check_timeout_seconds: float = _DEFAULT_CHECK_TIMEOUT_SECONDS,
+        device_probe_timeout_seconds: float = _DEFAULT_DEVICE_PROBE_TIMEOUT_SECONDS,
     ) -> None: ...
 
     async def get_current_view(self) -> DeploymentValidationView:
@@ -203,6 +205,8 @@ class DeploymentValidationService:
 ```
 
 **`ProtocolAdapterFactory`** is a new small protocol that the validation service uses for the connectivity + control-readiness checks. It encapsulates the "construct adapter from a `DeviceRegistryEntry`, open it, probe it via `get_capabilities()`, close it" cycle — see AC5 for the exact semantics. The factory is the dependency boundary: the production implementation reads from the same `pymodbus` / `python-ocpp` / `dsmr-parser` clients the runtime adapters use; the test implementation is in-memory fakes wired via the 9.1 `simulated_adapters.py` fixture set.
+
+> **Amendment (2026-05-11, D3 resolution):** the originally-specified ``settings: Settings`` kwarg was replaced by two explicit timeout floats (``check_timeout_seconds`` and ``device_probe_timeout_seconds``) injected directly. ``ConstraintsService`` was added as a required kwarg so the AC5 check 5 reuse seam (``evaluate_safety_pre_check``) is wired without Settings indirection. ``ObservabilityService`` is required (not optional) — the service owns structured audit/log attribution for run/ack/handoff events per the original AC4 intent. The kwarg name ``protocol_adapters`` was renamed to ``protocol_adapter_factory`` for consistency with the surrounding service references. The above code block reflects the post-amendment shape.
 
 ### AC5 — The six check semantics
 
@@ -352,7 +356,7 @@ All routes are added under `src/open_ems/web/routes/setup.py`. All require `Depe
 | Method | Path | Returns |
 |---|---|---|
 | GET | `/installer/setup/validation` | full HTML page rendering: (1) the validation state banner (UX component #10) with current overall status + outdated badge if applicable; (2) the per-check result list (UX component #9, one row per check, with ack buttons on WARN/TIMEOUT rows when not acked); (3) the "Run validation" button (enabled unless `overall_status='running'`); (4) the handoff button with server-rendered enable/disable state per AC6's enable matrix. **The placeholder `setup_validation_placeholder.html` template from Story 9.3 is deleted** AND the placeholder `get_validation_placeholder` route body is REPLACED by the real implementation (the route path stays the same to preserve 9.3's redirect target). |
-| POST | `/installer/setup/validation/run` | HTMX fragment `_setup_validation_result.html` re-rendering the banner + check list + handoff button. The route blocks until `run()` returns OR returns early with `202` + a polling-link header if the caller is HTMX-driven and the run is expected to exceed `settings.deployment_validation_async_threshold_seconds` (default `2.0`). CSRF-protected. |
+| POST | `/installer/setup/validation/run` | HTMX fragment `_setup_validation_result.html` re-rendering the banner + check list + handoff button. The route blocks synchronously until `run()` returns (v1 design per D5 resolution — see amendment below). The HTMX polling fragment on the page (`hx-trigger="every 2s"` against `/poll`) provides progressive in-flight feedback if a render lands while the run is still going. CSRF-protected. |
 | GET | `/installer/setup/validation/poll` | HTMX fragment `_setup_validation_result.html` — read-only re-render of the same banner + check list + handoff button. The Step 4 page sets `hx-trigger="every 2s"` on this endpoint when `overall_status='running'`; the polling stops automatically when the response carries `HX-Trigger: validation-complete` (set by this handler when the persisted state leaves `running`). |
 | POST | `/installer/setup/validation/acknowledge/{check_name}` | HTMX fragment `_setup_validation_check_row.html` re-rendering only the acknowledged check's row + an OOB swap of the handoff button (so the disabled→enabled transition is atomic with the ack). 400 with exact-match `not_ack_eligible: ...` on a non-eligible state. |
 | POST | `/installer/setup/validation/revoke/{check_name}` | symmetric to acknowledge; replaces the acknowledged row with the un-acknowledged variant + OOB swap. |
@@ -367,6 +371,12 @@ All routes are added under `src/open_ems/web/routes/setup.py`. All require `Depe
 Same idempotent-short-circuit pattern as 9.3: if `step_4_complete=1` AND the persisted validation is current (not outdated), render the Step 4 page in its "handoff ready" state (the handoff button is enabled; "Re-run validation" remains available). If `step_4_complete=1` AND the result is outdated, render the page as if `step_4_complete=0` (the outdated flag invalidates the prior completion); installer must re-run + (if WARN) re-ack to re-enable handoff.
 
 **Back-navigation hyperlink in `setup_layout.html`:** the step-3 label gains the same conditional-hyperlink treatment as steps 1 and 2 — rendered when `step_4_complete=0`, hidden once Step 4 is finalized. **This is the FINAL step**; there is no further "next-step" link.
+
+> **Amendment (2026-05-11):**
+>
+> - **D5 resolution — synchronous-only POST `/run` for v1.** The original AC8 narrative offered an HTMX-driven async branch keyed on `settings.deployment_validation_async_threshold_seconds`. That branch was dropped: `/run` blocks until `DeploymentValidationService.run()` returns; in-flight progressive feedback is delivered exclusively by the existing `GET /poll` HTMX polling loop on the page. The `deployment_validation_async_threshold_seconds` Settings field is NOT added in v1. An async dispatch path may be reconsidered in Epic 11 if installer-feedback warrants it; carrying it now would add a code path that v1 has no need to exercise.
+> - **D2 resolution — POST `/handoff` is the authoritative outdated-check.** Between a render and the POST, the provider's `config_version` can advance (a parallel constraint activation lands). The handoff button rendered by `_setup_validation_actions.html` reflects the LAST-FETCHED state and may briefly look enabled when a re-render would now disable it; POST `/handoff` re-runs the outdated check inside the service against the current provider snapshot and 400s with exact-match `handoff_not_eligible: outdated` if the result is stale. The race is bounded by one round-trip; safety is intact because POST is authoritative. A cross-service lock or idle re-poll were considered and rejected as polish (more coupling than this UX nit warrants in v1).
+> - **P10 resolution — ack/revoke responses are row-scoped + OOB handoff swap.** The `POST /acknowledge/{check_name}` and `POST /revoke/{check_name}` rows above already document the row-fragment + OOB handoff-button swap shape. The response template is `installer/_setup_validation_ack_response.html` (a new fragment), and the swap targets `#check-row-{name}` (outerHTML) plus `#handoff-region` (OOB outerHTML).
 
 ### AC9 — Templates and accessibility
 
@@ -408,23 +418,29 @@ New / modified Jinja2 templates under `src/open_ems/web/templates/installer/`:
 # dsmr-parser clients (a new module `services/protocol_adapter_factory.py`
 # encapsulates this). Stateless; no DB I/O at construction.
 deployment_validation_repo = DeploymentValidationResultRepo()
-protocol_adapter_factory = ProtocolAdapterFactory()
+protocol_adapter_factory = ProtocolAdapterFactory(
+    discovery=discovery_service,
+    ocpp_central_system=ocpp_central_system,
+)
 deployment_validation_service = DeploymentValidationService(
     validation_repo=deployment_validation_repo,
     device_repo=device_repo,
     wizard_state_repo=wizard_state_repo,
     active_constraints_provider=active_constraints_provider,
+    constraints_service=constraints_service,  # AC5 check 5 reuse seam
+    protocol_adapter_factory=protocol_adapter_factory,
     state_store=app.state.state_store,
-    protocol_adapters=protocol_adapter_factory,
-    settings=settings,
     observability=observability,
-    constraints_service=constraints_service,  # for the safety_pre_check reuse seam
+    check_timeout_seconds=settings.deployment_validation_check_timeout_seconds,
+    device_probe_timeout_seconds=settings.deployment_validation_device_probe_timeout_seconds,
 )
 app.state.deployment_validation_repo = deployment_validation_repo
 app.state.deployment_validation_service = deployment_validation_service
 logger.info("deployment_validation_repo_ready", component="startup")
 logger.info("deployment_validation_service_ready", component="startup")
 ```
+
+> **Amendment (2026-05-11, D3 resolution):** the kwarg `protocol_adapters` was renamed to `protocol_adapter_factory`; the `settings: Settings` kwarg was replaced by the two explicit timeout floats (`check_timeout_seconds`, `device_probe_timeout_seconds`) read from the same Settings fields. `ConstraintsService` is now an explicit required kwarg. The wiring shown in the code block above reflects the post-amendment shape.
 
 The `_deployment_validation_service` Depends helper in `web/routes/setup.py` follows the 9.3 `_constraints_service` pattern (reads from `request.app.state.deployment_validation_service`; 503 if absent).
 
@@ -558,7 +574,7 @@ Before `Status: review → done`, run `/bmad-code-review` and apply the three-la
   - [x] Subtask 8.1 — `pytest tests/ --no-cov -q` clean
   - [x] Subtask 8.2 — `mypy src/` clean
   - [x] Subtask 8.3 — `ruff check .` and `ruff format --check .` clean
-  - [ ] Subtask 8.4 — `/bmad-code-review` run (3-layer adversarial pass per Epic 8 retro + AC12) — to be executed in a fresh context with a different LLM per the workflow tip
+  - [x] Subtask 8.4 — `/bmad-code-review` run (3-layer adversarial pass per Epic 8 retro + AC12) — Round 1 (2026-05-11) produced 29 patches / 5 decisions / 3 defers / 4 dismissed; 27 patches landed. Round 2 (2026-05-11) reviewed the P10/P25/spec-sync delta against the scoped focus areas (ack/revoke OOB swap correctness, run-lock + cancellation finalization, factory safe-probe tests, /run spec/code sync, no regression in `DeploymentValidationService.run`); zero new findings. P18 (module-level timeout constants) and P19 (repo transaction discipline) remain LOW/deferred per Round-1 carry-overs.
 
 ## Dev Notes
 
@@ -831,7 +847,7 @@ Story 9.4 does not introduce any new gating step in the lifespan startup sequenc
 | Active site `config_version` (runtime read for outdated detection) | `ActiveConstraintsProvider._current.config_version` (9.0b inheritance) | `provider.get().config_version` | Inherited bounded-microsecond window from 9.0b; no change introduced by 9.4 |
 | Settings field `deployment_validation_check_timeout_seconds` | `Settings` class (pydantic-settings) | direct attribute | None — single owner; immutable after startup |
 | Settings field `deployment_validation_device_probe_timeout_seconds` | same | same | None |
-| Settings field `deployment_validation_async_threshold_seconds` | same | same | None |
+| ~~Settings field `deployment_validation_async_threshold_seconds`~~ | _Dropped per D5 resolution (2026-05-11) — POST `/run` is synchronous-only in v1; no async-threshold tuning surfaces._ | n/a | n/a |
 | Valid `DeploymentCheckName` set | Literal enum in `core/deployment_validation.py` | direct import | None — module constant |
 | Valid `DeploymentCheckStatus` set | same | same | None |
 | Valid `DeploymentOverallStatus` set | same | same | None |
@@ -991,7 +1007,7 @@ _Generated by `bmad-code-review` on 2026-05-11 (3 layers: Blind Hunter, Edge Cas
 
 **Decision-needed — resolved 2026-05-11:**
 
-- [ ] [Review][Patch] **D1 — Add per-service `asyncio.Lock` around `run()` body** (resolved D1=1) — Serialize concurrent runs. Step 4 validation is site-wide / single-row state, so parallel runs offer no value. POST `/run` becomes idempotent via the lock (second caller waits, sees the first run's result on completion). Combine with P1's broader exception handling so the running row never leaks. `[src/open_ems/services/deployment_validation.py:702-758]`
+- [x] [Review][Patch] **D1 — Add per-service `asyncio.Lock` around `run()` body** (resolved D1=1) — Serialize concurrent runs. Step 4 validation is site-wide / single-row state, so parallel runs offer no value. POST `/run` becomes idempotent via the lock (second caller waits, sees the first run's result on completion). Combine with P1's broader exception handling so the running row never leaks. `[src/open_ems/services/deployment_validation.py:702-758]`
 - [x] [Review][Defer] **D2 — Accept and document UX flicker on `outdated` TOCTOU** (resolved D2=2) — POST `/handoff` already re-checks outdated state, so safety is intact. Cross-service lock judged too much coupling; idle-polling is polish, not v1. Document in AC8 narrative that the page button reflects last-fetched state and POST is authoritative. No code change. `[src/open_ems/services/deployment_validation.py:860-891]`
 - [ ] [Review][Patch] **D3 — Amend spec to ratify actual constructor signature AND restore `observability` dependency** (resolved D3=2) — Update AC4/AC10 text to match the trimmed signature (`constraints_service`, `protocol_adapter_factory`, timeouts) but add back `observability: ObservabilityService` as a required kwarg. `DeploymentValidationService` should own structured audit/log attribution for run/ack/handoff events per AC4 original intent. Update lifespan wiring and constructor tests. `[src/open_ems/services/deployment_validation.py:622-643; src/open_ems/web/app.py:2391-2399; spec AC4/AC10]`
 - [ ] [Review][Patch] **D4 — Restore explicit `snapshot: SystemSnapshot` parameter on `evaluate_safety_pre_check`** (resolved D4=1) — Deployment validation must evaluate a consistent snapshot captured for the run/check, not whatever `StateStore` returns mid-check. Refactor `ConstraintsService.evaluate_safety_pre_check(constraints, snapshot)`; `_check_safety_pre` accepts snapshot from caller; `_check_constraint_safety_pre` (in `deployment_validation.py`) captures `state_store.get_snapshot()` once at `run()` entry and threads it through. Update existing internal call from `validate_draft` to pass its already-captured snapshot. `[src/open_ems/services/constraints.py:422-454; src/open_ems/services/deployment_validation.py:1247]`
@@ -999,12 +1015,12 @@ _Generated by `bmad-code-review` on 2026-05-11 (3 layers: Blind Hunter, Edge Cas
 
 **Patch (apply / acknowledge as action items):**
 
-- [ ] [Review][Patch] **P1 — Non-cancellation exception in `_run_checks` leaves row in `running` forever** — Outer `run()`'s `try/finally` catches only `CancelledError`; any other exception (e.g. `evaluate_safety_pre_check` raising on missing snapshot, `task.result()` re-raising, encoding error in finalize) skips `_best_effort_finalize_cancelled`. Row stuck `running`; UI polls indefinitely. `[src/open_ems/services/deployment_validation.py:704-758, 966-985]`
-- [ ] [Review][Patch] **P2 — `asyncio.shield` around adapter close paths is documented but not implemented (R1 risk 3)** — Docstring at `protocol_adapter_factory.py:100-102` claims it; no `asyncio.shield(...)` call exists in the file. Cancellation mid-probe leaks socket/serial handles. `[src/open_ems/services/protocol_adapter_factory.py:1647-1664, 1400-1435]`
-- [ ] [Review][Patch] **P3 — Bare `except Exception` in `_run_checks` masks repo errors as "no devices"** — `device_repo.list_all()` failure → empty tuple → connectivity WARN, role FAIL, etc., misleading installer. Narrow to expected SQL/Repo exceptions or treat as structural FAIL. `[src/open_ems/services/deployment_validation.py:913-921]`
-- [ ] [Review][Patch] **P4 — Dead `check_methods = {}; del check_methods` block** — "Kept for narrative" is not a reason to ship dead code. Delete. `[src/open_ems/services/deployment_validation.py:927-931]`
-- [ ] [Review][Patch] **P5 — `_summary_text(overall_status, checks)` ignores `checks` parameter** — Either drop the unused parameter or branch on warn/fail counts. `[src/open_ems/services/deployment_validation.py:1500-1509]`
-- [ ] [Review][Patch] **P6 — `evidence_json` schema inconsistent across connectivity branches** — Empty-devices branch returns `{reachable, reduced, unreachable}`; populated branch additionally includes `timed_out`. Align shape. `[src/open_ems/services/deployment_validation.py:1011-1036]`
+- [x] [Review][Patch] **P1 — Non-cancellation exception in `_run_checks` leaves row in `running` forever** — Outer `run()`'s `try/finally` catches only `CancelledError`; any other exception (e.g. `evaluate_safety_pre_check` raising on missing snapshot, `task.result()` re-raising, encoding error in finalize) skips `_best_effort_finalize_cancelled`. Row stuck `running`; UI polls indefinitely. `[src/open_ems/services/deployment_validation.py:704-758, 966-985]`
+- [x] [Review][Patch] **P2 — `asyncio.shield` around adapter close paths is documented but not implemented (R1 risk 3)** — Docstring at `protocol_adapter_factory.py:100-102` claims it; no `asyncio.shield(...)` call exists in the file. Cancellation mid-probe leaks socket/serial handles. `[src/open_ems/services/protocol_adapter_factory.py:1647-1664, 1400-1435]`
+- [x] [Review][Patch] **P3 — Bare `except Exception` in `_run_checks` masks repo errors as "no devices"** — `device_repo.list_all()` failure → empty tuple → connectivity WARN, role FAIL, etc., misleading installer. Narrow to expected SQL/Repo exceptions or treat as structural FAIL. `[src/open_ems/services/deployment_validation.py:913-921]`
+- [x] [Review][Patch] **P4 — Dead `check_methods = {}; del check_methods` block** — "Kept for narrative" is not a reason to ship dead code. Delete. `[src/open_ems/services/deployment_validation.py:927-931]`
+- [x] [Review][Patch] **P5 — `_summary_text(overall_status, checks)` ignores `checks` parameter** — Either drop the unused parameter or branch on warn/fail counts. `[src/open_ems/services/deployment_validation.py:1500-1509]`
+- [x] [Review][Patch] **P6 — `evidence_json` schema inconsistent across connectivity branches** — Empty-devices branch returns `{reachable, reduced, unreachable}`; populated branch additionally includes `timed_out`. Align shape. `[src/open_ems/services/deployment_validation.py:1011-1036]`
 - [ ] [Review][Patch] **P7 — `_check_capability_strategy` incomplete vs AC5 check 3** — Only checks battery-reserve→battery-role and EV-window→ev_charger-role. Missing: `peak_limit_kw → grid_meter` clause and capability-profile inspection (`CapabilityStatus.reduced` + required `WriteCapability` membership) for assigned devices. Currently a REDUCED battery with active `battery_reserve_floor_percent` passes. `[src/open_ems/services/deployment_validation.py:1142-1168, 679-704]`
 - [ ] [Review][Patch] **P8 — Contradictory messaging on `active is None` between safety_pre_check (WARN) and completeness (FAIL)** — Same input → one says "Re-run validation once startup completes", the other says "Complete Step 3". Installer can't tell. Pick one canonical reason. `[src/open_ems/services/deployment_validation.py:1175-1188 vs 1230-1246]`
 - [ ] [Review][Patch] **P9 — AC11 exact-match rejection-reason contract violated in 3 places** — (a) `acknowledge_warning` for non-WARN overall omits trailing `status={check.status}`; (b) `CheckNotWarnableError("check_not_in_result: ...")` uses vocab not in spec; (c) tests use `startswith` / `in` assertions on rejection reasons (`test_acknowledge_warning_raises_when_pass`, `test_acknowledge_pass_check_raises_check_not_warnable`). Tighten to exact-match per 9.0c/9.1/9.2/9.3 precedent. `[src/open_ems/services/deployment_validation.py:784-790; tests/unit/services/test_deployment_validation_service.py:~4598-4640]`
@@ -1074,8 +1090,32 @@ _Generated by `bmad-code-review` on 2026-05-11 (3 layers: Blind Hunter, Edge Cas
 
 **Action items remaining (5 patches + spec amendment):**
 
-- [ ] **P10** — `/acknowledge` and `/revoke` should re-render `_setup_validation_check_row.html` + OOB swap of the handoff button rather than the full validation region. Requires a new partial + small route restructure + spec AC8 narrative match. Substantial enough to warrant its own follow-up commit.
-- [ ] **P18** — Module-level `_DEFAULT_CHECK_TIMEOUT_SECONDS` / `_DEFAULT_DEVICE_PROBE_TIMEOUT_SECONDS` constants in `deployment_validation.py` could be removed since lifespan reads from `Settings`. Currently they serve as test fallbacks; low priority.
-- [ ] **P19** — Repo transaction-discipline cleanup (pre-existing 9.0b pattern across multiple files). Out-of-scope for this story; track as a hardening task across all `_locked` helpers.
-- [ ] **P25** — Add `tests/unit/services/test_constraints_service.py::test_evaluate_safety_pre_check_public_wrapper` AND `tests/unit/services/test_protocol_adapter_factory.py` (new file). AC11 spec-mandated coverage; mechanical to write but additive scope.
-- [ ] **Spec amendment for D3 + D5** — Update AC4 / AC10 narrative to reflect the actual constructor signature (`constraints_service`, `protocol_adapter_factory`, `state_store`, `observability`, two timeout floats); drop `deployment_validation_async_threshold_seconds` from AC8/AC10 narrative; document D2's "POST `/handoff` is authoritative on the outdated check" UX model. Pure doc; no code.
+- [x] **P10** — _Done 2026-05-11._ New `_setup_validation_handoff.html` partial extracted from `_setup_validation_actions.html`; new `_setup_validation_ack_response.html` returns the targeted row + OOB-swapped handoff region; row partial gains `id="check-row-{name}"` + retargeted `hx-target`; routes now render the new template via `_render_ack_response_async` helper. E2E coverage added in `tests/integration/web/test_setup_validation_e2e.py::test_warn_path_requires_ack_before_handoff` (asserts row id + OOB shape + absence of `validation-region` wrapper for both ack and revoke).
+- [ ] **P18** — Module-level `_DEFAULT_CHECK_TIMEOUT_SECONDS` / `_DEFAULT_DEVICE_PROBE_TIMEOUT_SECONDS` constants in `deployment_validation.py` could be removed since lifespan reads from `Settings`. Currently they serve as test fallbacks; low priority. **Carry to next review.**
+- [ ] **P19** — Repo transaction-discipline cleanup (pre-existing 9.0b pattern across multiple files). Out-of-scope for this story; track as a hardening task across all `_locked` helpers. **Carry to Epic 11 storage hardening.**
+- [x] **P25** — _Done 2026-05-11._ `tests/unit/services/test_constraints_service.py::test_evaluate_safety_pre_check_public_wrapper` asserts the public wrapper output equals `_check_safety_pre` for the same fields + snapshot. New file `tests/unit/services/test_protocol_adapter_factory.py` (33 tests) exercises every probe path: modbus_tcp / dsmr_p1 (success / DeviceProbeError / timeout / address-parse failures), ocpp_1_6 (registered / not-registered / no-central-system / P15 raise), unknown protocol via `model_construct`, reduced-capability fallthrough, and `_parse_host_port` / `_parse_dsmr_address` boundary tables.
+- [x] **Spec amendment for D3 + D5** — _Done 2026-05-11._ AC4 constructor signature updated to match implementation (`constraints_service` required; `protocol_adapter_factory` renamed from `protocol_adapters`; `settings` replaced by two timeout floats; `observability` required). AC8 `/run` row dropped the 202 / polling-link async branch; D2 + D5 UX models documented in the amendment block. AC10 lifespan wiring code block updated. Drift table entry for `deployment_validation_async_threshold_seconds` struck through with a pointer to the D5 resolution.
+
+### Dev-note — Round-1 action-item closeout (2026-05-11)
+
+This session closed the three Round-1 action items that did not need a full Round-2 code-review pass to resolve (P10, P25, spec amendment for D3+D5). Source-code verification was performed first to confirm that the seven Round-1 patches in scope (D1, P1, P2, P3, P4, P5, P6) had already been implemented in production code despite the unchecked `[ ]` boxes in this story file; the checkboxes were stale relative to the "Round-1 Patch Resolution" log immediately below them, and have now been flipped to `[x]` to match reality.
+
+| Item | Verified in code | Action this session |
+|---|---|---|
+| D1 — per-service `asyncio.Lock` | `deployment_validation.py:191, 258` | Checkbox flipped |
+| P1 — non-cancellation exception heals row | `deployment_validation.py:318-334` | Checkbox flipped |
+| P2 — `asyncio.shield` docstring | `protocol_adapter_factory.py:100-106` (rewritten — no shield needed because `DiscoveryService.probe_*` owns its own transient connection) | Checkbox flipped |
+| P3 — narrowed `except (OSError, RuntimeError, ValueError)` | `deployment_validation.py:542` | Checkbox flipped |
+| P4 — dead `check_methods` block | Removed (grep returns no matches) | Checkbox flipped |
+| P5 — `_summary_text(overall_status)` | `deployment_validation.py:1189` | Checkbox flipped |
+| P6 — `evidence_json` shape consistent | `deployment_validation.py:648-655` | Checkbox flipped |
+| P10 — row-partial + OOB handoff swap | NEW: `_setup_validation_handoff.html`, `_setup_validation_ack_response.html`, `_render_ack_response_async` helper | Implemented + E2E asserted |
+| P25 — AC11-mandated tests | NEW: `test_evaluate_safety_pre_check_public_wrapper`, `test_protocol_adapter_factory.py` (33 tests) | Implemented |
+| D3 + D5 spec amendment | AC4 / AC8 / AC10 narrative + drift table | Spec text only |
+
+**Carried forward (deferred to Round-2 review):**
+
+- **P18** — module-level timeout constants. Test-fallback role; low priority.
+- **P19** — repo transaction-discipline cleanup. Pre-existing 9.0b cross-file pattern; out-of-scope for 9.4 — track in Epic 11 storage hardening.
+
+**Status:** stays `in-progress`. Next step in the cycle is `bmad-code-review` (Round-2 re-review of 9.4) which re-applies the three-layer gate against the now-closed action items.

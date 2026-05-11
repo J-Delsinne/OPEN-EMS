@@ -4,6 +4,7 @@
    and ``acked`` (bool, true if this check has an installer ack). #}
 {% set status_class = "status-" ~ check.status %}
 <li
+  id="check-row-{{ check.name }}"
   class="validation-row {{ status_class }}"
   role="region"
   aria-label="Check: {{ check.name }}"
@@ -38,7 +39,7 @@
           method="post"
           action="/installer/setup/validation/revoke/{{ check.name }}"
           hx-post="/installer/setup/validation/revoke/{{ check.name }}"
-          hx-target="#validation-region"
+          hx-target="#check-row-{{ check.name }}"
           hx-swap="outerHTML"
           style="display:inline"
         >
@@ -51,7 +52,7 @@
         method="post"
         action="/installer/setup/validation/acknowledge/{{ check.name }}"
         hx-post="/installer/setup/validation/acknowledge/{{ check.name }}"
-        hx-target="#validation-region"
+        hx-target="#check-row-{{ check.name }}"
         hx-swap="outerHTML"
       >
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />

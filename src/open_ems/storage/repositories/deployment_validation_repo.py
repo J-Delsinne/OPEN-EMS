@@ -121,9 +121,7 @@ class DeploymentValidationResultRepo:
                 overall_status="complete-FAIL",
                 checks=checks,
                 triggered_by_session_id=str(row[6]) if row[6] is not None else None,
-                summary_text=(
-                    "Validation result data is corrupted; please run validation again."
-                ),
+                summary_text=("Validation result data is corrupted; please run validation again."),
                 acknowledged_warnings=acks,
             )
         return DeploymentValidationResult(
