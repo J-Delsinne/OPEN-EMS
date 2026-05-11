@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: '2026-05-01'
-last_updated: '2026-05-11'  # Epic 9 retrospective complete (2026-05-11). Document: _bmad-output/implementation-artifacts/epic-9-retro-2026-05-11.md. Headline: "Epic 9 proved the architecture can handle installer orchestration, but proved the review-closure workflow needs the same structural enforcement as story creation." Retro key flipped: epic-9-retrospective optional → done. `epic-9` itself remains `in-progress` (NOT transitioned to done) per retro Part 2 — five hard gates before Epic 10: R1 (audit/repair 9-4 review-checkbox state vs current code), R2 (resolve 9-3 file-Status `in-progress` vs sprint-status `done` discrepancy), R3 (triage 9-Y-a..f carry-over sub-stories per must-before / safe-during / acceptable-post framework), 9-Y-a (HIGH-severity FAIL-abort E2E coverage from 9-3 round 2), 9-X-wire-adapter-map-into-policy-guard-and-control-loop (full BMAD story; A2-triggered T1+T5+T7; closes 8-2's adapters={} gap; hard before Story 10.2, preferably before Epic 10 planning). Headline retro action items: A7 — codify review-closure enforcement in bmad-code-review (mechanical block on Status: review → done unless every review-finding checkbox is resolved/dismissed/linked-to-deferred-work.md; same enforcement class as A1/A2 in bmad-create-story); A8 — story-file Status ↔ sprint-status.yaml consistency check (script or pre-commit hook); A9 — deferred-findings triage applied at moment of deferral, not retroactively. Do NOT start Epic 10 story work until R1/R2/R3/9-Y-a are resolved and 9-X is created as the prep gate.
+last_updated: '2026-05-11'  # Story 9-Y-a-e2e-fail-abort-coverage closed via bmad-code-review on 2026-05-11 (Status: review → done) after the A7 review-closure structural gate passed: 0 resolved, 8 dismissed-with-rationale (inline in story file), 6 deferred-and-verified (linked to deferred-work.md under "Deferred from: code review of 9-Y-a-e2e-fail-abort-coverage (2026-05-11)"). All 6 deferred items are classified acceptable-post-epic-10; none block Epic 10 work. This was the FIRST proof-of-enforcement story for the A7 gate (codified 2026-05-11 per Epic 9 retro) and it exercised the gate's three closure-criteria paths end-to-end: criterion 1 (Resolved) untouched, criterion 2 (Dismissed-with-rationale) walked 8 times, criterion 3 (Deferred-and-linked) walked 6 times with file:line citation verification against deferred-work.md. Tests-only delivery: +2 E2E tests (1413 → 1415 net) in tests/integration/web/test_setup_constraints_e2e.py covering the HIGH-severity FAIL-abort path (peak_limit_kw=0.4 structural FAIL via both direct-activate and re-edit-after-validate-pass paths). The misnamed test_e2e_live_state_shift_aborts_activation_with_safety_fail was renamed to test_e2e_grid_overload_warn_does_not_block_activation. Quality gates green: ruff check + format clean, mypy clean across 96 source files. 9-X-wire-adapter-map-into-policy-guard-and-control-loop remains the architectural prep gate before Epic 10 Story 10.2 and is NOT yet created — it is now the ONLY remaining hard gate before Epic 10 story work (10-1+) can begin. Epic 9 retro document: _bmad-output/implementation-artifacts/epic-9-retro-2026-05-11.md.
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
@@ -127,6 +127,11 @@ development_status:
   9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: done
   9-4-implement-deployment-validation-with-safe-readiness-probing-and-persisted-results: done
   9-5-installer-handoff-guide: done
+  # Carry-over sub-stories from 9-3 round-2 review (triaged 2026-05-11 per Epic 9 retro R3).
+  # Classification recorded inline in deferred-work.md; only must-before-epic-10 items are
+  # tracked here as development_status entries. 9-Y-b..f are tracked exclusively in
+  # deferred-work.md until they enter active development.
+  9-Y-a-e2e-fail-abort-coverage: done
   epic-9-retrospective: done
 
   # ─── Epic 10: Homeowner Dashboard and Controls ─────────────────────────────

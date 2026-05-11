@@ -356,13 +356,23 @@ async def test_e2e_persistence_draft_survives_simulated_restart(
     assert 'value="30.00"' in response.text
 
 
-async def test_e2e_live_state_shift_aborts_activation_with_safety_fail(
+async def test_e2e_grid_overload_warn_does_not_block_activation(
     app_e2e,
 ) -> None:
-    """Validate passes; then push a new state where peak < 0.5 kW would be
-    needed (we simulate by pushing a battery state that drops the validate
-    pass into a WARN, but the structural FAIL only triggers on schema —
-    instead we use the route's no-changes path on a fresh activation).
+    """Validate passes with the live grid quiescent; then push a snapshot in
+    which the grid is importing 50 kW (above the new 30 kW peak limit) and
+    activate. The activate route's re-validation inside the write lock
+    produces a fresh ``safety_pre_check`` WARN for the over-limit grid power
+    — but WARNs do not abort activation. Only ``status='fail'`` rows do.
+    The activation still succeeds; the WARN is informational.
+
+    Note on naming: no ``safety_pre_check`` FAIL outcome today depends on
+    snapshot state — the only structural FAIL (``peak_limit_kw < 0.5``) is a
+    property of the draft itself, not the runtime snapshot. The FAIL-abort
+    counterpart tests live below in
+    ``test_e2e_activate_without_prior_validate_aborts_on_structural_fail``
+    and ``test_e2e_activate_aborts_when_re_validation_finds_fresh_structural_fail``
+    (Story 9.Y-a, closing R2P3 from the 9-3 round-2 review).
     """
     app, state = app_e2e
     await _add_grid_meter()
@@ -385,8 +395,8 @@ async def test_e2e_live_state_shift_aborts_activation_with_safety_fail(
     )
     assert "Overall: VALID" in validate_pass.text
     # Now push a state where grid is importing 50 kW > 30 kW limit. Re-validate
-    # inside activate must produce a WARN — but WARN doesn't fail; the
-    # activation still succeeds. Verify by checking the new active row.
+    # inside activate produces a WARN — but WARN doesn't fail; the activation
+    # still succeeds.
     snap = SystemSnapshot(
         sequence_id=1,
         captured_at=_NOW,
@@ -448,3 +458,218 @@ async def test_e2e_provider_snapshot_updated_after_activation(
     provider = app.state.active_constraints_provider
     assert provider.get().peak_limit_kw == 40.0
     assert provider.get().battery_reserve_floor_percent == 15.0
+
+
+# ---------------------------------------------------------------------------
+# FAIL-abort coverage (Story 9.Y-a — closes R2P3 from 9-3 round-2 review)
+#
+# These tests anchor Story 9.3 AC6 step 5 end-to-end: "a state change between
+# prior validate and activate that flips a check to FAIL aborts activation,
+# leaves no `active_constraints` row, and persists the new FAIL report to the
+# draft." Until 9.Y-a, only unit-level coverage existed (the WARN variant) and
+# the misnamed e2e test above did not actually exercise a FAIL outcome.
+#
+# Today the only `safety_pre_check` FAIL outcome is the structural
+# `peak_limit_kw < 0.5 kW` rule (see `_check_safety_pre_pure`). That rule is a
+# property of the draft itself, not of the snapshot. The two scenarios below
+# cover the two routes that can land at `activate` with such a draft:
+#   (1) activate without ever calling /validate;
+#   (2) validate-pass, then re-edit the draft to a FAIL value (which
+#       `upsert_draft` quietly resets to `validation_status='pending'`),
+#       then activate without re-validating.
+# In both cases the activate route re-runs validation inside the write lock
+# and discovers the fresh FAIL.
+# ---------------------------------------------------------------------------
+
+
+async def _count_rows(table: str) -> int:
+    conn = get_connection()
+    async with conn.execute(f"SELECT COUNT(*) AS n FROM {table}") as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+async def test_e2e_activate_without_prior_validate_aborts_on_structural_fail(
+    app_e2e,
+) -> None:
+    """Activate directly with ``peak_limit_kw=0.4`` (below the 0.5 kW
+    structural-FAIL threshold) without an intervening ``/validate`` call.
+    The activate route re-runs validation inside the write lock, discovers
+    the fresh structural FAIL from ``_check_safety_pre_pure``, persists
+    ``validation_status='failed'`` to the draft, leaves the
+    ``active_constraints`` + ``config_audit_log`` tables untouched, and
+    returns HTTP 400.
+
+    Story 9.Y-a AC1; closes the HIGH-severity FAIL-abort E2E coverage gap
+    (R2P3 from 9-3 round-2 review).
+    """
+    app, _ = app_e2e
+    await _add_grid_meter()
+    raw, sid = await _create_session()
+    client = TestClient(app, base_url="https://test", follow_redirects=False)
+
+    active_before = await _count_rows("active_constraints")
+    audit_before = await _count_rows("config_audit_log")
+
+    client.post(
+        "/installer/setup/constraints/draft",
+        cookies={"session": raw},
+        headers={"X-CSRF-Token": _CSRF},
+        data={
+            "peak_limit_kw": "0.4",
+            "battery_reserve_floor_percent": "20",
+        },
+    )
+    # No /validate call. Drive the activate route directly so the FAIL
+    # surfaces inside the activate route's re-validation, not at validate-time.
+    activate = client.post(
+        "/installer/setup/constraints/activate",
+        cookies={"session": raw},
+        headers={"X-CSRF-Token": _CSRF},
+    )
+
+    assert activate.status_code == 400
+
+    # No new active_constraints row was committed; the fixture seed at
+    # config_version=1 (peak=25.0, floor=20.0) is the only row.
+    assert await _count_rows("active_constraints") == active_before
+    conn = get_connection()
+    async with conn.execute(
+        "SELECT peak_limit_kw, battery_reserve_floor_percent, config_version"
+        " FROM active_constraints"
+    ) as cur:
+        rows = list(await cur.fetchall())
+    assert len(rows) == 1
+    assert rows[0]["peak_limit_kw"] == 25.0
+    assert rows[0]["battery_reserve_floor_percent"] == 20.0
+    assert rows[0]["config_version"] == 1
+
+    # No new audit row was written.
+    assert await _count_rows("config_audit_log") == audit_before
+
+    # The draft carries the fresh FAIL outcome.
+    persisted = await DraftConstraintsRepo().get(sid)
+    assert persisted is not None
+    assert persisted.validation_status == "failed"
+    assert persisted.validation_report is not None
+    assert persisted.validation_report.overall_status == "failed"
+    fail_checks = [c for c in persisted.validation_report.checks if c.status == "fail"]
+    assert len(fail_checks) == 1
+    fail = fail_checks[0]
+    assert fail.name == "safety_pre_check"
+    assert fail.field == "peak_limit_kw"
+    assert fail.message == ("Peak limit below 0.5 kW would block all grid imports indefinitely.")
+
+    # Wizard state did not advance to step_3_complete.
+    wizard = await WizardStateRepo().get(sid)
+    assert wizard is not None
+    assert wizard.step_3_complete is False
+    assert wizard.step_3_activated_config_version is None
+
+    # The provider snapshot is unchanged — no reload side-effect leaked from
+    # the failed activation.
+    provider = app.state.active_constraints_provider
+    assert provider.get().peak_limit_kw == 25.0
+    assert provider.get().battery_reserve_floor_percent == 20.0
+
+
+async def test_e2e_activate_aborts_when_re_validation_finds_fresh_structural_fail(
+    app_e2e,
+) -> None:
+    """Validate a passing draft (peak=30); then re-edit the draft to
+    ``peak_limit_kw=0.4`` (the ``upsert_draft`` path resets
+    ``validation_status='pending'``); then activate without re-validating.
+    The activate route's in-lock re-validation surfaces the fresh structural
+    FAIL even though the installer never saw it at validate-time. Same
+    contract assertions as the direct-activate case: 400 status, no new
+    active_constraints or audit rows, persisted FAIL on the draft, wizard
+    state unmoved, provider snapshot unchanged.
+
+    Story 9.Y-a AC2; exercises the validate-pass → re-edit-FAIL flow that
+    the original misnamed test claimed to cover but did not.
+    """
+    app, _ = app_e2e
+    await _add_grid_meter()
+    raw, sid = await _create_session()
+    client = TestClient(app, base_url="https://test", follow_redirects=False)
+
+    # First draft + validate establishes the validate-pass precondition.
+    client.post(
+        "/installer/setup/constraints/draft",
+        cookies={"session": raw},
+        headers={"X-CSRF-Token": _CSRF},
+        data={
+            "peak_limit_kw": "30",
+            "battery_reserve_floor_percent": "20",
+        },
+    )
+    validate_pass = client.post(
+        "/installer/setup/constraints/validate",
+        cookies={"session": raw},
+        headers={"X-CSRF-Token": _CSRF},
+    )
+    assert "Overall: VALID" in validate_pass.text
+
+    active_before = await _count_rows("active_constraints")
+    audit_before = await _count_rows("config_audit_log")
+
+    # Re-edit the draft to a structural-FAIL value. upsert_draft resets
+    # validation_status to 'pending'; the previous 'valid' status is no
+    # longer authoritative for activation gating.
+    client.post(
+        "/installer/setup/constraints/draft",
+        cookies={"session": raw},
+        headers={"X-CSRF-Token": _CSRF},
+        data={
+            "peak_limit_kw": "0.4",
+            "battery_reserve_floor_percent": "20",
+        },
+    )
+    # Activate WITHOUT re-validating — the FAIL surfaces only in the
+    # activate route's in-lock re-validation.
+    activate = client.post(
+        "/installer/setup/constraints/activate",
+        cookies={"session": raw},
+        headers={"X-CSRF-Token": _CSRF},
+    )
+
+    assert activate.status_code == 400
+
+    # The rendered banner carries both the operator-facing reason copy and
+    # the per-check FAIL message from _check_safety_pre_pure.
+    body = activate.text
+    assert "Cannot activate constraints" in body
+    assert "Validation failed" in body  # reason_message for constraints_validation_failed
+    assert "safety_pre_check" in body
+    assert "Peak limit below 0.5 kW would block all grid imports indefinitely." in body
+
+    # DB-state assertions mirror the direct-activate case.
+    assert await _count_rows("active_constraints") == active_before
+    assert await _count_rows("config_audit_log") == audit_before
+    conn = get_connection()
+    async with conn.execute("SELECT peak_limit_kw, config_version FROM active_constraints") as cur:
+        rows = list(await cur.fetchall())
+    assert len(rows) == 1
+    assert rows[0]["peak_limit_kw"] == 25.0
+    assert rows[0]["config_version"] == 1
+
+    persisted = await DraftConstraintsRepo().get(sid)
+    assert persisted is not None
+    assert persisted.peak_limit_kw == 0.4  # the re-edit landed
+    assert persisted.validation_status == "failed"
+    assert persisted.validation_report is not None
+    assert persisted.validation_report.overall_status == "failed"
+    fail_checks = [c for c in persisted.validation_report.checks if c.status == "fail"]
+    assert len(fail_checks) == 1
+    assert fail_checks[0].name == "safety_pre_check"
+    assert fail_checks[0].field == "peak_limit_kw"
+
+    wizard = await WizardStateRepo().get(sid)
+    assert wizard is not None
+    assert wizard.step_3_complete is False
+    assert wizard.step_3_activated_config_version is None
+
+    provider = app.state.active_constraints_provider
+    assert provider.get().peak_limit_kw == 25.0
+    assert provider.get().battery_reserve_floor_percent == 20.0
