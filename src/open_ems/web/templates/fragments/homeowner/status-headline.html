@@ -1,0 +1,13 @@
+<section
+  id="status-headline"
+  class="status-headline status-headline--{{ presentation_mode }}"
+  data-presentation-mode="{{ presentation_mode }}"
+  data-operating-mode="{{ operating_mode }}"
+  data-active-strategy="{{ active_strategy }}"
+  aria-label="System status"
+>
+  <h2 class="status-headline__heading">
+    <span class="status-headline__text" aria-live="polite">{{ headline_text }}</span>
+  </h2>
+  <p class="status-headline__explanation">{% if explanation_text %}{{ explanation_text }}{% else %}&nbsp;{% endif %}</p>
+</section>

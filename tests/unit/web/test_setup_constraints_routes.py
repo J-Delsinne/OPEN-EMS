@@ -20,6 +20,7 @@ from open_ems.core.devices import DeviceRole
 from open_ems.core.state import (
     ALL_DEVICE_ROLES,
     ComponentState,
+    EnergyStrategy,
     GlobalState,
     SystemOperatingMode,
     SystemSnapshot,
@@ -132,6 +133,7 @@ def _empty_snapshot() -> SystemSnapshot:
         captured_at=_NOW,
         global_state=GlobalState.degraded,
         operating_mode=SystemOperatingMode.degraded,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=None,
         battery=None,
         ev_charger=None,

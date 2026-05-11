@@ -11,6 +11,7 @@ import pytest
 from open_ems.core import (
     DegradedDeviceState,
     DeviceRole,
+    EnergyStrategy,
     GridMeterState,
     InverterState,
     StateStore,
@@ -831,6 +832,47 @@ def test_initial_monthly_peak_kw_rejects_negative_and_nan(bogus_value: float) ->
     assert bogus_value < 0.0 or not math.isfinite(bogus_value)
     with pytest.raises(ValueError, match="initial_monthly_peak_kw"):
         _control_loop_with_seed(bogus_value)
+
+
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        EnergyStrategy.minimize_cost,
+        EnergyStrategy.maximize_self_consumption,
+        EnergyStrategy.prioritize_ev,
+    ],
+)
+async def test_evaluation_input_strategy_reads_from_snapshot_active_strategy(
+    strategy: EnergyStrategy,
+) -> None:
+    """Story 10.1 AC3 / AC17: ``_build_evaluation_input`` MUST source ``strategy``
+    from ``snapshot.active_strategy`` rather than a hardcoded enum value. Each
+    EnergyStrategy variant is exercised end-to-end through the StateStore →
+    ControlLoop boundary."""
+    grid_adapter = MagicMock()
+    grid_adapter.device_id = "grid-001"
+    grid_adapter.get_state = AsyncMock(return_value=_grid_meter_state())
+    inverter_adapter = MagicMock()
+    inverter_adapter.device_id = "inv-001"
+    inverter_adapter.get_state = AsyncMock(return_value=_inverter_state())
+    store = StateStore(system_clock_status="valid", active_strategy=strategy)
+    loop = _control_loop(
+        state_store=store,
+        adapters={
+            DeviceRole.grid_meter: grid_adapter,
+            DeviceRole.inverter: inverter_adapter,
+        },
+    )
+    interval_start = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
+    _set_tracker_to_boundary(loop, interval_start)
+
+    device_states = await loop._poll_adapters()  # noqa: SLF001
+    snapshot = await store.publish(device_states, operating_mode=None)
+    evaluation_input = loop._build_evaluation_input(  # noqa: SLF001
+        snapshot, datetime(2026, 5, 5, 12, 5, 0, tzinfo=UTC)
+    )
+
+    assert evaluation_input.strategy is strategy
 
 
 def _control_loop_with_seed(seed: float) -> ControlLoop:

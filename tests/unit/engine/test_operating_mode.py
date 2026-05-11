@@ -228,6 +228,7 @@ def test_from_snapshot_copies_slots_and_does_not_echo_snapshot_operating_mode() 
         captured_at=_NOW_UTC,
         global_state=GlobalState.failed,
         operating_mode=SystemOperatingMode.fail_safe,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=_inverter(),
         battery=None,
         ev_charger=None,

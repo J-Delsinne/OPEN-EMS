@@ -24,6 +24,7 @@ from open_ems.core.devices import (
 from open_ems.core.state import (
     ALL_DEVICE_ROLES,
     ComponentState,
+    EnergyStrategy,
     GlobalState,
     SystemOperatingMode,
     SystemSnapshot,
@@ -127,6 +128,7 @@ def _empty_snapshot() -> SystemSnapshot:
         captured_at=_NOW,
         global_state=GlobalState.degraded,
         operating_mode=SystemOperatingMode.degraded,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=None,
         battery=None,
         ev_charger=None,
@@ -402,6 +404,7 @@ async def test_e2e_grid_overload_warn_does_not_block_activation(
         captured_at=_NOW,
         global_state=GlobalState.degraded,
         operating_mode=SystemOperatingMode.degraded,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=None,
         battery=None,
         ev_charger=None,

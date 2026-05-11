@@ -109,6 +109,7 @@ def _snapshot() -> SystemSnapshot:
         captured_at=_NOW_UTC,
         global_state=GlobalState.normal,
         operating_mode=SystemOperatingMode.normal,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=_inverter(),
         battery=_battery(),
         ev_charger=_ev_charger(),

@@ -18,6 +18,7 @@ from open_ems.core.devices import (
 )
 from open_ems.core.state import (
     ComponentState,
+    EnergyStrategy,
     GlobalState,
     SystemOperatingMode,
     SystemSnapshot,
@@ -177,6 +178,7 @@ def _populated_snapshot() -> SystemSnapshot:
         captured_at=_NOW,
         global_state=GlobalState.normal,
         operating_mode=SystemOperatingMode.normal,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=None,
         battery=BatteryState(
             device_id="batt-1",

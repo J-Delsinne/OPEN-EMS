@@ -5,7 +5,15 @@ from datetime import UTC, datetime, timedelta
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from open_ems.core import BatteryState, DeviceRole, GridMeterState, InverterState, StateStore
+from open_ems.core import (
+    BatteryState,
+    DeviceRole,
+    EnergyStrategy,
+    GridMeterState,
+    InverterState,
+    StateStore,
+    SystemOperatingMode,
+)
 from open_ems.storage.database import get_connection
 from open_ems.storage.repositories.session_repo import (
     SessionRepo,
@@ -173,3 +181,96 @@ async def test_unavailable_fragment_renders_explicit_text_not_zero(
     assert "Unavailable" in response.text
     assert "0 kW" not in response.text
     assert "0%" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# Story 10.1 — status-headline route (AC6 / AC7 / AC15)
+# ---------------------------------------------------------------------------
+
+
+async def test_status_headline_route_rejects_unauthenticated_request(
+    session_repo: SessionRepo,
+) -> None:
+    store = StateStore(system_clock_status="valid")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get(
+        "/fragments/homeowner/status-headline",
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_status_headline_route_rejects_installer_role(
+    session_repo: SessionRepo,
+) -> None:
+    store = StateStore(system_clock_status="valid")
+    raw_token = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get(
+        "/fragments/homeowner/status-headline",
+        cookies={"session": raw_token},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 403
+
+
+async def test_status_headline_normal_mode_renders_strategy_label(
+    session_repo: SessionRepo,
+) -> None:
+    """AC5 / AC7: normal mode → 'Your home is running on solar · <label>'."""
+    store = StateStore(
+        system_clock_status="valid",
+        operating_mode=SystemOperatingMode.normal,
+        active_strategy=EnergyStrategy.minimize_cost,
+    )
+    raw_token = await _create_session("homeowner")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get(
+        "/fragments/homeowner/status-headline",
+        cookies={"session": raw_token},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert 'data-presentation-mode="normal"' in response.text
+    assert 'data-active-strategy="minimize_cost"' in response.text
+    assert "Your home is running on solar · Minimize Cost" in response.text
+    assert 'aria-live="polite"' in response.text
+    assert 'aria-label="System status"' in response.text
+
+
+async def test_status_headline_degraded_mode_renders_calm_styling(
+    session_repo: SessionRepo,
+) -> None:
+    """AC7: degraded mode uses slate-600 (degraded class) with NO amber CSS class."""
+    store = StateStore(
+        system_clock_status="valid",
+        operating_mode=SystemOperatingMode.degraded,
+    )
+    raw_token = await _create_session("homeowner")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get(
+        "/fragments/homeowner/status-headline",
+        cookies={"session": raw_token},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert 'data-presentation-mode="degraded"' in response.text
+    assert "Running with limited functionality" in response.text
+    assert "status-headline--degraded" in response.text
+    # AC7 design rule — NO amber, red, or warn CSS class fragments.
+    lower = response.text.lower()
+    assert "amber" not in lower
+    assert "warn" not in lower
+    # Allow tokens that contain "fail" as part of "fail_safe" data attribute,
+    # but explicit fail-style classes (.fail, fail-, color-fail) must not appear.
+    assert "color-fail" not in lower
+    assert "state-card--fail" not in lower

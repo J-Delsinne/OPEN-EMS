@@ -152,6 +152,7 @@ class SystemSnapshot(BaseModel):
     captured_at: datetime
     global_state: GlobalState
     operating_mode: SystemOperatingMode
+    active_strategy: EnergyStrategy
     inverter: DeviceSlot
     battery: DeviceSlot
     ev_charger: DeviceSlot

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import aiosqlite
 import structlog
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from pydantic import SecretStr, ValidationError
 
 from open_ems.adapters.capabilities import (
@@ -639,6 +640,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="OPEN-EMS", lifespan=lifespan)
+    static_dir = pathlib.Path(__file__).parent / "static"
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(installer_router)

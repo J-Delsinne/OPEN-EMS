@@ -20,6 +20,7 @@ from open_ems.core.state import (
     ClockStatus,
     ComponentState,
     DeviceSlot,
+    EnergyStrategy,
     GlobalState,
     SystemOperatingMode,
     SystemSnapshot,
@@ -42,17 +43,20 @@ class StateStore:
         system_clock_status: ClockStatus,
         stale_threshold_seconds: int = 30,
         operating_mode: SystemOperatingMode = SystemOperatingMode.degraded,
+        active_strategy: EnergyStrategy = EnergyStrategy.maximize_self_consumption,
     ) -> None:
         self._writer_lock = asyncio.Lock()
         self._known_device_ids: dict[DeviceRole, str] = {}
         self._last_successful_states: dict[DeviceRole, DeviceState] = {}
         self._stale_threshold_seconds = stale_threshold_seconds
+        self._active_strategy = active_strategy
         captured_at = datetime.now(UTC)
         self._snapshot = SystemSnapshot(
             sequence_id=0,
             captured_at=captured_at,
             global_state=GlobalState.degraded,
             operating_mode=operating_mode,
+            active_strategy=active_strategy,
             inverter=None,
             battery=None,
             ev_charger=None,
@@ -85,6 +89,7 @@ class StateStore:
                 captured_at=captured_at,
                 global_state=derive_global_state(slots),
                 operating_mode=operating_mode or self._snapshot.operating_mode,
+                active_strategy=self._active_strategy,
                 inverter=slots[DeviceRole.inverter],
                 battery=slots[DeviceRole.battery],
                 ev_charger=slots[DeviceRole.ev_charger],

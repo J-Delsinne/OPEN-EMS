@@ -1,0 +1,174 @@
+/*
+ * OPEN-EMS stylesheet — hand-authored per UX-spec design tokens.
+ * Story 10.1 introduces the homeowner-dashboard surface (headline + 3 metric
+ * cards). UX-spec choice (lines 256-313, 482-486): Tailwind is a build-time
+ * tool only; for v1 the project ships a small hand-authored CSS bundle so
+ * there is no CDN, no Node.js, and no compilation step required to run the
+ * application (AC19 Path B).
+ */
+
+:root {
+  /* Surfaces */
+  --color-surface: #fafaf9;            /* stone-50 — homeowner card background */
+  --color-page-bg: #ffffff;            /* page background */
+  --color-border: #e2e8f0;             /* slate-200 — card border */
+
+  /* Text */
+  --color-text-primary: #0f172a;       /* slate-900 — primary body text */
+  --color-text-secondary: #475569;     /* slate-600 — secondary text, degraded explanation */
+  --color-text-tertiary: #94a3b8;      /* slate-400 — stale caption text */
+
+  /* Accents */
+  --color-accent: #0891b2;             /* cyan-600 — primary action accent */
+  --color-accent-hover: #0e7490;       /* cyan-700 — confirmed/active accent */
+
+  /* Degraded state — explicitly slate, NEVER amber */
+  --color-degraded: #475569;           /* slate-600 — degraded headline text */
+  --color-degraded-bg: #f1f5f9;        /* slate-100 */
+  --color-degraded-border: #cbd5e1;    /* slate-300 — degraded card left-border */
+
+  /* Spacing */
+  --space-card-pad: 1.5rem;            /* card inner padding */
+  --space-stack: 1rem;                 /* vertical gap between cards */
+  --radius-card: 0.75rem;              /* rounded-xl */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  background: var(--color-page-bg);
+}
+
+main {
+  max-width: 36rem;        /* mobile-first single column */
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+}
+
+h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0 0 1rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dashboard card stack — single vertical column (UX spec §"Homeowner */
+/* dashboard hierarchy"; UX-spec line 642: "No card-grid as main      */
+/* homeowner pattern — single vertical card stack").                  */
+/* ------------------------------------------------------------------ */
+
+.dashboard-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-stack);
+}
+
+/* ------------------------------------------------------------------ */
+/* Status headline card (UX spec component #2)                        */
+/* ------------------------------------------------------------------ */
+
+.status-headline {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: var(--space-card-pad);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.status-headline__heading {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.status-headline__text {
+  color: var(--color-text-primary);
+}
+
+.status-headline__explanation {
+  margin: 0;
+  font-size: 0.875rem;     /* 14px caption */
+  color: var(--color-text-secondary);
+  min-height: 1.25rem;     /* stable layout — slot present in both modes */
+}
+
+/* Degraded variant — slate-600 + slate-300 left border.              */
+/* The ONLY visual delta from normal mode is the left border + slate  */
+/* color. No amber, no icon prefix, no alert treatment (UX spec rule).*/
+.status-headline--degraded {
+  border-left: 4px solid var(--color-degraded-border);
+}
+
+.status-headline--degraded .status-headline__text {
+  color: var(--color-degraded);
+}
+
+/* ------------------------------------------------------------------ */
+/* Metric card (UX spec component #3)                                 */
+/* ------------------------------------------------------------------ */
+
+.state-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: var(--space-card-pad);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.state-card__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.state-card__header h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.state-card__state {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.state-card__body {
+  font-size: 1.5rem;        /* 24px — primary value */
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.2;
+}
+
+.state-card__unavailable {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  margin: 0;
+}
+
+.state-card__freshness {
+  font-size: 0.875rem;      /* 14px caption */
+  color: var(--color-text-tertiary);
+  min-height: 1.25rem;      /* stable position whether stale or fresh */
+}
+
+/* Layout stability: the card shell (border, background, header) does NOT
+   change between fresh/stale states (UX spec line 1072). The caption slot
+   is always rendered in the same DOM position; only its content changes. */

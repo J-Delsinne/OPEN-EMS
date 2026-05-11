@@ -46,7 +46,6 @@ from open_ems.core import (
     DegradedDeviceState,
     DeviceAdapter,
     DeviceRole,
-    EnergyStrategy,
     GridMeterState,
     StateStore,
     SystemOperatingMode,
@@ -200,7 +199,7 @@ class ControlLoop:
         return EvaluationInput.from_snapshot(
             snapshot,
             peak_context=peak_context,
-            strategy=EnergyStrategy.maximize_self_consumption,
+            strategy=snapshot.active_strategy,
             battery_control=BatteryControlContext(
                 reserve_floor_percent=constraints.battery_reserve_floor_percent,
                 capability_profile=None,

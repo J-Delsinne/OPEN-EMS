@@ -12,6 +12,7 @@ from open_ems.core import (
     ComponentState,
     DegradedDeviceState,
     DeviceRole,
+    EnergyStrategy,
     EVChargerState,
     GlobalState,
     GridMeterState,
@@ -87,6 +88,7 @@ def _snapshot(**overrides: object) -> SystemSnapshot:
         "captured_at": _NOW_UTC,
         "global_state": GlobalState.normal,
         "operating_mode": SystemOperatingMode.normal,
+        "active_strategy": EnergyStrategy.maximize_self_consumption,
         "inverter": _inverter(),
         "battery": None,
         "ev_charger": None,
@@ -197,6 +199,57 @@ def test_snapshot_requires_utc_captured_at() -> None:
 
     with pytest.raises(ValidationError):
         _snapshot(captured_at=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone(timedelta(hours=1))))
+
+
+# ---------------------------------------------------------------------------
+# Story 10.1 — SystemSnapshot.active_strategy (AC1 / AC17)
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_active_strategy_is_required_no_model_level_default() -> None:
+    """AC1: active_strategy is non-Optional and has NO model-level default.
+
+    Constructing a snapshot without the field raises a ValidationError. The
+    default lives at the StateStore boundary (test_state_store), not on the
+    model.
+    """
+    minimal_data: dict[str, object] = {
+        "sequence_id": 1,
+        "captured_at": _NOW_UTC,
+        "global_state": GlobalState.normal,
+        "operating_mode": SystemOperatingMode.normal,
+        "inverter": None,
+        "battery": None,
+        "ev_charger": None,
+        "grid_meter": None,
+        "component_states": dict.fromkeys(
+            (
+                DeviceRole.inverter,
+                DeviceRole.battery,
+                DeviceRole.ev_charger,
+                DeviceRole.grid_meter,
+            ),
+            ComponentState.unavailable,
+        ),
+        "data_age_seconds": dict.fromkeys(
+            (
+                DeviceRole.inverter,
+                DeviceRole.battery,
+                DeviceRole.ev_charger,
+                DeviceRole.grid_meter,
+            )
+        ),
+        "system_clock_status": "valid",
+    }
+    with pytest.raises(ValidationError):
+        SystemSnapshot(**minimal_data)
+
+
+def test_snapshot_accepts_all_energy_strategy_values() -> None:
+    """AC1 / AC17: every EnergyStrategy member is accepted by the model."""
+    for strategy in EnergyStrategy:
+        snapshot = _snapshot(active_strategy=strategy)
+        assert snapshot.active_strategy is strategy
 
 
 @pytest.mark.parametrize(

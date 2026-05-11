@@ -4,19 +4,24 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from open_ems.core import (
     BatteryState,
     ComponentState,
     DegradedDeviceState,
     DeviceRole,
+    EnergyStrategy,
     EVChargerState,
     GlobalState,
+    GridMeterState,
     InverterState,
     SystemOperatingMode,
     SystemSnapshot,
 )
 from open_ems.web.state_serialization import (
     build_homeowner_card_context,
+    build_homeowner_headline_context,
     serialize_homeowner_snapshot,
     serialize_installer_snapshot,
 )
@@ -30,6 +35,7 @@ def _snapshot() -> SystemSnapshot:
         captured_at=_NOW_UTC,
         global_state=GlobalState.degraded,
         operating_mode=SystemOperatingMode.degraded,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=InverterState(
             device_id="inv-001",
             pv_power_kw=3.2,
@@ -208,3 +214,230 @@ def test_homeowner_card_context_renders_unavailable_without_zero_fallbacks() -> 
     assert card["unavailable"] is True
     assert card["rows"] == []
     assert card["stale_caption"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Story 10.1 — active_strategy serializer + headline builder (AC4, AC5, AC9, AC14)
+# ---------------------------------------------------------------------------
+
+
+def test_homeowner_snapshot_includes_active_strategy_as_json_string() -> None:
+    """AC4: active_strategy is emitted as the enum's string value (JSON-safe)."""
+    snapshot = _snapshot().model_copy(update={"active_strategy": EnergyStrategy.minimize_cost})
+    payload = serialize_homeowner_snapshot(snapshot)
+    assert payload["active_strategy"] == "minimize_cost"
+    # JSON round-trip — the enum must serialize to a string, not an enum object.
+    json.loads(json.dumps(payload))
+
+
+def test_installer_snapshot_includes_active_strategy_as_json_string() -> None:
+    """AC4: installer serializer also emits active_strategy."""
+    snapshot = _snapshot().model_copy(update={"active_strategy": EnergyStrategy.prioritize_ev})
+    payload = serialize_installer_snapshot(snapshot)
+    assert payload["active_strategy"] == "prioritize_ev"
+
+
+@pytest.mark.parametrize(
+    ("strategy", "label"),
+    [
+        (EnergyStrategy.minimize_cost, "Minimize Cost"),
+        (EnergyStrategy.maximize_self_consumption, "Maximize Self-Consumption"),
+        (EnergyStrategy.prioritize_ev, "Prioritize EV"),
+    ],
+)
+def test_headline_context_normal_mode_renders_strategy_label(
+    strategy: EnergyStrategy, label: str
+) -> None:
+    """AC5: normal headline reads 'Your home is running on solar · <strategy>'."""
+    snapshot = _snapshot().model_copy(
+        update={
+            "operating_mode": SystemOperatingMode.normal,
+            "active_strategy": strategy,
+        }
+    )
+    context = build_homeowner_headline_context(snapshot)
+    assert context["presentation_mode"] == "normal"
+    assert context["headline_text"] == f"Your home is running on solar · {label}"
+    assert context["explanation_text"] == ""
+    assert context["active_strategy"] == strategy.value
+    assert context["strategy_label"] == label
+
+
+@pytest.mark.parametrize(
+    "operating_mode",
+    [
+        SystemOperatingMode.degraded,
+        SystemOperatingMode.conservative,
+        SystemOperatingMode.fail_safe,
+    ],
+)
+def test_headline_context_degraded_modes_render_calm_explanation(
+    operating_mode: SystemOperatingMode,
+) -> None:
+    """AC5 / AC7: all three non-normal modes render the calm degraded headline."""
+    snapshot = _snapshot().model_copy(update={"operating_mode": operating_mode})
+    context = build_homeowner_headline_context(snapshot)
+    assert context["presentation_mode"] == "degraded"
+    assert context["headline_text"] == "Running with limited functionality"
+    assert isinstance(context["explanation_text"], str)
+    assert len(context["explanation_text"]) > 0
+    # Calm language — no alarming phrasing.
+    explanation = context["explanation_text"].lower()
+    assert "error" not in explanation
+    assert "fail" not in explanation
+    assert "!" not in explanation
+
+
+def test_headline_ignores_device_state_per_ac14() -> None:
+    """AC14: headline derives ONLY from operating_mode + active_strategy.
+
+    Constructs two snapshots that differ exclusively in device-state fields
+    (slots, component_states, data_age_seconds) and asserts the headline
+    context is identical. This is the structural enforcement of Epic 10's
+    cross-story constraint: 'Status headline is derived exclusively from
+    SystemOperatingMode + active strategy — no component independently
+    infers degraded state from device values' (epics.md:2238).
+    """
+    base = _snapshot().model_copy(
+        update={
+            "operating_mode": SystemOperatingMode.normal,
+            "active_strategy": EnergyStrategy.minimize_cost,
+        }
+    )
+    variant = base.model_copy(
+        update={
+            # Drastically different device-state fields.
+            "battery": None,
+            "ev_charger": DegradedDeviceState(
+                device_id="ev-001",
+                role=DeviceRole.ev_charger,
+                reason="ocpp_charger_not_connected",
+                occurred_at=_NOW_UTC,
+            ),
+            "component_states": {
+                DeviceRole.inverter: ComponentState.unavailable,
+                DeviceRole.battery: ComponentState.unavailable,
+                DeviceRole.ev_charger: ComponentState.error,
+                DeviceRole.grid_meter: ComponentState.stale,
+            },
+            "data_age_seconds": {
+                DeviceRole.inverter: None,
+                DeviceRole.battery: None,
+                DeviceRole.ev_charger: 999,
+                DeviceRole.grid_meter: 12345,
+            },
+        }
+    )
+    assert build_homeowner_headline_context(base) == build_homeowner_headline_context(variant)
+
+
+def test_grid_card_row_includes_direction_suffix_per_ac9() -> None:
+    """AC9: grid card primary value is magnitude + plain-language direction."""
+    base = _snapshot()
+
+    # Importing — positive grid power.
+    importing = base.model_copy(
+        update={
+            "grid_meter": GridMeterState(
+                device_id="grid-001",
+                grid_power_kw=1.2,
+                energy_delivered_kwh=100.0,
+                energy_returned_kwh=20.0,
+                received_at=_NOW_UTC,
+            ),
+            "component_states": {
+                DeviceRole.inverter: ComponentState.active,
+                DeviceRole.battery: ComponentState.active,
+                DeviceRole.ev_charger: ComponentState.active,
+                DeviceRole.grid_meter: ComponentState.active,
+            },
+            "data_age_seconds": {
+                DeviceRole.inverter: 0,
+                DeviceRole.battery: 0,
+                DeviceRole.ev_charger: 0,
+                DeviceRole.grid_meter: 0,
+            },
+        }
+    )
+    context = build_homeowner_card_context(importing, "grid")
+    assert context["rows"] == [{"label": "Grid power", "value": "1.2 kW importing"}]
+
+    # Exporting — negative grid power.
+    exporting = importing.model_copy(
+        update={
+            "grid_meter": GridMeterState(
+                device_id="grid-001",
+                grid_power_kw=-2.5,
+                energy_delivered_kwh=100.0,
+                energy_returned_kwh=20.0,
+                received_at=_NOW_UTC,
+            ),
+        }
+    )
+    context = build_homeowner_card_context(exporting, "grid")
+    assert context["rows"] == [{"label": "Grid power", "value": "2.5 kW exporting"}]
+
+    # Idle — zero (rounded) grid power.
+    idle = importing.model_copy(
+        update={
+            "grid_meter": GridMeterState(
+                device_id="grid-001",
+                grid_power_kw=0.04,  # rounds to 0.0
+                energy_delivered_kwh=100.0,
+                energy_returned_kwh=20.0,
+                received_at=_NOW_UTC,
+            ),
+        }
+    )
+    context = build_homeowner_card_context(idle, "grid")
+    assert context["rows"] == [{"label": "Grid power", "value": "0.0 kW idle"}]
+
+
+def test_card_rows_are_single_primary_value_per_ac8() -> None:
+    """AC8: each card returns a single-row primary value (not three rows)."""
+    # Replace the base fixture's degraded grid_meter with a real reading; the
+    # base snapshot uses DegradedDeviceState for grid_meter, which would route
+    # the card through the "unavailable" branch.
+    snapshot = _snapshot().model_copy(
+        update={
+            "grid_meter": GridMeterState(
+                device_id="grid-001",
+                grid_power_kw=1.2,
+                energy_delivered_kwh=100.0,
+                energy_returned_kwh=20.0,
+                received_at=_NOW_UTC,
+            ),
+            "component_states": {
+                DeviceRole.inverter: ComponentState.active,
+                DeviceRole.battery: ComponentState.active,
+                DeviceRole.ev_charger: ComponentState.active,
+                DeviceRole.grid_meter: ComponentState.active,
+            },
+            "data_age_seconds": {
+                DeviceRole.inverter: 0,
+                DeviceRole.battery: 0,
+                DeviceRole.ev_charger: 0,
+                DeviceRole.grid_meter: 0,
+            },
+        }
+    )
+    for card_name in ("battery", "solar", "grid"):
+        context = build_homeowner_card_context(snapshot, card_name)  # type: ignore[arg-type]
+        assert isinstance(context["rows"], list)
+        assert len(context["rows"]) == 1, f"card {card_name!r} must render a single primary row"
+
+
+def test_strategy_label_table_covers_every_energy_strategy_member() -> None:
+    """AC5: the label mapping is exhaustive — no EnergyStrategy member is unhandled."""
+    from open_ems.web.state_serialization import _STRATEGY_LABELS
+
+    assert set(_STRATEGY_LABELS.keys()) == set(EnergyStrategy)
+    for label in _STRATEGY_LABELS.values():
+        assert label and isinstance(label, str)
+
+
+def test_degraded_explanations_cover_every_operating_mode() -> None:
+    """AC5: the explanation mapping is exhaustive — every SystemOperatingMode is handled."""
+    from open_ems.web.state_serialization import _DEGRADED_EXPLANATIONS
+
+    assert set(_DEGRADED_EXPLANATIONS.keys()) == set(SystemOperatingMode)

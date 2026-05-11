@@ -10,6 +10,7 @@ from open_ems.core import (
     ComponentState,
     DegradedDeviceState,
     DeviceRole,
+    EnergyStrategy,
     EVChargerState,
     GlobalState,
     GridMeterState,
@@ -395,3 +396,51 @@ async def test_get_snapshot_does_not_wait_for_writer_lock() -> None:
         store._writer_lock.release()
 
     assert snapshot.sequence_id == 0
+
+
+# ---------------------------------------------------------------------------
+# Story 10.1 — active_strategy plumbing (AC2 / AC17)
+# ---------------------------------------------------------------------------
+
+
+def test_state_store_initial_snapshot_carries_cold_start_strategy_default() -> None:
+    """AC2: cold-start default is maximize_self_consumption."""
+    store = StateStore(system_clock_status="valid")
+    snapshot = store.get_snapshot()
+    assert snapshot.active_strategy == EnergyStrategy.maximize_self_consumption
+    assert snapshot.sequence_id == 0
+
+
+def test_state_store_initial_snapshot_carries_explicit_strategy() -> None:
+    """AC2: explicit constructor kwarg is honored at sequence_id=0."""
+    store = StateStore(
+        system_clock_status="valid",
+        active_strategy=EnergyStrategy.minimize_cost,
+    )
+    snapshot = store.get_snapshot()
+    assert snapshot.active_strategy == EnergyStrategy.minimize_cost
+
+
+async def test_state_store_publish_preserves_active_strategy() -> None:
+    """AC2: publish() carries the StateStore's strategy across snapshots.
+
+    No write path is exposed in 10.1 — Story 10.3 owns the mutator. From
+    publish's view the strategy is constant for the StateStore lifetime.
+    """
+    store = StateStore(
+        system_clock_status="valid",
+        active_strategy=EnergyStrategy.prioritize_ev,
+    )
+    snap1 = await store.publish({DeviceRole.inverter: _inverter()})
+    snap2 = await store.publish({DeviceRole.battery: _battery()})
+    snap3 = await store.publish({DeviceRole.grid_meter: _grid_meter()})
+    assert snap1.active_strategy == EnergyStrategy.prioritize_ev
+    assert snap2.active_strategy == EnergyStrategy.prioritize_ev
+    assert snap3.active_strategy == EnergyStrategy.prioritize_ev
+    # And independent of operating_mode changes via publish kwarg.
+    snap4 = await store.publish(
+        {DeviceRole.inverter: _inverter()},
+        operating_mode=SystemOperatingMode.degraded,
+    )
+    assert snap4.active_strategy == EnergyStrategy.prioritize_ev
+    assert snap4.operating_mode == SystemOperatingMode.degraded

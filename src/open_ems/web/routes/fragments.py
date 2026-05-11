@@ -8,7 +8,11 @@ from fastapi.templating import Jinja2Templates
 
 from open_ems.core import StateStore
 from open_ems.web.dependencies import HomeownerUser, get_state_store, require_homeowner
-from open_ems.web.state_serialization import HomeownerCard, build_homeowner_card_context
+from open_ems.web.state_serialization import (
+    HomeownerCard,
+    build_homeowner_card_context,
+    build_homeowner_headline_context,
+)
 
 router = APIRouter()
 
@@ -64,3 +68,18 @@ async def homeowner_ev_card(
     store: StateStore = Depends(get_state_store),  # noqa: B008
 ) -> HTMLResponse:
     return _homeowner_card_response(request, store, "ev")
+
+
+@router.get("/fragments/homeowner/status-headline", response_class=HTMLResponse)
+async def homeowner_status_headline(
+    request: Request,
+    _user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
+    store: StateStore = Depends(get_state_store),  # noqa: B008
+) -> HTMLResponse:
+    snapshot = store.get_snapshot()
+    context = build_homeowner_headline_context(snapshot)
+    return _templates.TemplateResponse(
+        request,
+        "fragments/homeowner/status-headline.html",
+        context,
+    )

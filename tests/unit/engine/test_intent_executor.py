@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from open_ems.core import (
     BatteryState,
     DeviceRole,
+    EnergyStrategy,
     EVChargerState,
     SystemOperatingMode,
 )
@@ -61,6 +62,7 @@ def _snapshot(
         captured_at=_NOW,
         global_state=GlobalState.normal,
         operating_mode=SystemOperatingMode.normal,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
         inverter=None,
         battery=battery,
         ev_charger=ev_charger,
