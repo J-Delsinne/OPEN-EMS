@@ -35,7 +35,16 @@
           1. Device Discovery
         {% endif %}
       </li>
-      <li{% if active_step == "roles" %} aria-current="step"{% endif %}>2. Role Assignment</li>
+      <li{% if active_step == "roles" %} aria-current="step"{% endif %}>
+        {# Story 9.3 — back-navigation hyperlink only when Step 3 is not yet
+           complete; mirrors the Step-1 hyperlink pattern. Once Step 3 is
+           finalized both back-links are hidden. #}
+        {% if active_step != "discovery" and active_step != "roles" and not step_3_complete %}
+          <a href="/installer/setup/roles">2. Role Assignment</a>
+        {% else %}
+          2. Role Assignment
+        {% endif %}
+      </li>
       <li{% if active_step == "constraints" %} aria-current="step"{% endif %}>3. Constraints</li>
       <li{% if active_step == "validation" %} aria-current="step"{% endif %}>4. Deployment Validation</li>
     </ol>

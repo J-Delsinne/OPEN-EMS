@@ -1,0 +1,45 @@
+{# Story 9.3 — Step 3 activate region (UX spec component #10).
+
+   Variables:
+     view        — ConstraintDraftView
+     csrf_token  — string
+
+   Server-rendered enabled/disabled state — color is never the sole signal.
+   Button text changes between "Activate", "Activate with warnings", and
+   "Activate (validation required)" so screen readers announce state.
+#}
+{% set _has_warn = false %}
+{% if view.validation_report is not none %}
+  {% for c in view.validation_report.checks %}
+    {% if c.status == "warn" %}{% set _has_warn = true %}{% endif %}
+  {% endfor %}
+{% endif %}
+{% set _can_activate = (view.validation_status == "valid") %}
+
+<form
+  method="post"
+  action="/installer/setup/constraints/activate"
+>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  {% if _can_activate and _has_warn %}
+    <div role="region" aria-label="Activation confirmation" class="activate-warnings">
+      <p><strong>The following warnings will be activated:</strong></p>
+      <ul>
+        {% for c in view.validation_report.checks %}
+          {% if c.status == "warn" %}
+            <li>{{ c.message }}</li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+    </div>
+    <button type="submit">Activate with warnings</button>
+  {% elif _can_activate %}
+    <button type="submit">Activate</button>
+  {% else %}
+    <button type="submit" disabled aria-disabled="true">
+      Activate (validation required)
+    </button>
+    <p class="activate-hint">Run a successful Validate before activating.</p>
+  {% endif %}
+</form>

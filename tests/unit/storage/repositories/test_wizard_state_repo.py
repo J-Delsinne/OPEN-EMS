@@ -23,8 +23,20 @@ _CREATE_WIZARD_STATE = """
             CHECK (step_2_complete IN (0, 1)),
         step_2_completed_at TEXT,
         step_2_acknowledged_gaps TEXT,
+        step_3_complete INTEGER NOT NULL DEFAULT 0
+            CHECK (step_3_complete IN (0, 1)),
+        step_3_completed_at TEXT,
+        step_3_activated_config_version INTEGER,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        CHECK (
+            (step_3_complete = 0
+             AND step_3_completed_at IS NULL
+             AND step_3_activated_config_version IS NULL)
+            OR (step_3_complete = 1
+                AND step_3_completed_at IS NOT NULL
+                AND step_3_activated_config_version IS NOT NULL)
+        )
     )
 """
 
@@ -210,6 +222,84 @@ async def test_set_step_2_complete_rejects_invalid_label(
             now=_LATER,
         )
     assert str(exc_info.value) == "acknowledged_gap_label_invalid: grid_meter_missing"
+
+
+# ---------------------------------------------------------------------------
+# Story 9.3 — step_3 columns + idempotent advance
+# ---------------------------------------------------------------------------
+
+
+async def test_set_step_3_complete_persists_completion_columns(
+    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
+) -> None:
+    repo, _ = repo_with_conn
+    await repo.get_or_create("session-x", now=_NOW)
+    await repo.set_step_3_complete("session-x", activated_config_version=7, now=_LATER)
+    state = await repo.get("session-x")
+    assert state is not None
+    assert state.step_3_complete is True
+    assert state.step_3_completed_at == _LATER
+    assert state.step_3_activated_config_version == 7
+    assert state.updated_at == _LATER
+
+
+async def test_set_step_3_complete_is_idempotent_on_completion_columns(
+    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
+) -> None:
+    """A second activate MUST preserve both completed_at AND activated_config_version."""
+    repo, _ = repo_with_conn
+    await repo.get_or_create("session-x", now=_NOW)
+    await repo.set_step_3_complete("session-x", activated_config_version=7, now=_LATER)
+    later2 = datetime(2026, 5, 11, 14, 0, 0, tzinfo=UTC)
+    await repo.set_step_3_complete("session-x", activated_config_version=99, now=later2)
+    state = await repo.get("session-x")
+    assert state is not None
+    assert state.step_3_complete is True
+    assert state.step_3_completed_at == _LATER
+    assert state.step_3_activated_config_version == 7  # NOT 99 — preserved
+    assert state.updated_at == later2
+
+
+async def test_set_step_3_complete_raises_when_missing(
+    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
+) -> None:
+    repo, _ = repo_with_conn
+    with pytest.raises(ValueError, match="No wizard_state row"):
+        await repo.set_step_3_complete("missing", activated_config_version=1, now=_LATER)
+
+
+async def test_set_step_3_complete_rejects_non_positive_version(
+    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
+) -> None:
+    repo, _ = repo_with_conn
+    await repo.get_or_create("session-x", now=_NOW)
+    with pytest.raises(ValueError, match="activated_config_version must be > 0"):
+        await repo.set_step_3_complete("session-x", activated_config_version=0, now=_LATER)
+
+
+async def test_step_3_pairing_invariant_in_pydantic_model() -> None:
+    """Story 9.3 R3 #5: ``step_3_complete=1`` IFF ``step_3_completed_at`` IS NOT
+    NULL IFF ``step_3_activated_config_version`` IS NOT NULL.
+    """
+    from pydantic import ValidationError
+
+    from open_ems.storage.repositories.wizard_state_repo import WizardState
+
+    with pytest.raises(ValidationError, match="must all be set together"):
+        WizardState(
+            session_id="session-x",
+            step_1_complete=True,
+            step_1_completed_at=_NOW,
+            last_scan_id=None,
+            step_2_complete=True,
+            step_2_completed_at=_NOW,
+            step_2_acknowledged_gaps=frozenset(),
+            step_3_complete=True,
+            step_3_completed_at=None,  # mismatch — should fail
+            step_3_activated_config_version=5,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
 
 
 async def test_wizard_state_model_rejects_tampered_acknowledged_gaps() -> None:

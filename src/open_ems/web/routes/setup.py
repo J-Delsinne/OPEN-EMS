@@ -23,7 +23,14 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from open_ems.adapters.capabilities import get_profile
+from open_ems.core.constraints import ConstraintDraftInput
 from open_ems.core.devices import CapabilityStatus, DeviceRole
+from open_ems.services.constraints import (
+    ConstraintActivationError,
+    ConstraintsService,
+    ProviderNotReadyError,
+    reason_to_user_message,
+)
 from open_ems.services.device_discovery import (
     DeviceDiscoveryOrchestrator,
     DSMRScanTarget,
@@ -114,6 +121,13 @@ def _role_assignment_service(request: Request) -> RoleAssignmentService:
     svc = getattr(request.app.state, "role_assignment_service", None)
     if not isinstance(svc, RoleAssignmentService):
         raise HTTPException(status_code=503, detail="Role assignment service unavailable")
+    return svc
+
+
+def _constraints_service(request: Request) -> ConstraintsService:
+    svc = getattr(request.app.state, "constraints_service", None)
+    if not isinstance(svc, ConstraintsService):
+        raise HTTPException(status_code=503, detail="Constraints service unavailable")
     return svc
 
 
@@ -643,26 +657,275 @@ async def post_advance_to_step_3(
 
 
 @router.get("/installer/setup/constraints", response_class=HTMLResponse)
-async def get_constraints_placeholder(
+async def get_constraints_page(
     request: Request,
     user: InstallerUser = Depends(require_installer),  # noqa: B008
     wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
-) -> HTMLResponse:
-    """Story 9.3 placeholder. Replaced by the real Step 3 page in 9.3."""
-    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    svc: ConstraintsService = Depends(_constraints_service),  # noqa: B008
+) -> Response:
+    """Story 9.3 — Step 3 main page. Step-gate enforcement (mirrors 9.2):
+    deep-linking past discovery / roles bounces back. Idempotent short-circuit:
+    if Step 3 is already complete, redirect forward to Step 4.
+    """
+    now = datetime.now(UTC)
+    state = await wizard_repo.get_or_create(user.session_id, now=now)
+    if not state.step_1_complete:
+        return RedirectResponse(url="/installer/setup/discovery", status_code=302)
+    if not state.step_2_complete:
+        return RedirectResponse(url="/installer/setup/roles", status_code=302)
+    if state.step_3_complete:
+        return RedirectResponse(url="/installer/setup/validation", status_code=302)
+    try:
+        view = await svc.get_or_default(user.session_id)
+    except ProviderNotReadyError as exc:
+        # Story 9.3 P10 — provider has not yet hydrated; report as 503 rather
+        # than surfacing the raw RuntimeError as a generic 500.
+        raise HTTPException(status_code=503, detail="Constraints provider not ready") from exc
     return _templates.TemplateResponse(
         request,
-        "installer/setup_constraints_placeholder.html",
+        "installer/setup_constraints.html",
         {
             "csrf_token": user.csrf_token,
             "title": "Constraints",
             "active_step": "constraints",
-            # Surface step_2_complete so the layout's back-link logic
-            # (active_step != "discovery" and not step_2_complete) sees the
-            # truthy value and correctly hides the back-link once Step 2 is
-            # finalized. Without this the back-link incorrectly renders.
             "step_2_complete": state.step_2_complete,
+            "step_3_complete": state.step_3_complete,
+            "view": view,
         },
+    )
+
+
+@router.post("/installer/setup/constraints/draft", response_class=HTMLResponse)
+async def post_upsert_constraint_draft(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    svc: ConstraintsService = Depends(_constraints_service),  # noqa: B008
+    peak_limit_kw: str = Form(...),
+    battery_reserve_floor_percent: str = Form(...),
+    ev_charging_window_start: str = Form(default=""),
+    ev_charging_window_end: str = Form(default=""),
+    csrf_token: str = Form(default=""),
+) -> HTMLResponse:
+    _ = csrf_token  # validated by middleware
+    # Story 9.3 P12 — gate the POST surface too. The GET route's step-gate
+    # protects deep-linking but does not stop direct POSTs from clients that
+    # bypass the form (HTMX retries, scripted callers, etc.).
+    try:
+        await svc.assert_step_prerequisites(user.session_id)
+    except ConstraintActivationError as exc:
+        return _render_constraints_error_banner(request, user, exc, status_code=400)
+    field_errors: dict[str, str] = {}
+    parsed_peak: float | None = None
+    parsed_floor: float | None = None
+    try:
+        parsed_peak = float(peak_limit_kw)
+    except ValueError:
+        field_errors["peak_limit_kw"] = "Peak limit must be a number greater than 0 kW."
+    try:
+        parsed_floor = float(battery_reserve_floor_percent)
+    except ValueError:
+        field_errors["battery_reserve_floor_percent"] = (
+            "Battery reserve floor must be a number between 0 and 100."
+        )
+    start_clean = ev_charging_window_start.strip() or None
+    end_clean = ev_charging_window_end.strip() or None
+    if (start_clean is None) != (end_clean is None):
+        field_errors["ev_charging_window"] = (
+            "EV charging window start and end must both be set or both empty."
+        )
+    if not field_errors and parsed_peak is not None and parsed_floor is not None:
+        try:
+            input_model = ConstraintDraftInput(
+                peak_limit_kw=parsed_peak,
+                battery_reserve_floor_percent=parsed_floor,
+                ev_charging_window_start=start_clean,
+                ev_charging_window_end=end_clean,
+            )
+        except ValidationError as exc:
+            for err in exc.errors():
+                loc = err.get("loc", ())
+                # Pydantic model-level errors carry loc=(); route them to
+                # the ev_charging_window slot since the only model-validator
+                # we ship enforces the EV window paired-NULL invariant.
+                field = str(loc[0]) if loc else "ev_charging_window"
+                field_errors[field] = str(err.get("msg", "Invalid value."))
+        else:
+            await svc.upsert_draft(user.session_id, input=input_model, now=datetime.now(UTC))
+    if field_errors:
+        return _templates.TemplateResponse(
+            request,
+            "installer/_setup_constraints_form.html",
+            {
+                "csrf_token": user.csrf_token,
+                "view": _form_view_from_request(
+                    peak_limit_kw,
+                    battery_reserve_floor_percent,
+                    parsed_peak,
+                    parsed_floor,
+                    start_clean,
+                    end_clean,
+                ),
+                "field_errors": field_errors,
+            },
+            status_code=400,
+        )
+    view = await svc.get_or_default(user.session_id)
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_constraints_form.html",
+        {
+            "csrf_token": user.csrf_token,
+            "view": view,
+            "field_errors": {},
+        },
+    )
+
+
+@router.post("/installer/setup/constraints/validate", response_class=HTMLResponse)
+async def post_validate_constraint_draft(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    svc: ConstraintsService = Depends(_constraints_service),  # noqa: B008
+    csrf_token: str = Form(default=""),
+) -> HTMLResponse:
+    _ = csrf_token
+    # Story 9.3 P12 — gate POST.
+    try:
+        await svc.assert_step_prerequisites(user.session_id)
+    except ConstraintActivationError as exc:
+        return _render_constraints_error_envelope(request, exc, status_code=400)
+    try:
+        report = await svc.validate_draft(user.session_id, now=datetime.now(UTC))
+    except ConstraintActivationError as exc:
+        return _render_constraints_error_envelope(request, exc, status_code=400)
+    view = await svc.get_or_default(user.session_id)
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_constraints_validation.html",
+        {
+            "csrf_token": user.csrf_token,
+            "report": report,
+            "view": view,
+            # Out-of-band swap target so the activate button enables/disables
+            # in lockstep with the validation result.
+            "render_activate_oob": True,
+        },
+    )
+
+
+@router.post("/installer/setup/constraints/activate")
+async def post_activate_constraints(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    svc: ConstraintsService = Depends(_constraints_service),  # noqa: B008
+    csrf_token: str = Form(default=""),
+) -> Response:
+    _ = csrf_token
+    try:
+        result = await svc.activate_draft(user.session_id, actor="installer", now=datetime.now(UTC))
+    except ConstraintActivationError as exc:
+        return _render_constraints_error_banner(request, user, exc, status_code=400)
+    logger.info(
+        "constraints_activated_via_route",
+        component="installer_setup",
+        session_id=user.session_id,
+        config_version=result.config_version,
+    )
+    return RedirectResponse(url="/installer/setup/validation", status_code=302)
+
+
+@router.get("/installer/setup/validation", response_class=HTMLResponse)
+async def get_validation_placeholder(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+) -> HTMLResponse:
+    """Story 9.3 placeholder. Replaced by the real Step 4 page in 9.4."""
+    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    return _templates.TemplateResponse(
+        request,
+        "installer/setup_validation_placeholder.html",
+        {
+            "csrf_token": user.csrf_token,
+            "title": "Deployment Validation",
+            "active_step": "validation",
+            "step_2_complete": state.step_2_complete,
+            "step_3_complete": state.step_3_complete,
+        },
+    )
+
+
+def _form_view_from_request(
+    raw_peak: str,
+    raw_floor: str,
+    parsed_peak: float | None,
+    parsed_floor: float | None,
+    start: str | None,
+    end: str | None,
+) -> object:
+    """Build a lightweight view preserving the user's submitted values so the
+    error-state form fragment re-renders the rejected input verbatim.
+
+    Story 9.3 P3 — previously this synthesized ``0.0`` for unparsable fields,
+    which the template then formatted as ``"0.00"`` and showed back to the
+    user, destroying their input. Now the raw form strings are carried on
+    the view via ``raw_*_text`` and the template prefers them.
+    """
+    from open_ems.services.constraints import ConstraintDraftView
+
+    return ConstraintDraftView(
+        # The float fields remain typed because the template's existing
+        # template-tag fallback uses them when no raw text is supplied. They
+        # are 0.0 in the unparsable case but the template never renders the
+        # 0.0 — it renders ``raw_*_text`` instead.
+        peak_limit_kw=parsed_peak if parsed_peak is not None else 0.0,
+        battery_reserve_floor_percent=parsed_floor if parsed_floor is not None else 0.0,
+        ev_charging_window_start=start,
+        ev_charging_window_end=end,
+        validation_status="pending",
+        validation_report=None,
+        has_persisted_draft=False,
+        raw_peak_limit_kw_text=raw_peak,
+        raw_battery_reserve_floor_percent_text=raw_floor,
+    )
+
+
+def _render_constraints_error_banner(
+    request: Request,
+    user: InstallerUser,
+    exc: ConstraintActivationError,
+    *,
+    status_code: int,
+) -> HTMLResponse:
+    """Render the activate-fail banner with operator-facing copy (P6)."""
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_constraints_error_banner.html",
+        {
+            "csrf_token": user.csrf_token,
+            "reason": exc.reason,
+            "reason_message": reason_to_user_message(exc.reason),
+            "report": exc.report,
+        },
+        status_code=status_code,
+    )
+
+
+def _render_constraints_error_envelope(
+    request: Request,
+    exc: ConstraintActivationError,
+    *,
+    status_code: int,
+) -> HTMLResponse:
+    """Render the inline single-error envelope used by the validate route (P6)."""
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_constraints_error.html",
+        {
+            "reason": exc.reason,
+            "reason_message": reason_to_user_message(exc.reason),
+        },
+        status_code=status_code,
     )
 
 

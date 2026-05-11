@@ -5,10 +5,19 @@ Story 9.0b: this repo is the only legal write path into the
 that inserts the new active row AND emits one ``config_audit_log`` row per
 changed field (delegated to ``ConfigAuditRepo.append_activation``), so the
 two tables can never disagree on ``config_version``.
+
+Story 9.3: ``activate()`` is split into a public lock-acquiring entry point
+and a private ``_activate_locked`` body. Routes that already hold
+``get_write_lock()`` (the staged-activation route) call ``_activate_locked``
+directly to avoid asyncio.Lock reentrancy deadlock. The EV charging window
+(``ev_charging_window_start`` / ``ev_charging_window_end``) is folded into
+the same row + audit emission so an EV-window change still produces exactly
+one ``config_version`` increment and one combined audit row.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -24,10 +33,24 @@ from open_ems.storage.repositories.config_audit_repo import (
 
 VALID_ACTIVATION_ACTORS: frozenset[str] = frozenset({"system", "installer"})
 
+
+class NoChangedFieldsError(ValueError):
+    """Raised by ``_activate_locked`` when the input matches the active row.
+
+    Carried as a dedicated type so callers can map to the exact-match
+    contract reason ``activate_called_with_no_changed_fields`` without
+    inspecting the exception message text (Story 9.3 P7).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("activate called with no changed fields")
+
+
 # Audit-vocabulary field names already established by Story 6.3
 # (see SAFETY_RELEVANT_CONFIG_FIELDS in config_audit_repo).
 _AUDIT_FIELD_PEAK_LIMIT: str = "peak_consumption_limit"
 _AUDIT_FIELD_RESERVE_FLOOR: str = "battery_reserve_floor"
+_AUDIT_FIELD_EV_WINDOW: str = "ev_charging_window"
 
 
 class ConfigRepo:
@@ -51,7 +74,8 @@ class ConfigRepo:
         """
         async with self._conn.execute(
             "SELECT id, peak_limit_kw, battery_reserve_floor_percent, config_version,"
-            " activated_at FROM active_constraints"
+            " activated_at, ev_charging_window_start, ev_charging_window_end"
+            " FROM active_constraints"
             " ORDER BY config_version DESC LIMIT 1"
         ) as cursor:
             row = await cursor.fetchone()
@@ -63,6 +87,8 @@ class ConfigRepo:
                 battery_reserve_floor_percent=float(row[2]),
                 config_version=int(row[3]),
                 activated_at=datetime.fromisoformat(row[4]),
+                ev_charging_window_start=str(row[5]) if row[5] is not None else None,
+                ev_charging_window_end=str(row[6]) if row[6] is not None else None,
             )
         except (ValidationError, ValueError) as exc:
             raise ValueError(
@@ -78,74 +104,102 @@ class ConfigRepo:
     ) -> int:
         """Atomically activate a new constraint set; return the assigned ``config_version``.
 
+        Acquires ``get_write_lock()`` and delegates to ``_activate_locked``.
+        Callers that already hold the lock (Story 9.3's
+        ``ConstraintsService.activate_draft``) MUST call ``_activate_locked``
+        directly — asyncio.Lock is not reentrant.
+        """
+        async with get_write_lock():
+            return await self._activate_locked(input, actor=actor)
+
+    async def _activate_locked(
+        self,
+        input: ActiveConstraintsInput,
+        *,
+        actor: Literal["system", "installer"],
+        inside_transaction: Callable[[int, datetime], Awaitable[None]] | None = None,
+    ) -> int:
+        """Lock-free body of ``activate``. Caller MUST hold ``get_write_lock()``.
+
         Audit emission is delegated to ``ConfigAuditRepo.append_activation``
         with ``commit=False`` so both inserts share the outer
         ``BEGIN IMMEDIATE`` transaction.
+
+        ``inside_transaction`` is an optional async callback invoked AFTER the
+        active_constraints + config_audit_log INSERTs but BEFORE COMMIT.
+        Receives ``(new_version, now_utc)``. Story 9.3 P13 — the staged
+        activation route uses this to fold ``wizard_state.step_3_*`` updates
+        and ``draft_constraints`` deletion into the same transaction so the
+        four-table activation is atomic. If the callback raises, the whole
+        transaction rolls back (no partial commits across tables).
+
+        Raises ``NoChangedFieldsError`` (a ``ValueError`` subclass) when the
+        input matches the active row — callers may catch the specific type to
+        map to a stable contract reason.
         """
         if actor not in VALID_ACTIVATION_ACTORS:
             raise ValueError(f"Invalid actor {actor!r}")
 
-        # Serialize all writers on the shared aiosqlite connection. Without this
-        # lock another coroutine's DML can open an implicit transaction between
-        # our commit() flush and BEGIN IMMEDIATE, causing
-        # "cannot start a transaction within a transaction". The audit repo
-        # call below runs with ``commit=False`` so it inherits this lock — do
-        # NOT re-acquire it from inside ConfigAuditRepo.
-        async with get_write_lock():
-            # Flush any implicit transaction the connection may have opened so
-            # BEGIN IMMEDIATE below acquires the write lock cleanly.
+        # Flush any implicit transaction the connection may have opened so
+        # BEGIN IMMEDIATE below acquires the write lock cleanly.
+        await self._conn.commit()
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Read `previous` INSIDE the transaction so the audit-log payload
+            # (previous_value / new_value) reflects the row that is genuinely
+            # the predecessor of the new one. A concurrent activation cannot
+            # interleave between this read and the INSERT below.
+            previous = await self.get_active()
+            changes = _build_audit_changes(previous, input)
+            if not changes:
+                raise NoChangedFieldsError()
+
+            # Cross-table monotonic next_version: take the max across BOTH
+            # active_constraints AND config_audit_log, so a manual DELETE
+            # from active_constraints cannot make the next activation regress
+            # to a version below an already-audited one.
+            async with self._conn.execute(
+                "SELECT COALESCE(MAX(v), 0) + 1 FROM ("
+                " SELECT MAX(config_version) AS v FROM active_constraints"
+                " UNION ALL"
+                " SELECT MAX(config_version) AS v FROM config_audit_log"
+                ")"
+            ) as cursor:
+                version_row = await cursor.fetchone()
+            if version_row is None:
+                raise RuntimeError("SQLite did not return a config version")
+            next_version = int(version_row[0])
+            now_utc = datetime.now(UTC)
+            now_iso = now_utc.isoformat()
+
+            await self._conn.execute(
+                "INSERT INTO active_constraints"
+                " (peak_limit_kw, battery_reserve_floor_percent,"
+                "  config_version, activated_at, actor,"
+                "  ev_charging_window_start, ev_charging_window_end)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    input.peak_limit_kw,
+                    input.battery_reserve_floor_percent,
+                    next_version,
+                    now_iso,
+                    actor,
+                    input.ev_charging_window_start,
+                    input.ev_charging_window_end,
+                ),
+            )
+            await self._audit_repo.append_activation(
+                actor=actor,
+                changes=changes,
+                config_version=next_version,
+                commit=False,
+            )
+            if inside_transaction is not None:
+                await inside_transaction(next_version, now_utc)
             await self._conn.commit()
-            await self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                # Read `previous` INSIDE the transaction so the audit-log payload
-                # (previous_value / new_value) reflects the row that is genuinely
-                # the predecessor of the new one. A concurrent activation cannot
-                # interleave between this read and the INSERT below.
-                previous = await self.get_active()
-                changes = _build_audit_changes(previous, input)
-                if not changes:
-                    raise ValueError("activate called with no changed fields")
-
-                # Cross-table monotonic next_version: take the max across BOTH
-                # active_constraints AND config_audit_log, so a manual DELETE
-                # from active_constraints cannot make the next activation regress
-                # to a version below an already-audited one.
-                async with self._conn.execute(
-                    "SELECT COALESCE(MAX(v), 0) + 1 FROM ("
-                    " SELECT MAX(config_version) AS v FROM active_constraints"
-                    " UNION ALL"
-                    " SELECT MAX(config_version) AS v FROM config_audit_log"
-                    ")"
-                ) as cursor:
-                    version_row = await cursor.fetchone()
-                if version_row is None:
-                    raise RuntimeError("SQLite did not return a config version")
-                next_version = int(version_row[0])
-                now_iso = datetime.now(UTC).isoformat()
-
-                await self._conn.execute(
-                    "INSERT INTO active_constraints"
-                    " (peak_limit_kw, battery_reserve_floor_percent,"
-                    "  config_version, activated_at, actor)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (
-                        input.peak_limit_kw,
-                        input.battery_reserve_floor_percent,
-                        next_version,
-                        now_iso,
-                        actor,
-                    ),
-                )
-                await self._audit_repo.append_activation(
-                    actor=actor,
-                    changes=changes,
-                    config_version=next_version,
-                    commit=False,
-                )
-                await self._conn.commit()
-            except Exception:
-                await self._conn.rollback()
-                raise
+        except Exception:
+            await self._conn.rollback()
+            raise
         return next_version
 
 
@@ -170,6 +224,25 @@ def _build_audit_changes(
                 field=_AUDIT_FIELD_RESERVE_FLOOR,
                 previous_value={"percent": prev_floor},
                 new_value={"percent": new.battery_reserve_floor_percent},
+            )
+        )
+    # Story 9.3 — EV charging window emits ONE combined audit row when EITHER
+    # endpoint changes. The window is a single semantic constraint (paired-NULL
+    # or paired-set), so we never produce two rows for it. ``previous`` may be
+    # NULL (cold-start: no prior active row), in which case both endpoints are
+    # treated as ``None`` and the row only fires when the new input has them
+    # populated.
+    prev_start = None if previous is None else previous.ev_charging_window_start
+    prev_end = None if previous is None else previous.ev_charging_window_end
+    if prev_start != new.ev_charging_window_start or prev_end != new.ev_charging_window_end:
+        changes.append(
+            ConfigAuditChange(
+                field=_AUDIT_FIELD_EV_WINDOW,
+                previous_value={"start": prev_start, "end": prev_end},
+                new_value={
+                    "start": new.ev_charging_window_start,
+                    "end": new.ev_charging_window_end,
+                },
             )
         )
     return changes

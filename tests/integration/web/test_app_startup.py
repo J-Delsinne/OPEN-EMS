@@ -156,6 +156,28 @@ async def test_lifespan_wires_story_9_2_role_assignment_service_on_app_state(
         assert isinstance(app.state.role_assignment_service, RoleAssignmentService)
 
 
+async def test_lifespan_wires_story_9_3_constraints_service_on_app_state(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 9.3: ``constraints_service`` and ``draft_constraints_repo`` are
+    exposed on ``app.state`` after the lifespan reaches the application body.
+    """
+    from open_ems.services.constraints import ConstraintsService
+    from open_ems.storage.repositories.draft_constraints_repo import (
+        DraftConstraintsRepo,
+    )
+
+    structlog.reset_defaults()
+    db_path = str(tmp_path / "story_9_3_wiring.db")
+    _seed_lifespan_env(monkeypatch, db_path)
+
+    app = create_app()
+    async with lifespan(app):
+        assert isinstance(app.state.constraints_service, ConstraintsService)
+        assert isinstance(app.state.draft_constraints_repo, DraftConstraintsRepo)
+
+
 # ── Story 9.0d (AC8): monthly-peak lifespan hydration ──────────────────────
 
 

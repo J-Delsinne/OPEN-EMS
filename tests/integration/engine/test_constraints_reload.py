@@ -358,3 +358,114 @@ async def test_cold_start_seeds_from_settings(migrated_db: str) -> None:
     assert snapshot.config_version == 0
     assert snapshot.peak_limit_kw == settings.peak_limit_kw
     assert snapshot.battery_reserve_floor_percent == settings.battery_reserve_floor_percent
+
+
+# ── Story 9.3 — route-driven reload contract ────────────────────────────────
+
+
+async def test_route_driven_activate_calls_config_repo_and_provider_reload_exactly_once(
+    migrated_db: str,
+) -> None:
+    """Story 9.3: ONE activate via the Step-3 ``ConstraintsService`` reaches
+    ``ConfigRepo._activate_locked`` exactly once + ``provider.reload()``
+    exactly once, and PolicyGuard's next constraint read sees the new value.
+    Closes the 9.0b reload contract loop with a real route-driven trigger
+    rather than a synthetic ``await provider.reload()`` call.
+    """
+    from open_ems.core.constraints import ConstraintDraftInput
+    from open_ems.services.constraints import ConstraintsService
+    from open_ems.storage.repositories.device_repo import (
+        DeviceRepo,
+        ManualDeviceEntryInput,
+    )
+    from open_ems.storage.repositories.draft_constraints_repo import (
+        DraftConstraintsRepo,
+    )
+    from open_ems.storage.repositories.session_repo import (
+        SessionRepo,
+        generate_session_token,
+        hash_token,
+    )
+    from open_ems.storage.repositories.user_repo import UserRepo, hash_password
+    from open_ems.storage.repositories.wizard_state_repo import WizardStateRepo
+
+    settings = _settings()
+    config_repo = ConfigRepo()
+    provider = ActiveConstraintsProvider(repo=config_repo, settings=settings)
+    await provider.hydrate()
+
+    # Pre-populate prerequisites: a session, a wizard_state row at step_2_complete=1,
+    # and a grid_meter device.
+    user_id = await UserRepo().create(
+        username="installer-route",
+        hashed_password=hash_password("secret"),
+        role="installer",
+    )
+    session_id = await SessionRepo().create(
+        user_id=user_id,
+        token_hash=hash_token(generate_session_token()),
+        expires_at=datetime.now(UTC).replace(year=2027),
+        csrf_token="csrf",
+    )
+    wizard_repo = WizardStateRepo()
+    await wizard_repo.get_or_create(session_id, now=datetime.now(UTC))
+    await wizard_repo.set_step_1_complete(session_id, now=datetime.now(UTC))
+    await wizard_repo.set_step_2_complete(
+        session_id, acknowledged_gaps=frozenset(), now=datetime.now(UTC)
+    )
+    device_repo = DeviceRepo()
+    await device_repo.upsert_manual(
+        ManualDeviceEntryInput(
+            device_id="meter-1",
+            protocol="dsmr_p1",
+            address="/dev/ttyUSB0",
+        ),
+        first_seen_at=datetime.now(UTC),
+    )
+    await device_repo.assign_role(
+        "meter-1", role=DeviceRole.grid_meter, assigned_at=datetime.now(UTC)
+    )
+
+    # Build a state store and a constraints service.
+    state_store = StateStore(system_clock_status="valid")
+    draft_repo = DraftConstraintsRepo()
+    svc = ConstraintsService(
+        draft_repo=draft_repo,
+        config_repo=config_repo,
+        active_constraints_provider=provider,
+        wizard_state_repo=wizard_repo,
+        device_repo=device_repo,
+        state_store=state_store,
+    )
+
+    # Spy on the two contract calls.
+    activate_calls: list[object] = []
+    reload_calls: list[object] = []
+    real_activate_locked = config_repo._activate_locked
+    real_reload = provider.reload
+
+    async def spy_activate(*args, **kwargs):
+        activate_calls.append((args, kwargs))
+        return await real_activate_locked(*args, **kwargs)
+
+    async def spy_reload():
+        reload_calls.append(True)
+        return await real_reload()
+
+    config_repo._activate_locked = spy_activate  # type: ignore[method-assign]
+    provider.reload = spy_reload  # type: ignore[method-assign]
+
+    # Drive the staged flow.
+    await svc.upsert_draft(
+        session_id,
+        input=ConstraintDraftInput(peak_limit_kw=40.0, battery_reserve_floor_percent=20.0),
+        now=datetime.now(UTC),
+    )
+    result = await svc.activate_draft(session_id, actor="installer", now=datetime.now(UTC))
+
+    # AC10 contract: exactly ONE call to each.
+    assert len(activate_calls) == 1
+    assert len(reload_calls) == 1
+    # Provider snapshot reflects the new value on the very next read.
+    assert provider.get().peak_limit_kw == 40.0
+    assert provider.get().config_version == result.config_version

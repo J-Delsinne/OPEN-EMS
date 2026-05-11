@@ -97,8 +97,9 @@ def test_device_registry_schema_created(tmp_path: pathlib.Path) -> None:
 
 
 def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
-    """Story 9.1 AC8 + Story 9.2 AC2: ``wizard_state`` schema matches both
-    migrations and ``session_id`` keeps ON DELETE CASCADE."""
+    """Story 9.1 AC8 + Story 9.2 AC2 + Story 9.3 AC1: ``wizard_state`` schema
+    matches all three migrations and ``session_id`` keeps ON DELETE CASCADE.
+    """
     db_path = tmp_path / "wizard_state_test.db"
     alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
     with sqlite3.connect(db_path) as conn:
@@ -115,6 +116,9 @@ def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
         "step_2_complete": "INTEGER",
         "step_2_completed_at": "TEXT",
         "step_2_acknowledged_gaps": "TEXT",
+        "step_3_complete": "INTEGER",
+        "step_3_completed_at": "TEXT",
+        "step_3_activated_config_version": "INTEGER",
         "created_at": "TEXT",
         "updated_at": "TEXT",
     }
@@ -126,19 +130,84 @@ def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
     assert fkeys[0][6] == "CASCADE"
 
 
+def test_active_constraints_schema_with_ev_window(tmp_path: pathlib.Path) -> None:
+    """Story 9.3 AC1: ``active_constraints`` gains nullable EV window columns."""
+    db_path = tmp_path / "active_constraints_test.db"
+    alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(active_constraints)").fetchall()
+        }
+    assert columns == {
+        "id": "INTEGER",
+        "peak_limit_kw": "FLOAT",
+        "battery_reserve_floor_percent": "FLOAT",
+        "config_version": "INTEGER",
+        "activated_at": "TEXT",
+        "actor": "TEXT",
+        "ev_charging_window_start": "TEXT",
+        "ev_charging_window_end": "TEXT",
+    }
+
+
+def test_draft_constraints_schema_created(tmp_path: pathlib.Path) -> None:
+    """Story 9.3 AC1: ``draft_constraints`` schema + indices + FK CASCADE."""
+    db_path = tmp_path / "draft_constraints_test.db"
+    alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(draft_constraints)").fetchall()
+        }
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(draft_constraints)").fetchall()
+        }
+        fkeys = conn.execute("PRAGMA foreign_key_list(draft_constraints)").fetchall()
+    assert columns == {
+        "id": "INTEGER",
+        "session_id": "TEXT",
+        "peak_limit_kw": "FLOAT",
+        "battery_reserve_floor_percent": "FLOAT",
+        "ev_charging_window_start": "TEXT",
+        "ev_charging_window_end": "TEXT",
+        "validation_status": "TEXT",
+        "validation_report": "TEXT",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }
+    assert "ix_draft_constraints_session_id" in indexes
+    assert any(idx.startswith("sqlite_autoindex_draft_constraints") for idx in indexes)
+    assert len(fkeys) == 1
+    assert fkeys[0][2] == "sessions"
+    assert fkeys[0][3] == "session_id"
+    assert fkeys[0][4] == "id"
+    assert fkeys[0][6] == "CASCADE"
+
+
 def test_migration_0009_round_trips(tmp_path: pathlib.Path) -> None:
     """AC1 + dev-notes round-trip clause: upgrade head → downgrade -1 → upgrade head."""
     db_url = f"sqlite:///{tmp_path / 'roundtrip.db'}"
     alembic_command.upgrade(_make_cfg(db_url), "head")
-    # Story 9.2 added a second migration on top of 0009 — go back two steps
-    # so we exercise the 0009 round-trip and then re-stack 0010 on top.
-    alembic_command.downgrade(_make_cfg(db_url), "-2")
+    # Stories 9.2 + 9.3 added two more migrations on top of 0009 — go back
+    # three steps so we exercise the 0009 round-trip and then re-stack on top.
+    alembic_command.downgrade(_make_cfg(db_url), "-3")
     alembic_command.upgrade(_make_cfg(db_url), "head")
 
 
 def test_migration_0010_round_trips(tmp_path: pathlib.Path) -> None:
     """Story 9.2 AC1: migration 0010 upgrades + downgrades cleanly."""
     db_url = f"sqlite:///{tmp_path / 'roundtrip_0010.db'}"
+    alembic_command.upgrade(_make_cfg(db_url), "head")
+    # Story 9.3 added 0011 on top of 0010 — go back two steps so we exercise
+    # the 0010 round-trip and then re-stack 0011 on top.
+    alembic_command.downgrade(_make_cfg(db_url), "-2")
+    alembic_command.upgrade(_make_cfg(db_url), "head")
+
+
+def test_migration_0011_round_trips(tmp_path: pathlib.Path) -> None:
+    """Story 9.3 AC1: migration 0011 upgrades + downgrades cleanly."""
+    db_url = f"sqlite:///{tmp_path / 'roundtrip_0011.db'}"
     alembic_command.upgrade(_make_cfg(db_url), "head")
     alembic_command.downgrade(_make_cfg(db_url), "-1")
     alembic_command.upgrade(_make_cfg(db_url), "head")

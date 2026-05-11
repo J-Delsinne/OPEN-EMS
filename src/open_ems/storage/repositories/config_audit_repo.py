@@ -13,6 +13,11 @@ SAFETY_RELEVANT_CONFIG_FIELDS: frozenset[str] = frozenset(
     {
         "peak_consumption_limit",
         "battery_reserve_floor",
+        # Story 9.3: EV charging window endpoints emit one combined audit row
+        # under this field. ``ev_charging_window_preference`` is the legacy
+        # 6.3-era name kept for completeness in case prior audit rows reference
+        # it; new writes (Story 9.3) use ``ev_charging_window``.
+        "ev_charging_window",
         "ev_charging_window_preference",
         "energy_strategy_default",
         "device_role_assignment",

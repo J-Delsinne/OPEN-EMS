@@ -25,7 +25,14 @@ _CREATE_ACTIVE_CONSTRAINTS = """
                    AND battery_reserve_floor_percent <= 100),
         config_version INTEGER NOT NULL UNIQUE,
         activated_at TEXT NOT NULL,
-        actor TEXT NOT NULL CHECK (actor IN ('system', 'installer'))
+        actor TEXT NOT NULL CHECK (actor IN ('system', 'installer')),
+        ev_charging_window_start TEXT NULL,
+        ev_charging_window_end TEXT NULL,
+        CHECK (
+            (ev_charging_window_start IS NULL AND ev_charging_window_end IS NULL)
+            OR (ev_charging_window_start IS NOT NULL
+                AND ev_charging_window_end IS NOT NULL)
+        )
     )
 """
 _CREATE_CONFIG_AUDIT_LOG = """

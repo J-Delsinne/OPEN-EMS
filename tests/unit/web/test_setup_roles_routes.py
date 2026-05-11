@@ -76,9 +76,21 @@ _CREATE_WIZARD_STATE = """
             CHECK (step_2_complete IN (0, 1)),
         step_2_completed_at TEXT,
         step_2_acknowledged_gaps TEXT,
+        step_3_complete INTEGER NOT NULL DEFAULT 0
+            CHECK (step_3_complete IN (0, 1)),
+        step_3_completed_at TEXT,
+        step_3_activated_config_version INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        CHECK (
+            (step_3_complete = 0
+             AND step_3_completed_at IS NULL
+             AND step_3_activated_config_version IS NULL)
+            OR (step_3_complete = 1
+                AND step_3_completed_at IS NOT NULL
+                AND step_3_activated_config_version IS NOT NULL)
+        )
     )
 """
 
@@ -592,16 +604,8 @@ async def test_advance_idempotent_preserves_completed_at(
 
 
 # ---------------------------------------------------------------------------
-# Constraints placeholder + roles GET
+# Roles GET (constraints placeholder removed by Story 9.3)
 # ---------------------------------------------------------------------------
-
-
-async def test_get_constraints_renders_placeholder(app_with_services: FastAPI) -> None:
-    raw_token, _ = await _create_installer_session()
-    client = TestClient(app_with_services, base_url="https://test", follow_redirects=False)
-    response = client.get("/installer/setup/constraints", cookies={"session": raw_token})
-    assert response.status_code == 200
-    assert "Story 9.3" in response.text
 
 
 async def test_get_roles_renders_real_page_not_placeholder(

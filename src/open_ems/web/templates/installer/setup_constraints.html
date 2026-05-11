@@ -1,0 +1,27 @@
+{% extends "installer/setup_layout.html" %}
+
+{% block setup_body %}
+<section aria-labelledby="constraints-heading">
+  <h2 id="constraints-heading">Site safety constraints</h2>
+  <p>Configure the per-site safety values. Click <strong>Validate</strong>
+  to run server-side checks before activating. No constraint takes effect
+  until you confirm activation.</p>
+  <div id="constraints-form-region">
+    {% include "installer/_setup_constraints_form.html" %}
+  </div>
+</section>
+
+<section aria-labelledby="validation-heading">
+  <h2 id="validation-heading">Validation result</h2>
+  <div id="constraints-validation-region">
+    {% include "installer/_setup_constraints_validation.html" %}
+  </div>
+</section>
+
+<section aria-labelledby="activate-heading">
+  <h2 id="activate-heading">Activate</h2>
+  <div id="constraints-activate-region">
+    {% include "installer/_setup_constraints_activate.html" %}
+  </div>
+</section>
+{% endblock %}

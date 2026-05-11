@@ -1,0 +1,9 @@
+{# Story 9.3 — single-error envelope (mirror of _setup_roles_error.html).
+
+   Variables:
+     reason          — exact-match contract string (machine-readable)
+     reason_message  — operator-facing copy mapped from the contract reason (P6)
+#}
+<div class="error-banner" role="alert" data-reason="{{ reason }}">
+  {{ reason_message or reason }}
+</div>

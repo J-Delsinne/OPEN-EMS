@@ -1,0 +1,99 @@
+{# Story 9.3 — Step 3 constraint form region (UX spec component #8).
+
+   Variables:
+     view          — ConstraintDraftView (current values + validation status)
+     csrf_token    — string
+     field_errors  — dict[str, str] | absent — field-name → message
+#}
+{% set field_errors = field_errors|default({}) %}
+<form
+  method="post"
+  action="/installer/setup/constraints/draft"
+  hx-post="/installer/setup/constraints/draft"
+  hx-target="#constraints-form-region"
+  hx-swap="innerHTML"
+>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <div class="form-field">
+    <label for="peak_limit_kw">Peak consumption limit</label>
+    <input
+      id="peak_limit_kw"
+      name="peak_limit_kw"
+      type="number"
+      min="0.01"
+      step="0.01"
+      required
+      value="{% if view.raw_peak_limit_kw_text is not none %}{{ view.raw_peak_limit_kw_text }}{% else %}{{ '%.2f' % view.peak_limit_kw }}{% endif %}"
+      aria-describedby="peak_limit_kw_help peak_limit_kw_error"
+    >
+    <span class="unit">kW</span>
+    <small id="peak_limit_kw_help" class="helper">
+      Maximum total grid import. Enforced by PolicyGuard on every dispatch.
+    </small>
+    <div id="peak_limit_kw_error" class="validation-message"
+         {% if "peak_limit_kw" in field_errors %}role="alert"{% endif %}>
+      {{ field_errors.get("peak_limit_kw", "") }}
+    </div>
+  </div>
+
+  <div class="form-field">
+    <label for="battery_reserve_floor_percent">Battery reserve floor</label>
+    <input
+      id="battery_reserve_floor_percent"
+      name="battery_reserve_floor_percent"
+      type="number"
+      min="0"
+      max="100"
+      step="0.1"
+      required
+      value="{% if view.raw_battery_reserve_floor_percent_text is not none %}{{ view.raw_battery_reserve_floor_percent_text }}{% else %}{{ '%.1f' % view.battery_reserve_floor_percent }}{% endif %}"
+      aria-describedby="battery_reserve_floor_percent_help battery_reserve_floor_percent_error"
+    >
+    <span class="unit">%</span>
+    <small id="battery_reserve_floor_percent_help" class="helper">
+      Minimum SoC; PolicyGuard blocks discharge below this floor.
+    </small>
+    <div id="battery_reserve_floor_percent_error" class="validation-message"
+         {% if "battery_reserve_floor_percent" in field_errors %}role="alert"{% endif %}>
+      {{ field_errors.get("battery_reserve_floor_percent", "") }}
+    </div>
+  </div>
+
+  <div class="form-field">
+    <label for="ev_charging_window_start">EV charging window start</label>
+    <input
+      id="ev_charging_window_start"
+      name="ev_charging_window_start"
+      type="time"
+      value="{{ view.ev_charging_window_start or '' }}"
+      aria-describedby="ev_window_help ev_charging_window_error"
+    >
+    <label for="ev_charging_window_end">end</label>
+    <input
+      id="ev_charging_window_end"
+      name="ev_charging_window_end"
+      type="time"
+      value="{{ view.ev_charging_window_end or '' }}"
+      aria-describedby="ev_window_help ev_charging_window_error"
+    >
+    <small id="ev_window_help" class="helper">
+      Optional. Leave both blank to charge whenever convenient.
+    </small>
+    <div id="ev_charging_window_error" class="validation-message"
+         {% if "ev_charging_window" in field_errors %}role="alert"{% endif %}>
+      {{ field_errors.get("ev_charging_window", "") }}
+    </div>
+  </div>
+
+  <div class="form-actions">
+    <button type="submit">Save draft</button>
+    <button
+      type="button"
+      hx-post="/installer/setup/constraints/validate"
+      hx-target="#constraints-validation-region"
+      hx-swap="innerHTML"
+      hx-include="closest form"
+    >Validate</button>
+  </div>
+</form>

@@ -19,8 +19,9 @@ import pytest_asyncio
 from open_ems.core.constraints import ActiveConstraintsInput
 from open_ems.storage.repositories.config_repo import ConfigRepo
 
-# Schema mirrors migrations/versions/0008_add_active_constraints_table.py and
-# 0006_add_config_audit_log_table.py — kept in sync as a unit-test convenience.
+# Schema mirrors migrations/versions/0008_add_active_constraints_table.py +
+# 0011_add_constraint_configuration_tables.py + 0006_add_config_audit_log_table.py
+# — kept in sync as a unit-test convenience.
 _CREATE_ACTIVE_CONSTRAINTS = """
     CREATE TABLE active_constraints (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,7 +31,14 @@ _CREATE_ACTIVE_CONSTRAINTS = """
                    AND battery_reserve_floor_percent <= 100),
         config_version INTEGER NOT NULL UNIQUE,
         activated_at TEXT NOT NULL,
-        actor TEXT NOT NULL CHECK (actor IN ('system', 'installer'))
+        actor TEXT NOT NULL CHECK (actor IN ('system', 'installer')),
+        ev_charging_window_start TEXT NULL,
+        ev_charging_window_end TEXT NULL,
+        CHECK (
+            (ev_charging_window_start IS NULL AND ev_charging_window_end IS NULL)
+            OR (ev_charging_window_start IS NOT NULL
+                AND ev_charging_window_end IS NOT NULL)
+        )
     )
 """
 _CREATE_CONFIG_AUDIT_LOG = """
@@ -288,3 +296,115 @@ async def test_activate_uses_cross_table_max_for_next_config_version(
         f"Expected next config_version=4 (audit-log max + 1); got {v}. "
         "Cross-table monotonic version assignment is broken."
     )
+
+
+# ---------------------------------------------------------------------------
+# Story 9.3 — EV charging window audit emission
+# ---------------------------------------------------------------------------
+
+
+def _input_with_window(
+    peak: float = 25.0,
+    floor: float = 20.0,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+) -> ActiveConstraintsInput:
+    return ActiveConstraintsInput(
+        peak_limit_kw=peak,
+        battery_reserve_floor_percent=floor,
+        ev_charging_window_start=start,
+        ev_charging_window_end=end,
+    )
+
+
+async def test_ev_window_only_change_emits_one_combined_audit_row(
+    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
+) -> None:
+    """Story 9.3 AC2: an EV-window-only change emits exactly ONE audit row
+    with ``field='ev_charging_window'`` containing both endpoints.
+    """
+    repo, conn = repo_with_conn
+    # First activation: peak + floor change (window is NULL on both sides).
+    await repo.activate(_input(25.0, 20.0), actor="installer")
+    # Second activation: only EV window changes (start=NULL → 09:00, end=NULL → 17:00).
+    await repo.activate(
+        _input_with_window(25.0, 20.0, start="09:00", end="17:00"), actor="installer"
+    )
+    async with conn.execute(
+        "SELECT field, previous_value, new_value FROM config_audit_log WHERE config_version = 2"
+    ) as cur:
+        rows = list(await cur.fetchall())
+    assert len(rows) == 1
+    assert rows[0]["field"] == "ev_charging_window"
+    assert json.loads(rows[0]["previous_value"]) == {"start": None, "end": None}
+    assert json.loads(rows[0]["new_value"]) == {"start": "09:00", "end": "17:00"}
+
+
+async def test_all_three_field_change_shares_single_config_version(
+    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
+) -> None:
+    """Story 9.3 AC2: peak + floor + EV window change in one activate() emits
+    exactly THREE audit rows with the same config_version.
+    """
+    repo, conn = repo_with_conn
+    await repo.activate(_input(25.0, 20.0), actor="installer")
+    await repo.activate(
+        _input_with_window(30.0, 25.0, start="09:00", end="17:00"), actor="installer"
+    )
+    async with conn.execute(
+        "SELECT field, config_version FROM config_audit_log WHERE config_version = 2 ORDER BY field"
+    ) as cur:
+        rows = list(await cur.fetchall())
+    assert len(rows) == 3
+    assert sorted(r["field"] for r in rows) == [
+        "battery_reserve_floor",
+        "ev_charging_window",
+        "peak_consumption_limit",
+    ]
+    assert {r["config_version"] for r in rows} == {2}
+
+
+async def test_unchanged_ev_window_emits_no_audit_row(
+    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
+) -> None:
+    """The combined window row only fires when start OR end actually changes."""
+    repo, conn = repo_with_conn
+    await repo.activate(
+        _input_with_window(25.0, 20.0, start="09:00", end="17:00"), actor="installer"
+    )
+    # Now change only peak_limit; window stays the same.
+    await repo.activate(
+        _input_with_window(30.0, 20.0, start="09:00", end="17:00"), actor="installer"
+    )
+    async with conn.execute("SELECT field FROM config_audit_log WHERE config_version = 2") as cur:
+        fields = [cast(aiosqlite.Row, r)[0] for r in await cur.fetchall()]
+    assert fields == ["peak_consumption_limit"]
+
+
+async def test_ev_window_round_trips_through_active_constraints(
+    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
+) -> None:
+    repo, _ = repo_with_conn
+    await repo.activate(
+        _input_with_window(25.0, 20.0, start="09:00", end="17:00"), actor="installer"
+    )
+    active = await repo.get_active()
+    assert active is not None
+    assert active.ev_charging_window_start == "09:00"
+    assert active.ev_charging_window_end == "17:00"
+
+
+async def test_activate_locked_does_not_acquire_lock(
+    repo_with_conn: tuple[ConfigRepo, aiosqlite.Connection],
+) -> None:
+    """Story 9.3: ``_activate_locked`` MUST NOT acquire ``get_write_lock``;
+    callers (the staged-activation route) own that lock. Verify by asserting
+    the lock can be held by the caller while ``_activate_locked`` runs.
+    """
+    from open_ems.storage.database import get_write_lock
+
+    repo, _ = repo_with_conn
+    async with get_write_lock():
+        version = await repo._activate_locked(_input(25.0, 20.0), actor="installer")
+    assert version == 1

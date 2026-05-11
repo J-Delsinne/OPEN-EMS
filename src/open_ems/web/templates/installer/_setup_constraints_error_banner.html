@@ -1,0 +1,23 @@
+{# Story 9.3 — activate-fail banner. Mirrors _setup_roles_error_banner.html.
+
+   Variables:
+     reason          — exact-match contract string (machine-readable)
+     reason_message  — operator-facing copy mapped from the contract reason (P6)
+     report          — ConstraintValidationReport | None (populated when reason
+                       is 'constraints_validation_failed')
+#}
+<div class="error-banner" role="alert" data-reason="{{ reason }}">
+  <p><strong>Cannot activate constraints:</strong> {{ reason_message or reason }}</p>
+  {% if report is not none %}
+    <ul>
+      {% for check in report.checks %}
+        {% if check.status != "pass" %}
+          <li>
+            <span class="badge badge-{{ check.status }}">{{ check.status|upper }}</span>
+            {{ check.name }}{% if check.message %}: {{ check.message }}{% endif %}
+          </li>
+        {% endif %}
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>

@@ -1,0 +1,38 @@
+{# Story 9.3 — Step 3 validation report region (UX spec component #9).
+
+   Variables:
+     report           — ConstraintValidationReport | None
+     view             — ConstraintDraftView (used for the OOB activate refresh)
+     csrf_token       — string
+     render_activate_oob  — bool — when true, also re-render activate fragment
+                            via hx-swap-oob so the disabled→enabled transition
+                            is atomic with the report swap.
+#}
+{% set report = report if (report is defined) else view.validation_report %}
+{% if report is not none %}
+  <ul class="validation-results">
+    {% for check in report.checks %}
+      <li class="validation-row validation-row-{{ check.status }}">
+        <span class="badge badge-{{ check.status }}" aria-label="{{ check.status }}">
+          {{ check.status|upper }}
+        </span>
+        <span class="check-name">{{ check.name }}</span>
+        {% if check.message %}
+          <span class="check-message">{{ check.message }}</span>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  <p class="overall-status overall-status-{{ report.overall_status }}" role="status">
+    Overall: {{ report.overall_status|upper }}
+  </p>
+{% else %}
+  <p class="no-validation-yet">No validation has been run for the current draft.
+  Click <strong>Validate</strong> to run server-side checks.</p>
+{% endif %}
+
+{% if render_activate_oob|default(false) %}
+  <div id="constraints-activate-region" hx-swap-oob="innerHTML">
+    {% include "installer/_setup_constraints_activate.html" %}
+  </div>
+{% endif %}

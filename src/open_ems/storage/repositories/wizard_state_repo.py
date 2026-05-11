@@ -68,6 +68,9 @@ class WizardState(BaseModel):
     step_2_complete: bool = False
     step_2_completed_at: datetime | None = None
     step_2_acknowledged_gaps: frozenset[str] = frozenset()
+    step_3_complete: bool = False
+    step_3_completed_at: datetime | None = None
+    step_3_activated_config_version: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -90,6 +93,13 @@ class WizardState(BaseModel):
             return None
         return _require_utc(value, "step_2_completed_at")
 
+    @field_validator("step_3_completed_at")
+    @classmethod
+    def _step_3_completed_at_must_be_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return _require_utc(value, "step_3_completed_at")
+
     @model_validator(mode="after")
     def _acknowledged_gaps_whitelisted(self) -> WizardState:
         # Defense-in-depth: a tampered DB row carrying an unknown label fails
@@ -98,6 +108,22 @@ class WizardState(BaseModel):
         if unknown:
             raise ValueError(
                 f"step_2_acknowledged_gaps contains unknown labels: {sorted(unknown)!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _step_3_paired(self) -> WizardState:
+        # Story 9.3 R3 #5: ``step_3_complete=1`` IFF ``step_3_completed_at`` IS
+        # NOT NULL IFF ``step_3_activated_config_version`` IS NOT NULL. The DB
+        # CHECK constraint enforces this on writes; this read-side guard
+        # rejects a tampered row.
+        complete = self.step_3_complete
+        ts_set = self.step_3_completed_at is not None
+        version_set = self.step_3_activated_config_version is not None
+        if complete != ts_set or complete != version_set:
+            raise ValueError(
+                "step_3_complete, step_3_completed_at and step_3_activated_config_version"
+                " must all be set together"
             )
         return self
 
@@ -110,6 +136,7 @@ class WizardStateRepo:
         async with self._conn.execute(
             "SELECT session_id, step_1_complete, step_1_completed_at, last_scan_id,"
             " step_2_complete, step_2_completed_at, step_2_acknowledged_gaps,"
+            " step_3_complete, step_3_completed_at, step_3_activated_config_version,"
             " created_at, updated_at"
             " FROM wizard_state WHERE session_id = ?",
             (session_id,),
@@ -251,6 +278,86 @@ class WizardStateRepo:
                 session_id, acknowledged_gaps=acknowledged_gaps, now=now
             )
 
+    async def set_step_3_complete(
+        self,
+        session_id: str,
+        *,
+        activated_config_version: int,
+        now: datetime,
+    ) -> None:
+        """Mark step 3 complete idempotently (Story 9.3).
+
+        Writes ``step_3_complete=1`` + ``step_3_completed_at`` +
+        ``step_3_activated_config_version`` atomically. Idempotent: if
+        ``step_3_complete`` is already ``1``, ``step_3_completed_at`` AND
+        ``step_3_activated_config_version`` are preserved (no shift on retry).
+        Mirrors ``set_step_2_complete``'s 9.2 idempotent pattern. Raises
+        ``ValueError`` if no row exists for ``session_id``.
+        """
+        async with get_write_lock():
+            await self.set_step_3_complete_locked(
+                session_id,
+                activated_config_version=activated_config_version,
+                now=now,
+            )
+
+    async def set_step_3_complete_locked(
+        self,
+        session_id: str,
+        *,
+        activated_config_version: int,
+        now: datetime,
+        commit: bool = True,
+    ) -> None:
+        """Lock-free variant — caller MUST already hold ``get_write_lock()``.
+
+        Used by the staged-activation route (Story 9.3) to flip the wizard
+        state inside the same lock window that owns ``ConfigRepo._activate_locked``.
+
+        When ``commit=False`` (Story 9.3 P13), the caller is managing an outer
+        ``BEGIN IMMEDIATE`` transaction — no leading flush, no trailing commit —
+        so this UPDATE joins that transaction and rolls back atomically with
+        ``active_constraints`` + ``config_audit_log`` + ``draft_constraints``
+        if any subsequent step fails.
+        """
+        if activated_config_version <= 0:
+            raise ValueError(
+                f"activated_config_version must be > 0 (got {activated_config_version})"
+            )
+        _require_utc(now, "now")
+        if commit:
+            await self._conn.commit()
+        async with self._conn.execute(
+            "UPDATE wizard_state SET"
+            " step_3_complete = 1,"
+            " step_3_completed_at = CASE"
+            "   WHEN step_3_complete = 1 THEN step_3_completed_at"
+            "   ELSE ?"
+            " END,"
+            " step_3_activated_config_version = CASE"
+            "   WHEN step_3_complete = 1 THEN step_3_activated_config_version"
+            "   ELSE ?"
+            " END,"
+            " updated_at = ?"
+            " WHERE session_id = ?",
+            (
+                now.isoformat(),
+                activated_config_version,
+                now.isoformat(),
+                session_id,
+            ),
+        ) as cursor:
+            if cursor.rowcount == 0:
+                # When commit=False we are inside the caller's transaction;
+                # raising propagates and the caller rolls back. When
+                # commit=True we flush so the failed UPDATE is not left in an
+                # implicit transaction the caller does not own.
+                if commit:
+                    await self._conn.commit()
+                raise ValueError(f"No wizard_state row for session_id={session_id!r}")
+        if commit:
+            await self._conn.commit()
+
     async def set_step_2_complete_locked(
         self,
         session_id: str,
@@ -294,6 +401,9 @@ class WizardStateRepo:
 
 def _row_to_state(row: aiosqlite.Row | tuple[object, ...]) -> WizardState:
     step_2_acknowledged_gaps_raw = str(row[6]) if row[6] is not None else None
+    step_3_activated_config_version = (
+        int(row[9]) if row[9] is not None else None  # type: ignore[arg-type]
+    )
     return WizardState(
         session_id=str(row[0]),
         step_1_complete=bool(row[1]),
@@ -308,6 +418,12 @@ def _row_to_state(row: aiosqlite.Row | tuple[object, ...]) -> WizardState:
             "step_2_completed_at",
         ),
         step_2_acknowledged_gaps=_decode_gap_labels(step_2_acknowledged_gaps_raw),
-        created_at=datetime.fromisoformat(str(row[7])),
-        updated_at=datetime.fromisoformat(str(row[8])),
+        step_3_complete=bool(row[7]),
+        step_3_completed_at=_parse_optional_utc(
+            str(row[8]) if row[8] is not None else None,
+            "step_3_completed_at",
+        ),
+        step_3_activated_config_version=step_3_activated_config_version,
+        created_at=datetime.fromisoformat(str(row[10])),
+        updated_at=datetime.fromisoformat(str(row[11])),
     )

@@ -24,6 +24,7 @@ from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.logging_config import configure_logging
 from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.services.audit_log import ObservabilityService
+from open_ems.services.constraints import ConstraintsService
 from open_ems.services.device_discovery import DeviceDiscoveryOrchestrator
 from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.services.manual_entry import ManualEntryService
@@ -35,6 +36,7 @@ from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
 from open_ems.storage.repositories.config_repo import ConfigRepo
 from open_ems.storage.repositories.device_repo import DeviceRepo
+from open_ems.storage.repositories.draft_constraints_repo import DraftConstraintsRepo
 from open_ems.storage.repositories.energy_repo import EnergyRepo
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
 from open_ems.storage.repositories.session_repo import SessionRepo
@@ -256,10 +258,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Step 4b: Hydrate the active-constraints provider BEFORE any consumer
         # (PolicyGuard / ControlLoop) is constructed. A failure here means the
         # process cannot determine its safety constraints — fail loud (Story
-        # 9.0b AC7), matching the migration-failure handling pattern.
+        # 9.0b AC7), matching the migration-failure handling pattern. Story
+        # 9.3 reuses this same ConfigRepo instance for the staged-constraint
+        # service so all writes share the database-module write lock.
+        config_repo = ConfigRepo()
         try:
             active_constraints_provider = ActiveConstraintsProvider(
-                repo=ConfigRepo(), settings=settings
+                repo=config_repo, settings=settings
             )
             await active_constraints_provider.hydrate()
         except Exception:
@@ -320,15 +325,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # object is stateless; no DB I/O at construction (first read happens on
         # the first installer request, post-readiness).
         role_assignment_service = RoleAssignmentService(device_repo=device_repo)
+        # Step 4f (Story 9.3): construct the staged-constraint draft repo +
+        # service. Reuses the SAME ConfigRepo instance the provider already
+        # references so all writes share the database-module write lock.
+        # Stateless wiring; no DB I/O at construction.
+        draft_constraints_repo = DraftConstraintsRepo()
+        constraints_service = ConstraintsService(
+            draft_repo=draft_constraints_repo,
+            config_repo=config_repo,
+            active_constraints_provider=active_constraints_provider,
+            wizard_state_repo=wizard_state_repo,
+            device_repo=device_repo,
+            state_store=app.state.state_store,
+        )
         app.state.device_repo = device_repo
         app.state.wizard_state_repo = wizard_state_repo
         app.state.discovery_orchestrator = discovery_orchestrator
         app.state.manual_entry_service = manual_entry_service
         app.state.role_assignment_service = role_assignment_service
+        app.state.draft_constraints_repo = draft_constraints_repo
+        app.state.constraints_service = constraints_service
         logger.info("device_registry_ready", component="startup")
         logger.info("wizard_state_ready", component="startup")
         logger.info("discovery_orchestrator_ready", component="startup")
         logger.info("role_assignment_service_ready", component="startup")
+        logger.info("draft_constraints_repo_ready", component="startup")
+        logger.info("constraints_service_ready", component="startup")
 
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
