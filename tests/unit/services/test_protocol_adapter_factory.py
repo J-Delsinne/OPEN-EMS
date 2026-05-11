@@ -17,14 +17,16 @@ from datetime import UTC, datetime
 
 import pytest
 
+from open_ems.adapters.address_parsing import (
+    parse_dsmr_address as _parse_dsmr_address,
+)
+from open_ems.adapters.address_parsing import (
+    parse_host_port as _parse_host_port,
+)
 from open_ems.adapters.discovery import DeviceProbeError
 from open_ems.adapters.ocpp.central_system import OCPPRegisteredCharger
 from open_ems.core.devices import CapabilityStatus, DeviceRole
-from open_ems.services.protocol_adapter_factory import (
-    ProtocolAdapterFactory,
-    _parse_dsmr_address,
-    _parse_host_port,
-)
+from open_ems.services.protocol_adapter_factory import ProtocolAdapterFactory
 from open_ems.storage.repositories.device_repo import DeviceRegistryEntry
 
 _NOW = datetime(2026, 5, 11, 12, 0, 0, tzinfo=UTC)

@@ -2073,6 +2073,8 @@ So that I receive an honest readiness signal before handoff — warnings are nev
 
 The homeowner dashboard with card stack, real-time SSE updates with HTMX polling fallback, 4-state optimistic EV override, inline strategy selector, stale data handling, and calm degraded-mode display. FR30 weekly summary is nice-to-have and must not block the MVP dashboard.
 
+**Prerequisite:** Story 9.X (Wire adapter map into PolicyGuard and ControlLoop) is a hard gate before Story 10.2. Stories 10.1, 10.3, and 10.4 may begin after 9-X completes, but Story 10.2's `Optimistic → Confirmed` transition requires that `/actions/ev-override` reach a real OCPP charger — structurally impossible while PolicyGuard's adapter map is empty (Story 8-2 deferred finding [`app.py:223-236`], closed by 9-X on 2026-05-11).
+
 **Requirements covered:** FR25, FR26, FR27, FR28, FR29, FR30 (nice-to-have), NFR-P3, NFR-P4
 
 ---

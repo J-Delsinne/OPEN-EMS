@@ -7,11 +7,11 @@ runs a read-only protocol-layer probe (the same primitives Story 9.1's
 device's capability profile from the registry, and tears the adapter down.
 
 **Validation-only:** the factory is NOT part of the runtime control surface.
-PolicyGuard's ``adapters`` mapping is unchanged — wiring runtime adapters is
-out-of-scope per the user-stated guardrail #1 and the Story 9.4 R7 triage of
-the Story 8-2 deferred finding (`adapters={}`). A dedicated future story
-(provisional ``9-X-wire-adapter-map-into-policy-guard-and-control-loop``)
-owns that surface.
+Probes go through ``DiscoveryService`` read-only primitives; the factory
+does not issue ``send_command``. The runtime control surface
+(``PolicyGuard.adapters`` and ``ControlLoop.adapters``) is wired separately
+by ``runtime_adapter_wiring.build_runtime_adapter_map`` (Story 9.X — closes
+the Story 8-2 deferred finding at ``[app.py:223-236]``).
 
 **Safe-probe invariant (user guardrail #2):** the probe path goes through
 ``DiscoveryService.probe_modbus_endpoint`` / ``probe_dsmr_endpoint`` — both
@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 import structlog
 
+from open_ems.adapters.address_parsing import parse_dsmr_address, parse_host_port
 from open_ems.adapters.capabilities import get_profile
 from open_ems.adapters.discovery import DeviceProbeError, DiscoveryService
 from open_ems.adapters.ocpp.central_system import OCPPCentralSystem
@@ -132,7 +133,7 @@ class ProtocolAdapterFactory:
         *,
         timeout_s: float,
     ) -> ProbeOutcome:
-        host, port = _parse_host_port(entry.address)
+        host, port = parse_host_port(entry.address)
         if host is None or port is None:
             return _outcome_unreachable(entry, "modbus_address_unparsable")
         try:
@@ -168,7 +169,7 @@ class ProtocolAdapterFactory:
         *,
         timeout_s: float,
     ) -> ProbeOutcome:
-        serial_port, tcp_host, tcp_port = _parse_dsmr_address(entry.address)
+        serial_port, tcp_host, tcp_port = parse_dsmr_address(entry.address)
         if serial_port is None and tcp_host is None:
             return _outcome_unreachable(entry, "dsmr_address_unparsable")
         try:
@@ -226,64 +227,6 @@ class ProtocolAdapterFactory:
         if entry.device_id not in registered_ids:
             return _outcome_unreachable(entry, "ocpp_charger_not_connected")
         return _outcome_reachable(entry)
-
-
-def _parse_host_port(address: str) -> tuple[str | None, int | None]:
-    """Parse ``host:port`` for Modbus TCP addresses.
-
-    P14 — accept IPv6 bracketed-host form ``[::1]:502`` and validate the port
-    range. Previously rejected any address with more than one colon and
-    accepted port=0 / port>65535 (which downstream socket code then surfaced
-    as a less useful generic OSError).
-    """
-    if not address:
-        return None, None
-    # IPv6 bracketed form: [<ipv6>]:port
-    if address.startswith("["):
-        end = address.find("]")
-        if end == -1 or end + 1 >= len(address) or address[end + 1] != ":":
-            return None, None
-        host = address[1:end]
-        port_str = address[end + 2 :]
-    else:
-        # Standard host:port (single colon expected). IPv4 / hostname.
-        if address.count(":") != 1:
-            return None, None
-        host, port_str = address.rsplit(":", 1)
-    if not host:
-        return None, None
-    try:
-        port = int(port_str)
-    except ValueError:
-        return None, None
-    if not (0 < port <= 65535):
-        return None, None
-    return host, port
-
-
-def _parse_dsmr_address(
-    address: str,
-) -> tuple[str | None, str | None, int | None]:
-    """Parse a DSMR address: serial-port path OR ``host:port`` for TCP DSMR.
-
-    P14 — apply the same port-range validation as ``_parse_host_port``.
-    """
-    if not address:
-        return None, None, None
-    if address.startswith("/"):
-        return address, None, None
-    if address.count(":") != 1:
-        return None, None, None
-    host, port_str = address.rsplit(":", 1)
-    if not host:
-        return None, None, None
-    try:
-        port = int(port_str)
-    except ValueError:
-        return None, None, None
-    if not (0 < port <= 65535):
-        return None, None, None
-    return None, host, port
 
 
 def _outcome_unreachable(entry: DeviceRegistryEntry, reason: str) -> ProbeOutcome:

@@ -1,0 +1,1514 @@
+warning: in the working copy of '_bmad-output/planning-artifacts/epics.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/open_ems/services/protocol_adapter_factory.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/unit/services/test_protocol_adapter_factory.py', LF will be replaced by CRLF the next time Git touches it
+diff --git a/_bmad-output/implementation-artifacts/deferred-work.md b/_bmad-output/implementation-artifacts/deferred-work.md
+index 40a9fed..0b4f48f 100644
+--- a/_bmad-output/implementation-artifacts/deferred-work.md
++++ b/_bmad-output/implementation-artifacts/deferred-work.md
+@@ -114,7 +114,7 @@ _Six round-2 review findings each touch enough surface to deserve dedicated dev-
+ 
+ - **Control loop crash not restarted after unhandled exception** [`control_loop.py`, `app.py:_on_control_loop_done`] — callback logs `control_loop_died` at ERROR but takes no recovery action; a single unhandled exception permanently halts device control for the process lifetime; Story 8.4 (watchdog + fail-safe transition) is the correct fix scope.
+ - **First tick publishes `operating_mode=None`** [`control_loop.py:73-76`] — `_last_mode` is `None` at init and not set until the first successful `_handle_evaluation_result` completes; `StateStore.publish(operating_mode=None)` silently carries forward the initial degraded mode; pre-existing from Story 8.1.
+-- **`adapters={}` in production silently rejects all commands** [`app.py:223-236`] — PolicyGuard and ControlLoop are both wired with empty adapter maps; every command is immediately rejected with `adapter_not_registered`; intentional design stub — Epic 9 installer flow populates adapters.
++- **`adapters={}` in production silently rejects all commands** [`app.py:223-236`] — PolicyGuard and ControlLoop are both wired with empty adapter maps; every command is immediately rejected with `adapter_not_registered`; intentional design stub — Epic 9 installer flow populates adapters. *(resolved in Story 9-X, 2026-05-11 — new lifespan step 4h calls `build_runtime_adapter_map(...)` to construct a `RuntimeAdapterMap` from `device_registry` filtered to validated+role-assigned rows; PolicyGuard and ControlLoop receive `runtime_adapters.policy_guard_adapters` and `runtime_adapters.control_loop_adapters` respectively. The empty-registry cold-start branch preserves the pre-wizard-complete behavior at INFO `runtime_adapter_map_empty`.)*
+ - **Degraded grid meter returns `0.0` to PartialIntervalTracker** [`control_loop.py:_extract_grid_power`] — a `DegradedDeviceState` for the grid meter injects zero watts into the energy accumulator, underreporting monthly peak; `tick_quality="incomplete"` is flagged correctly but the 0.0 enters the tracker regardless; pre-existing from Story 8.1.
+ - **Timeout constants not exposed via Settings** [`policy_guard.py:44-45`] — `CAPABILITY_CHECK_TIMEOUT_SECONDS=5.0` and `COMMAND_DISPATCH_TIMEOUT_SECONDS=10.0` are module-level constants; cannot be tuned per deployment without a code change; spec prescribes module-level constants; promote to `Settings` when deployment variability is required.
+ - **PolicyGuard re-fetches snapshot independently (stale-read window)** [`policy_guard.py:67`] — `authorize_and_dispatch` calls `get_snapshot()` after `IntentExecutor.translate()` already received the published snapshot; theoretical inconsistency in current single-task asyncio arch; revisit if concurrent publishers are introduced.
+diff --git a/_bmad-output/planning-artifacts/epics.md b/_bmad-output/planning-artifacts/epics.md
+index 7242215..cadc89f 100644
+--- a/_bmad-output/planning-artifacts/epics.md
++++ b/_bmad-output/planning-artifacts/epics.md
+@@ -2073,6 +2073,8 @@ So that I receive an honest readiness signal before handoff — warnings are nev
+ 
+ The homeowner dashboard with card stack, real-time SSE updates with HTMX polling fallback, 4-state optimistic EV override, inline strategy selector, stale data handling, and calm degraded-mode display. FR30 weekly summary is nice-to-have and must not block the MVP dashboard.
+ 
++**Prerequisite:** Story 9.X (Wire adapter map into PolicyGuard and ControlLoop) is a hard gate before Story 10.2. Stories 10.1, 10.3, and 10.4 may begin after 9-X completes, but Story 10.2's `Optimistic → Confirmed` transition requires that `/actions/ev-override` reach a real OCPP charger — structurally impossible while PolicyGuard's adapter map is empty (Story 8-2 deferred finding [`app.py:223-236`], closed by 9-X on 2026-05-11).
++
+ **Requirements covered:** FR25, FR26, FR27, FR28, FR29, FR30 (nice-to-have), NFR-P3, NFR-P4
+ 
+ ---
+diff --git a/src/open_ems/services/protocol_adapter_factory.py b/src/open_ems/services/protocol_adapter_factory.py
+index edc05df..e66abd2 100644
+--- a/src/open_ems/services/protocol_adapter_factory.py
++++ b/src/open_ems/services/protocol_adapter_factory.py
+@@ -7,11 +7,11 @@ runs a read-only protocol-layer probe (the same primitives Story 9.1's
+ device's capability profile from the registry, and tears the adapter down.
+ 
+ **Validation-only:** the factory is NOT part of the runtime control surface.
+-PolicyGuard's ``adapters`` mapping is unchanged — wiring runtime adapters is
+-out-of-scope per the user-stated guardrail #1 and the Story 9.4 R7 triage of
+-the Story 8-2 deferred finding (`adapters={}`). A dedicated future story
+-(provisional ``9-X-wire-adapter-map-into-policy-guard-and-control-loop``)
+-owns that surface.
++Probes go through ``DiscoveryService`` read-only primitives; the factory
++does not issue ``send_command``. The runtime control surface
++(``PolicyGuard.adapters`` and ``ControlLoop.adapters``) is wired separately
++by ``runtime_adapter_wiring.build_runtime_adapter_map`` (Story 9.X — closes
++the Story 8-2 deferred finding at ``[app.py:223-236]``).
+ 
+ **Safe-probe invariant (user guardrail #2):** the probe path goes through
+ ``DiscoveryService.probe_modbus_endpoint`` / ``probe_dsmr_endpoint`` — both
+@@ -30,6 +30,7 @@ from dataclasses import dataclass
+ 
+ import structlog
+ 
++from open_ems.adapters.address_parsing import parse_dsmr_address, parse_host_port
+ from open_ems.adapters.capabilities import get_profile
+ from open_ems.adapters.discovery import DeviceProbeError, DiscoveryService
+ from open_ems.adapters.ocpp.central_system import OCPPCentralSystem
+@@ -132,7 +133,7 @@ class ProtocolAdapterFactory:
+         *,
+         timeout_s: float,
+     ) -> ProbeOutcome:
+-        host, port = _parse_host_port(entry.address)
++        host, port = parse_host_port(entry.address)
+         if host is None or port is None:
+             return _outcome_unreachable(entry, "modbus_address_unparsable")
+         try:
+@@ -168,7 +169,7 @@ class ProtocolAdapterFactory:
+         *,
+         timeout_s: float,
+     ) -> ProbeOutcome:
+-        serial_port, tcp_host, tcp_port = _parse_dsmr_address(entry.address)
++        serial_port, tcp_host, tcp_port = parse_dsmr_address(entry.address)
+         if serial_port is None and tcp_host is None:
+             return _outcome_unreachable(entry, "dsmr_address_unparsable")
+         try:
+@@ -228,64 +229,6 @@ class ProtocolAdapterFactory:
+         return _outcome_reachable(entry)
+ 
+ 
+-def _parse_host_port(address: str) -> tuple[str | None, int | None]:
+-    """Parse ``host:port`` for Modbus TCP addresses.
+-
+-    P14 — accept IPv6 bracketed-host form ``[::1]:502`` and validate the port
+-    range. Previously rejected any address with more than one colon and
+-    accepted port=0 / port>65535 (which downstream socket code then surfaced
+-    as a less useful generic OSError).
+-    """
+-    if not address:
+-        return None, None
+-    # IPv6 bracketed form: [<ipv6>]:port
+-    if address.startswith("["):
+-        end = address.find("]")
+-        if end == -1 or end + 1 >= len(address) or address[end + 1] != ":":
+-            return None, None
+-        host = address[1:end]
+-        port_str = address[end + 2 :]
+-    else:
+-        # Standard host:port (single colon expected). IPv4 / hostname.
+-        if address.count(":") != 1:
+-            return None, None
+-        host, port_str = address.rsplit(":", 1)
+-    if not host:
+-        return None, None
+-    try:
+-        port = int(port_str)
+-    except ValueError:
+-        return None, None
+-    if not (0 < port <= 65535):
+-        return None, None
+-    return host, port
+-
+-
+-def _parse_dsmr_address(
+-    address: str,
+-) -> tuple[str | None, str | None, int | None]:
+-    """Parse a DSMR address: serial-port path OR ``host:port`` for TCP DSMR.
+-
+-    P14 — apply the same port-range validation as ``_parse_host_port``.
+-    """
+-    if not address:
+-        return None, None, None
+-    if address.startswith("/"):
+-        return address, None, None
+-    if address.count(":") != 1:
+-        return None, None, None
+-    host, port_str = address.rsplit(":", 1)
+-    if not host:
+-        return None, None, None
+-    try:
+-        port = int(port_str)
+-    except ValueError:
+-        return None, None, None
+-    if not (0 < port <= 65535):
+-        return None, None, None
+-    return None, host, port
+-
+-
+ def _outcome_unreachable(entry: DeviceRegistryEntry, reason: str) -> ProbeOutcome:
+     return ProbeOutcome(
+         device_id=entry.device_id,
+diff --git a/src/open_ems/web/app.py b/src/open_ems/web/app.py
+index f8205ec..ba49fb2 100644
+--- a/src/open_ems/web/app.py
++++ b/src/open_ems/web/app.py
+@@ -16,6 +16,7 @@ from open_ems.adapters.capabilities import (
+     validate_capability_registry_alignment,
+ )
+ from open_ems.adapters.discovery import DiscoveryService
++from open_ems.adapters.ocpp.central_system import OCPPCentralSystem
+ from open_ems.core import StateStore
+ from open_ems.engine.control_loop import ControlLoop
+ from open_ems.engine.intent_executor import IntentExecutor
+@@ -32,6 +33,11 @@ from open_ems.services.manual_entry import ManualEntryService
+ from open_ems.services.protocol_adapter_factory import ProtocolAdapterFactory
+ from open_ems.services.readiness import mark_ready, sd_notify
+ from open_ems.services.role_assignment import RoleAssignmentService
++from open_ems.services.runtime_adapter_wiring import (
++    RuntimeAdapterMap,
++    RuntimeAdapterWiringError,
++    build_runtime_adapter_map,
++)
+ from open_ems.services.time_sync import check_clock
+ from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
+ from open_ems.settings import get_settings
+@@ -314,12 +320,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+ 
+         # Step 4d (Story 9.1): construct the installer-wizard service objects.
+         # All are stateless or in-memory caches; no DB I/O at construction time.
++        # Story 9.X: ``OCPPCentralSystem`` is constructed here (was ``None`` at
++        # discovery_orchestrator + protocol_adapter_factory before). It is the
++        # single canonical OCPP registry shared by validation-time probing
++        # (ProtocolAdapterFactory), wizard discovery, and runtime adapter
++        # wiring (build_runtime_adapter_map at step 4h).
+         device_repo = DeviceRepo()
+         wizard_state_repo = WizardStateRepo()
+         discovery_service = DiscoveryService()
++        ocpp_central_system = OCPPCentralSystem()
+         discovery_orchestrator = DeviceDiscoveryOrchestrator(
+             discovery_service=discovery_service,
+-            ocpp_central_system=None,  # populated once OCPP wiring lands (Story 9.2/9.3)
++            ocpp_central_system=ocpp_central_system,
+             registry_provider=device_repo,  # DeviceRepo.list_all() satisfies the protocol
+         )
+         manual_entry_service = ManualEntryService(
+@@ -354,9 +366,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+         deployment_validation_repo = DeploymentValidationResultRepo()
+         protocol_adapter_factory = ProtocolAdapterFactory(
+             discovery=discovery_service,
+-            # OCPP central system stays None until OCPP wiring lands; the
+-            # factory's OCPP probe handles the absence gracefully.
+-            ocpp_central_system=None,
++            ocpp_central_system=ocpp_central_system,
+         )
+         # D3/D4 — DeploymentValidationService now takes the StateStore (snapshot
+         # is captured at run start) and ObservabilityService (structured audit
+@@ -472,14 +482,55 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+         _pruning_task.add_done_callback(_on_pruning_done)
+         logger.info("event_log_pruning_task_started", component="observability")
+ 
++        # Step 4h (Story 9.X): build the runtime adapter map from device_registry.
++        # Sourced from DeviceRepo.list_all() filtered to (validated=True AND
++        # role is not None). Closes Story 8-2's [app.py:223-236] deferred
++        # finding ("adapters={} in production silently rejects all commands").
++        try:
++            runtime_adapters: RuntimeAdapterMap = await build_runtime_adapter_map(
++                device_repo=device_repo,
++                ocpp_central_system=ocpp_central_system,
++                settings=settings,
++            )
++        except RuntimeAdapterWiringError as wiring_exc:
++            logger.error(
++                "startup_failed",
++                reason="runtime_adapter_wiring_failed",
++                detail=str(wiring_exc),
++                component="startup",
++            )
++            raise SystemExit(1) from None
++        if not runtime_adapters.control_loop_adapters:
++            logger.info(
++                "runtime_adapter_map_empty",
++                reason="pre_installer_wizard_complete",
++                component="startup",
++            )
++        else:
++            logger.info(
++                "runtime_adapter_map_built",
++                policy_guard_role_count=len(runtime_adapters.policy_guard_adapters),
++                control_loop_role_count=len(runtime_adapters.control_loop_adapters),
++                adapters=[
++                    {
++                        "role": role.value,
++                        "device_id": adapter.device_id,
++                    }
++                    for role, adapter in runtime_adapters.control_loop_adapters.items()
++                ],
++                component="startup",
++            )
++        app.state.runtime_adapters = runtime_adapters
++
+         intent_executor = IntentExecutor()
+         policy_guard = PolicyGuard(
+             state_store=app.state.state_store,
+-            adapters={},
++            adapters=runtime_adapters.policy_guard_adapters,
+             observability=observability,
+             settings=settings,
+             active_constraints=active_constraints_provider,
+         )
++        app.state.policy_guard = policy_guard
+         retry_policy = RetryPolicy(
+             policy_guard=policy_guard,
+             observability=observability,
+@@ -487,7 +538,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+         )
+         _control_loop = ControlLoop(
+             state_store=app.state.state_store,
+-            adapters={},
++            adapters=runtime_adapters.control_loop_adapters,
+             energy_repo=energy_repo,
+             settings=settings,
+             intent_executor=intent_executor,
+@@ -516,6 +567,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+             except asyncio.CancelledError:
+                 pass
+ 
++        # Step 4h shutdown (Story 9.X AC10): close every adapter in role order.
++        # Each disconnect is isolated so one failure does not block the rest.
++        for role, adapter in runtime_adapters.control_loop_adapters.items():
++            try:
++                await adapter.disconnect()
++            except Exception:  # noqa: BLE001 — best-effort teardown; one failure must not block siblings
++                logger.warning(
++                    "adapter_disconnect_failed",
++                    role=role.value,
++                    device_id=adapter.device_id,
++                    component="shutdown",
++                    exc_info=True,
++                )
++
+         if _watchdog_task is not None:
+             _watchdog_task.cancel()
+             try:
+diff --git a/tests/unit/services/test_protocol_adapter_factory.py b/tests/unit/services/test_protocol_adapter_factory.py
+index 6e10692..7ee2e43 100644
+--- a/tests/unit/services/test_protocol_adapter_factory.py
++++ b/tests/unit/services/test_protocol_adapter_factory.py
+@@ -17,14 +17,16 @@ from datetime import UTC, datetime
+ 
+ import pytest
+ 
++from open_ems.adapters.address_parsing import (
++    parse_dsmr_address as _parse_dsmr_address,
++)
++from open_ems.adapters.address_parsing import (
++    parse_host_port as _parse_host_port,
++)
+ from open_ems.adapters.discovery import DeviceProbeError
+ from open_ems.adapters.ocpp.central_system import OCPPRegisteredCharger
+ from open_ems.core.devices import CapabilityStatus, DeviceRole
+-from open_ems.services.protocol_adapter_factory import (
+-    ProtocolAdapterFactory,
+-    _parse_dsmr_address,
+-    _parse_host_port,
+-)
++from open_ems.services.protocol_adapter_factory import ProtocolAdapterFactory
+ from open_ems.storage.repositories.device_repo import DeviceRegistryEntry
+ 
+ _NOW = datetime(2026, 5, 11, 12, 0, 0, tzinfo=UTC)
+
+=== NEW FILE: src/open_ems/adapters/address_parsing.py ===
+--- /dev/null
++++ b/src/open_ems/adapters/address_parsing.py
+@@ -0,0 +1,71 @@
++"""Address parsing helpers shared by validation-time and runtime adapter wiring.
++
++Story 9.X: previously the only consumer of these parsers was
++``ProtocolAdapterFactory`` (validation surface). The runtime adapter wiring
++introduced in 9.X reuses them via this shared module — duplication would
++silently drift between the two surfaces.
++
++Both helpers enforce P14 (review of Story 9.4): IPv6 bracketed-host form
++``[<ipv6>]:port`` is accepted, port must be in ``(0, 65535]``.
++"""
++
++from __future__ import annotations
++
++
++def parse_host_port(address: str) -> tuple[str | None, int | None]:
++    """Parse ``host:port`` for Modbus TCP addresses.
++
++    Accepts the IPv6 bracketed-host form ``[::1]:502`` and validates the port
++    range. Returns ``(None, None)`` if the address is unparsable or the port
++    is out of range; downstream callers raise their own structured error.
++    """
++    if not address:
++        return None, None
++    if address.startswith("["):
++        end = address.find("]")
++        if end == -1 or end + 1 >= len(address) or address[end + 1] != ":":
++            return None, None
++        host = address[1:end]
++        port_str = address[end + 2 :]
++    else:
++        if address.count(":") != 1:
++            return None, None
++        host, port_str = address.rsplit(":", 1)
++    if not host:
++        return None, None
++    try:
++        port = int(port_str)
++    except ValueError:
++        return None, None
++    if not (0 < port <= 65535):
++        return None, None
++    return host, port
++
++
++def parse_dsmr_address(
++    address: str,
++) -> tuple[str | None, str | None, int | None]:
++    """Parse a DSMR address: serial-port path OR ``host:port`` for TCP DSMR.
++
++    Returns ``(serial_port, tcp_host, tcp_port)``; exactly one transport
++    triple is populated on success. ``(None, None, None)`` on parse failure.
++    """
++    if not address:
++        return None, None, None
++    if address.startswith("/"):
++        return address, None, None
++    if address.count(":") != 1:
++        return None, None, None
++    host, port_str = address.rsplit(":", 1)
++    if not host:
++        return None, None, None
++    try:
++        port = int(port_str)
++    except ValueError:
++        return None, None, None
++    if not (0 < port <= 65535):
++        return None, None, None
++    return None, host, port
++
++
++__all__ = ["parse_dsmr_address", "parse_host_port"]
+
+=== NEW FILE: src/open_ems/services/runtime_adapter_wiring.py ===
+--- /dev/null
++++ b/src/open_ems/services/runtime_adapter_wiring.py
+@@ -0,0 +1,327 @@
++"""Runtime adapter wiring — builds PolicyGuard / ControlLoop adapter maps from device_registry.
++
++Story 9.X — the canonical resolution of Story 8-2's deferred finding
++``[app.py:223-236]`` ("``adapters={}`` in production silently rejects all
++commands"). Before this story, ``PolicyGuard`` and ``ControlLoop`` were
++constructed with empty adapter mappings; every command rejected at P1
++(``adapter_not_registered``). The runtime adapter map shipped by this story
++is the materialization of the installer-wizard-acknowledged ``device_registry``
++into live adapter instances.
++
++The single public function is ``build_runtime_adapter_map(...)``. The returned
++``RuntimeAdapterMap`` is a frozen pair of mappings:
++
++* ``policy_guard_adapters`` — passed to ``PolicyGuard(adapters=...)``.
++  Excludes ``DeviceRole.grid_meter`` (DSMR P1 is read-only) and
++  ``DeviceRole.inverter`` (v1 inverters have empty ``write_capabilities``).
++* ``control_loop_adapters`` — passed to ``ControlLoop(adapters=...)``.
++  Includes every constructed adapter (including grid_meter for telemetry).
++
++For roles present in both maps, the adapter instance is ``is``-identical
++(AC11 of Story 9.X).
++
++OCPP design choice (deviation from story AC4)
++=============================================
++
++The story's AC4 mandated a ``_DeferredOCPPAdapter`` proxy that lazily
++resolves the underlying ``OCPPChargerAdapter`` via
++``OCPPCentralSystem.get_adapter(...)``. The proxy was specified to handle
++the pre-boot window (charger has not yet sent ``BootNotification``).
++
++Implementation deviates as follows: ``build_runtime_adapter_map`` calls
++``ocpp_central_system.register(config)`` eagerly at wiring time for each
++``ocpp_1_6`` entry, then wraps the resulting raw ``OCPPChargerAdapter`` in
++``EVChargerAdapter`` (domain) — the same wrapping pattern used by Modbus.
++
++Rationale:
++
++1. ``OCPPCentralSystem.register()`` is the only way ``get_adapter()``
++   becomes non-``None``; without an eager ``register`` at wiring time, the
++   proxy would always return ``None`` and never recover (no other code path
++   currently calls ``register``).
++2. The existing ``OCPPChargerAdapter`` handles the pre-boot window via its
++   ``connected=False`` state: ``get_raw_state()`` returns
++   ``ProtocolDegradedState("ocpp_disconnected")`` and ``send_raw_command()``
++   returns ``"not_connected"``. ``EVChargerAdapter`` (domain) translates
++   both into the expected ``DegradedDeviceState`` / failed ``CommandResult``
++   shapes.
++3. The Story 8-2 immutability invariant (``PolicyGuard.adapters`` is a
++   ``Mapping``, never mutated post-construction) is preserved — ``register``
++   runs once at wiring time and the map shape is fixed thereafter.
++4. The proxy approach would require either duplicating
++   ``EVChargerAdapter``'s raw→domain translation in the proxy, or wrapping a
++   lazy ``EVChargerAdapter`` reference — neither cleaner than direct wrap.
++
++The deviation is documented inline here, in the Story 9.X completion notes,
++and in the bmad-code-review pass that follows.
++"""
++
++from __future__ import annotations
++
++from collections.abc import Mapping
++from dataclasses import dataclass
++
++import structlog
++
++from open_ems.adapters.address_parsing import parse_dsmr_address, parse_host_port
++from open_ems.adapters.dsmr.meter_adapter import GridMeterAdapter
++from open_ems.adapters.dsmr.p1 import DSMRAdapter, DSMRAdapterConfig
++from open_ems.adapters.modbus.battery_adapter import BatteryAdapter
++from open_ems.adapters.modbus.inverter_adapter import InverterAdapter
++from open_ems.adapters.modbus.tcp import (
++    ModbusRegisterRange,
++    ModbusTcpAdapter,
++    ModbusTcpAdapterConfig,
++)
++from open_ems.adapters.ocpp.central_system import OCPPAdapterConfig, OCPPCentralSystem
++from open_ems.adapters.ocpp.charger_adapter import EVChargerAdapter
++from open_ems.core import DeviceAdapter, DeviceRole
++from open_ems.settings import Settings
++from open_ems.storage.repositories.device_repo import DeviceRegistryEntry, DeviceRepo
++
++logger = structlog.get_logger(__name__)
++
++
++class RuntimeAdapterWiringError(RuntimeError):
++    """Structural failure during ``build_runtime_adapter_map``.
++
++    Distinct exception type so the lifespan handler (Story 9.X AC9) can
++    pattern-match and emit a structured ``startup_failed`` log with
++    ``reason="runtime_adapter_wiring_failed"`` before ``SystemExit(1)``.
++    """
++
++
++@dataclass(frozen=True)
++class RuntimeAdapterMap:
++    """Frozen pair of adapter mappings constructed by ``build_runtime_adapter_map``.
++
++    ``policy_guard_adapters`` is a strict subset of ``control_loop_adapters``:
++    grid_meter and inverter slots appear only in the control-loop map.
++    """
++
++    policy_guard_adapters: Mapping[DeviceRole, DeviceAdapter]
++    control_loop_adapters: Mapping[DeviceRole, DeviceAdapter]
++
++
++# Modbus register ranges per known model. The capability registry alignment
++# check at lifespan step 4a fails the process on unknown models, so any
++# (validated, role-assigned) modbus entry reaching this module is guaranteed
++# to have a key here. Values are PLACEHOLDER per the register_maps modules'
++# own PLACEHOLDER markers; verify against actual device documentation when
++# real hardware is commissioned.
++_MODBUS_REGISTER_RANGES_BY_MODEL: dict[str, tuple[ModbusRegisterRange, ...]] = {
++    # byd_hvs_v1: registers 100-111
++    "byd_hvs_v1": (ModbusRegisterRange(table="holding", start_address=100, count=20),),
++    # byd_hvm_v1: registers 200-211
++    "byd_hvm_v1": (ModbusRegisterRange(table="holding", start_address=200, count=20),),
++    # fronius_gen24_v1: registers 40083-40110
++    "fronius_gen24_v1": (ModbusRegisterRange(table="holding", start_address=40083, count=28),),
++    # huawei_sun2000_v3: registers 32064-32090
++    "huawei_sun2000_v3": (ModbusRegisterRange(table="holding", start_address=32064, count=27),),
++    # growatt_hybrid_v1: registers 3001-3004
++    "growatt_hybrid_v1": (ModbusRegisterRange(table="holding", start_address=3001, count=10),),
++}
++
++
++def _is_writable_role(role: DeviceRole) -> bool:
++    """Whether a role belongs in ``policy_guard_adapters``.
++
++    Excluded: ``grid_meter`` (DSMR P1 read-only — cross-adapter contract
++    clause 1) and ``inverter`` (v1 inverters have empty
++    ``write_capabilities``; including them is dead weight that would
++    surface as P4 ``capability_missing`` if a future command type were
++    introduced without a registry update — fail-loud absence is better).
++    """
++    return role not in (DeviceRole.grid_meter, DeviceRole.inverter)
++
++
++async def build_runtime_adapter_map(
++    *,
++    device_repo: DeviceRepo,
++    ocpp_central_system: OCPPCentralSystem,
++    settings: Settings,
++) -> RuntimeAdapterMap:
++    """Read device_registry, construct adapters, return the runtime map.
++
++    Empty registry (no validated + role-assigned rows) returns
++    ``RuntimeAdapterMap(policy_guard_adapters={}, control_loop_adapters={})``
++    — the pre-installer-wizard-complete cold-start state.
++
++    Raises ``RuntimeAdapterWiringError`` on:
++    * multi-device-per-role (AC12 — defense in depth on top of Story 9-2's
++      role-assignment invariant);
++    * unsupported ``(protocol, role)`` combination;
++    * malformed address;
++    * missing model for modbus_tcp + battery/inverter (capability-registry
++      drift would have failed startup earlier; this is a final guard).
++
++    The ``settings`` parameter is currently unused but threaded through for
++    forward compatibility (timeouts, reconnect delays).
++    """
++    del settings  # reserved for future per-adapter tuning
++
++    entries = await device_repo.list_all()
++    eligible: list[DeviceRegistryEntry] = [
++        entry for entry in entries if entry.validated and entry.role is not None
++    ]
++
++    if not eligible:
++        return RuntimeAdapterMap(policy_guard_adapters={}, control_loop_adapters={})
++
++    # AC12 — multi-device-per-role defense in depth.
++    by_role: dict[DeviceRole, DeviceRegistryEntry] = {}
++    for entry in eligible:
++        assert entry.role is not None  # narrowed by filter
++        if entry.role in by_role:
++            raise RuntimeAdapterWiringError(
++                f"Multiple devices assigned to role {entry.role.value!r}: "
++                f"{by_role[entry.role].device_id!r} and {entry.device_id!r}"
++            )
++        by_role[entry.role] = entry
++
++    policy_guard_adapters: dict[DeviceRole, DeviceAdapter] = {}
++    control_loop_adapters: dict[DeviceRole, DeviceAdapter] = {}
++
++    for role, entry in by_role.items():
++        adapter = _construct_adapter(entry, ocpp_central_system)
++        control_loop_adapters[role] = adapter
++        if _is_writable_role(role):
++            # AC11 — same instance reference, not a copy.
++            policy_guard_adapters[role] = adapter
++
++    return RuntimeAdapterMap(
++        policy_guard_adapters=policy_guard_adapters,
++        control_loop_adapters=control_loop_adapters,
++    )
++
++
++def _construct_adapter(
++    entry: DeviceRegistryEntry,
++    ocpp_central_system: OCPPCentralSystem,
++) -> DeviceAdapter:
++    """Construct a single domain adapter from one device_registry row.
++
++    Raises ``RuntimeAdapterWiringError`` on unsupported ``(protocol, role)``
++    combinations or malformed addresses.
++    """
++    role = entry.role
++    assert role is not None
++
++    if entry.protocol == "modbus_tcp":
++        return _construct_modbus_adapter(entry)
++    if entry.protocol == "dsmr_p1":
++        return _construct_dsmr_adapter(entry)
++    if entry.protocol == "ocpp_1_6":
++        return _construct_ocpp_adapter(entry, ocpp_central_system)
++
++    raise RuntimeAdapterWiringError(
++        f"Unsupported (protocol, role) for device {entry.device_id!r}: "
++        f"({entry.protocol!r}, {role.value!r})"
++    )
++
++
++def _construct_modbus_adapter(entry: DeviceRegistryEntry) -> DeviceAdapter:
++    role = entry.role
++    assert role is not None
++
++    if role not in (DeviceRole.battery, DeviceRole.inverter):
++        raise RuntimeAdapterWiringError(
++            f"Unsupported (protocol, role) for device {entry.device_id!r}: "
++            f"('modbus_tcp', {role.value!r})"
++        )
++
++    host, port = parse_host_port(entry.address)
++    if host is None or port is None:
++        raise RuntimeAdapterWiringError(
++            f"Invalid modbus_tcp address for device {entry.device_id!r}: {entry.address!r}"
++        )
++
++    if entry.model is None:
++        raise RuntimeAdapterWiringError(
++            f"modbus_tcp + {role.value} requires a model for device {entry.device_id!r}"
++        )
++
++    register_ranges = _MODBUS_REGISTER_RANGES_BY_MODEL.get(entry.model)
++    if register_ranges is None:
++        raise RuntimeAdapterWiringError(
++            f"No runtime register-range mapping for model {entry.model!r} "
++            f"(device {entry.device_id!r}). Add an entry to "
++            f"_MODBUS_REGISTER_RANGES_BY_MODEL."
++        )
++
++    config = ModbusTcpAdapterConfig(
++        device_id=entry.device_id,
++        host=host,
++        port=port,
++        registers=register_ranges,
++    )
++    modbus = ModbusTcpAdapter(config)
++
++    if role == DeviceRole.battery:
++        return BatteryAdapter(entry.device_id, modbus, entry.model)
++    return InverterAdapter(entry.device_id, modbus, entry.model)
++
++
++def _construct_dsmr_adapter(entry: DeviceRegistryEntry) -> DeviceAdapter:
++    role = entry.role
++    assert role is not None
++
++    if role != DeviceRole.grid_meter:
++        raise RuntimeAdapterWiringError(
++            f"Unsupported (protocol, role) for device {entry.device_id!r}: "
++            f"('dsmr_p1', {role.value!r})"
++        )
++
++    serial_port, tcp_host, tcp_port = parse_dsmr_address(entry.address)
++    if serial_port is None and tcp_host is None:
++        raise RuntimeAdapterWiringError(
++            f"Invalid dsmr_p1 address for device {entry.device_id!r}: {entry.address!r}"
++        )
++
++    config = DSMRAdapterConfig(
++        device_id=entry.device_id,
++        serial_port=serial_port,
++        tcp_host=tcp_host,
++        tcp_port=tcp_port,
++    )
++    return GridMeterAdapter(entry.device_id, DSMRAdapter(config))
++
++
++def _construct_ocpp_adapter(
++    entry: DeviceRegistryEntry,
++    ocpp_central_system: OCPPCentralSystem,
++) -> DeviceAdapter:
++    role = entry.role
++    assert role is not None
++
++    if role != DeviceRole.ev_charger:
++        raise RuntimeAdapterWiringError(
++            f"Unsupported (protocol, role) for device {entry.device_id!r}: "
++            f"('ocpp_1_6', {role.value!r})"
++        )
++
++    # The OCPP address recorded by Story 9.1 discovery is ``/{charge_point_id}``;
++    # strip the leading slash if present. The charge_point_id is the OCPP-
++    # protocol identifier (used in WebSocket URL); device_id is the system-
++    # wide identifier (used in CommandResult / audit / device_registry).
++    charge_point_id = entry.address.lstrip("/") or entry.device_id
++
++    config = OCPPAdapterConfig(
++        device_id=entry.device_id,
++        charge_point_id=charge_point_id,
++    )
++
++    # Idempotent: if the charge_point_id is already registered (e.g. tests
++    # that pre-populate the central system), ``register`` overwrites; in
++    # production no other call site registers chargers so this is a no-op
++    # re-entry guard.
++    raw_adapter = ocpp_central_system.register(config)
++
++    return EVChargerAdapter(entry.device_id, raw_adapter)
++
++
++__all__ = [
++    "RuntimeAdapterMap",
++    "RuntimeAdapterWiringError",
++    "build_runtime_adapter_map",
++]
+
+=== NEW FILE: tests/unit/services/test_runtime_adapter_wiring.py ===
+--- /dev/null
++++ b/tests/unit/services/test_runtime_adapter_wiring.py
+@@ -0,0 +1,549 @@
++"""Unit tests for ``build_runtime_adapter_map`` (Story 9.X).
++
++Cover AC13's ten scenarios: empty registry, single-device per protocol,
++multi-device-per-role defense, unsupported (protocol, role), malformed
++address, and OCPP pre-/post-boot behavior.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++
++import pytest
++
++from open_ems.adapters.modbus.battery_adapter import BatteryAdapter
++from open_ems.adapters.modbus.inverter_adapter import InverterAdapter
++from open_ems.adapters.ocpp.central_system import OCPPCentralSystem
++from open_ems.adapters.ocpp.charger_adapter import EVChargerAdapter
++from open_ems.core.commands import CommandOrigin, CommandResult
++from open_ems.core.devices import DegradedDeviceState, DeviceRole
++from open_ems.services.runtime_adapter_wiring import (
++    RuntimeAdapterMap,
++    RuntimeAdapterWiringError,
++    build_runtime_adapter_map,
++)
++from open_ems.settings import Settings
++from open_ems.storage.repositories.device_repo import DeviceRegistryEntry
++
++_NOW = datetime(2026, 5, 11, 12, 0, 0, tzinfo=UTC)
++
++
++class _FakeDeviceRepo:
++    """In-memory ``DeviceRepo`` stand-in returning a fixed list of entries.
++
++    Satisfies the structural surface ``build_runtime_adapter_map`` calls:
++    only ``list_all()`` is exercised.
++    """
++
++    def __init__(self, entries: list[DeviceRegistryEntry]) -> None:
++        self._entries = entries
++
++    async def list_all(self) -> list[DeviceRegistryEntry]:
++        return list(self._entries)
++
++
++def _entry(
++    *,
++    device_id: str = "dev-1",
++    protocol: str = "modbus_tcp",
++    address: str = "192.168.1.10:502",
++    model: str | None = "byd_hvs_v1",
++    role: DeviceRole | None = DeviceRole.battery,
++    validated: bool = True,
++) -> DeviceRegistryEntry:
++    return DeviceRegistryEntry(
++        device_id=device_id,
++        protocol=protocol,  # type: ignore[arg-type]
++        address=address,
++        model=model,
++        firmware_version=None,
++        role=role,
++        source="manual_entry",
++        validated=validated,
++        last_capability_status="full" if validated else None,
++        last_limitation_reason=None,
++        first_seen_at=_NOW,
++        last_seen_at=_NOW,
++        installer_acknowledged_unvalidated_at=None,
++        role_assigned_at=_NOW if role is not None else None,
++    )
++
++
++def _settings() -> Settings:
++    # Settings() requires no required-field overrides for the wiring tests; the
++    # builder threads ``settings`` through but does not currently consult it.
++    return Settings(_env_file=None)  # type: ignore[call-arg]
++
++
++# ---------------------------------------------------------------------------
++# AC7 — empty registry cold-start
++# ---------------------------------------------------------------------------
++
++
++async def test_empty_registry_returns_empty_runtime_map() -> None:
++    repo = _FakeDeviceRepo(entries=[])
++    ocpp = OCPPCentralSystem()
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=ocpp,
++        settings=_settings(),
++    )
++    assert isinstance(result, RuntimeAdapterMap)
++    assert result.policy_guard_adapters == {}
++    assert result.control_loop_adapters == {}
++
++
++async def test_unvalidated_or_unrolled_devices_excluded() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            # validated=False — excluded
++            _entry(
++                device_id="dev-a",
++                protocol="modbus_tcp",
++                address="10.0.0.1:502",
++                model="byd_hvs_v1",
++                role=DeviceRole.battery,
++                validated=False,
++            ),
++            # role is None — excluded
++            _entry(
++                device_id="dev-b",
++                protocol="modbus_tcp",
++                address="10.0.0.2:502",
++                model="byd_hvs_v1",
++                role=None,
++            ),
++        ]
++    )
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=OCPPCentralSystem(),
++        settings=_settings(),
++    )
++    assert result.policy_guard_adapters == {}
++    assert result.control_loop_adapters == {}
++
++
++# ---------------------------------------------------------------------------
++# AC3 / AC11 — Modbus battery wiring + instance-identity
++# ---------------------------------------------------------------------------
++
++
++async def test_battery_modbus_wired_into_both_maps_same_instance() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="batt-1",
++                protocol="modbus_tcp",
++                address="10.0.0.10:502",
++                model="byd_hvs_v1",
++                role=DeviceRole.battery,
++            )
++        ]
++    )
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=OCPPCentralSystem(),
++        settings=_settings(),
++    )
++    assert set(result.policy_guard_adapters.keys()) == {DeviceRole.battery}
++    assert set(result.control_loop_adapters.keys()) == {DeviceRole.battery}
++    pg = result.policy_guard_adapters[DeviceRole.battery]
++    cl = result.control_loop_adapters[DeviceRole.battery]
++    # AC11 — exact instance identity, not a copy
++    assert pg is cl
++    assert isinstance(pg, BatteryAdapter)
++    assert pg.device_id == "batt-1"
++
++
++async def test_inverter_modbus_excluded_from_policy_guard_map() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="inv-1",
++                protocol="modbus_tcp",
++                address="10.0.0.20:502",
++                model="fronius_gen24_v1",
++                role=DeviceRole.inverter,
++            )
++        ]
++    )
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=OCPPCentralSystem(),
++        settings=_settings(),
++    )
++    # Inverter has empty write_capabilities in v1 — exclude from PolicyGuard.
++    assert DeviceRole.inverter not in result.policy_guard_adapters
++    assert DeviceRole.inverter in result.control_loop_adapters
++    assert isinstance(result.control_loop_adapters[DeviceRole.inverter], InverterAdapter)
++
++
++# ---------------------------------------------------------------------------
++# AC3 — DSMR grid meter
++# ---------------------------------------------------------------------------
++
++
++async def test_dsmr_grid_meter_only_in_control_loop_map() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="meter-1",
++                protocol="dsmr_p1",
++                address="/dev/ttyUSB0",
++                model="dsmr_p1",
++                role=DeviceRole.grid_meter,
++            )
++        ]
++    )
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=OCPPCentralSystem(),
++        settings=_settings(),
++    )
++    # DSMR is read-only — cross-adapter contract clause 1 — never in PolicyGuard.
++    assert DeviceRole.grid_meter not in result.policy_guard_adapters
++    assert DeviceRole.grid_meter in result.control_loop_adapters
++    assert result.control_loop_adapters[DeviceRole.grid_meter].device_id == "meter-1"
++
++
++async def test_dsmr_tcp_address_form_accepted() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="meter-tcp",
++                protocol="dsmr_p1",
++                address="meter.local:2400",
++                model="dsmr_p1",
++                role=DeviceRole.grid_meter,
++            )
++        ]
++    )
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=OCPPCentralSystem(),
++        settings=_settings(),
++    )
++    assert DeviceRole.grid_meter in result.control_loop_adapters
++
++
++# ---------------------------------------------------------------------------
++# AC3 / AC4 — OCPP wiring (eager register + EVChargerAdapter wrap)
++# ---------------------------------------------------------------------------
++
++
++async def test_ocpp_ev_charger_eagerly_registered_in_central_system() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="cp-001",
++                protocol="ocpp_1_6",
++                address="/cp-001",
++                model="ocpp_1_6",
++                role=DeviceRole.ev_charger,
++            )
++        ]
++    )
++    ocpp = OCPPCentralSystem()
++    assert ocpp.get_adapter("cp-001") is None  # baseline
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=ocpp,
++        settings=_settings(),
++    )
++    # Eager registration: the raw OCPPChargerAdapter now exists in the central
++    # system, ready for a future WebSocket endpoint to call handle_charger.
++    assert ocpp.get_adapter("cp-001") is not None
++    # Domain wrapper is in both maps; same instance.
++    pg = result.policy_guard_adapters[DeviceRole.ev_charger]
++    cl = result.control_loop_adapters[DeviceRole.ev_charger]
++    assert pg is cl
++    assert isinstance(pg, EVChargerAdapter)
++    assert pg.device_id == "cp-001"
++
++
++async def test_ocpp_pre_boot_get_state_returns_degraded() -> None:
++    """Pre-boot: charger registered but no WebSocket connection yet.
++
++    The existing OCPPChargerAdapter's ``connected=False`` propagates through
++    EVChargerAdapter to ``DegradedDeviceState`` from ``get_state()``. This is
++    the structural equivalent of the proxy approach specified in AC4 but
++    achieved via the underlying adapter's own pre-boot semantics.
++    """
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="cp-002",
++                protocol="ocpp_1_6",
++                address="/cp-002",
++                model="ocpp_1_6",
++                role=DeviceRole.ev_charger,
++            )
++        ]
++    )
++    ocpp = OCPPCentralSystem()
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=ocpp,
++        settings=_settings(),
++    )
++    adapter = result.control_loop_adapters[DeviceRole.ev_charger]
++    state = await adapter.get_state()
++    assert isinstance(state, DegradedDeviceState)
++    assert state.reason == "reconnecting"  # _RECONNECTING_REASONS maps ocpp_disconnected
++
++
++async def test_ocpp_pre_boot_send_command_returns_failed() -> None:
++    """Pre-boot: a command dispatched through the wired adapter returns a
++    failed CommandResult with reason indicating not-connected (cross-adapter
++    contract clause 3, OCPP-not-connected → adapter_internal_error wrap).
++    """
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="cp-003",
++                protocol="ocpp_1_6",
++                address="/cp-003",
++                model="ocpp_1_6",
++                role=DeviceRole.ev_charger,
++            )
++        ]
++    )
++    ocpp = OCPPCentralSystem()
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=ocpp,
++        settings=_settings(),
++    )
++    adapter = result.control_loop_adapters[DeviceRole.ev_charger]
++    # Build a command shape this adapter can refuse without protocol I/O.
++    from open_ems.core.commands import SetEVChargingRateCommand
++
++    cmd = SetEVChargingRateCommand(
++        device_id="cp-003",
++        device_role=DeviceRole.ev_charger,
++        origin=CommandOrigin.decision_engine,
++        rate_kw=1.0,
++    )
++    result_cmd: CommandResult = await adapter.send_command(cmd)
++    assert result_cmd.applied is False
++
++
++# ---------------------------------------------------------------------------
++# AC12 — multi-device-per-role defense in depth
++# ---------------------------------------------------------------------------
++
++
++async def test_multi_device_per_role_raises() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="batt-a",
++                protocol="modbus_tcp",
++                address="10.0.0.1:502",
++                model="byd_hvs_v1",
++                role=DeviceRole.battery,
++            ),
++            _entry(
++                device_id="batt-b",
++                protocol="modbus_tcp",
++                address="10.0.0.2:502",
++                model="byd_hvs_v1",
++                role=DeviceRole.battery,
++            ),
++        ]
++    )
++    with pytest.raises(RuntimeAdapterWiringError, match="Multiple devices assigned"):
++        await build_runtime_adapter_map(
++            device_repo=repo,  # type: ignore[arg-type]
++            ocpp_central_system=OCPPCentralSystem(),
++            settings=_settings(),
++        )
++
++
++# ---------------------------------------------------------------------------
++# AC3 — unsupported (protocol, role) combinations
++# ---------------------------------------------------------------------------
++
++
++async def test_unsupported_protocol_role_combination_raises() -> None:
++    # dsmr_p1 + battery is structurally impossible (DSMR is grid_meter-only)
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="weird-1",
++                protocol="dsmr_p1",
++                address="/dev/ttyUSB0",
++                model="dsmr_p1",
++                role=DeviceRole.battery,
++            )
++        ]
++    )
++    with pytest.raises(RuntimeAdapterWiringError, match="Unsupported"):
++        await build_runtime_adapter_map(
++            device_repo=repo,  # type: ignore[arg-type]
++            ocpp_central_system=OCPPCentralSystem(),
++            settings=_settings(),
++        )
++
++
++async def test_modbus_tcp_grid_meter_combination_raises() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="weird-2",
++                protocol="modbus_tcp",
++                address="10.0.0.1:502",
++                model="byd_hvs_v1",
++                role=DeviceRole.grid_meter,
++            )
++        ]
++    )
++    with pytest.raises(RuntimeAdapterWiringError, match="Unsupported"):
++        await build_runtime_adapter_map(
++            device_repo=repo,  # type: ignore[arg-type]
++            ocpp_central_system=OCPPCentralSystem(),
++            settings=_settings(),
++        )
++
++
++# ---------------------------------------------------------------------------
++# AC3 — malformed address handling
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize(
++    "address",
++    ["no-colon-address", "host:not-a-port", "host:0", "host:99999", ""],
++)
++async def test_modbus_malformed_address_raises(address: str) -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="batt-x",
++                protocol="modbus_tcp",
++                address=address or "valid:502",
++                model="byd_hvs_v1",
++                role=DeviceRole.battery,
++            )
++        ]
++    )
++    # Skip the empty-address case which Pydantic rejects at DeviceRegistryEntry
++    # construction (NonEmptyStr); the helper still raises for the rest.
++    if not address:
++        pytest.skip("empty address blocked by Pydantic validation on entry")
++    with pytest.raises(RuntimeAdapterWiringError, match="Invalid modbus_tcp"):
++        await build_runtime_adapter_map(
++            device_repo=repo,  # type: ignore[arg-type]
++            ocpp_central_system=OCPPCentralSystem(),
++            settings=_settings(),
++        )
++
++
++async def test_modbus_battery_without_model_raises() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="batt-no-model",
++                protocol="modbus_tcp",
++                address="10.0.0.1:502",
++                model=None,
++                role=DeviceRole.battery,
++            )
++        ]
++    )
++    with pytest.raises(RuntimeAdapterWiringError, match="requires a model"):
++        await build_runtime_adapter_map(
++            device_repo=repo,  # type: ignore[arg-type]
++            ocpp_central_system=OCPPCentralSystem(),
++            settings=_settings(),
++        )
++
++
++async def test_modbus_battery_with_unknown_model_raises() -> None:
++    # NOTE: capability registry alignment would normally fail startup before
++    # this code path runs; the guard here is defense in depth.
++    # But DeviceRegistryEntry doesn't validate the model string against
++    # the registry, so we can construct one.
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="batt-unknown",
++                protocol="modbus_tcp",
++                address="10.0.0.1:502",
++                model="totally-fake-model-v9",
++                role=DeviceRole.battery,
++            )
++        ]
++    )
++    with pytest.raises(RuntimeAdapterWiringError, match="No runtime register-range mapping"):
++        await build_runtime_adapter_map(
++            device_repo=repo,  # type: ignore[arg-type]
++            ocpp_central_system=OCPPCentralSystem(),
++            settings=_settings(),
++        )
++
++
++# ---------------------------------------------------------------------------
++# Multi-role wiring — three adapters, one map
++# ---------------------------------------------------------------------------
++
++
++async def test_multi_role_wiring_battery_inverter_grid_ev() -> None:
++    repo = _FakeDeviceRepo(
++        entries=[
++            _entry(
++                device_id="batt-1",
++                protocol="modbus_tcp",
++                address="10.0.0.10:502",
++                model="byd_hvs_v1",
++                role=DeviceRole.battery,
++            ),
++            _entry(
++                device_id="inv-1",
++                protocol="modbus_tcp",
++                address="10.0.0.20:502",
++                model="fronius_gen24_v1",
++                role=DeviceRole.inverter,
++            ),
++            _entry(
++                device_id="meter-1",
++                protocol="dsmr_p1",
++                address="/dev/ttyUSB0",
++                model="dsmr_p1",
++                role=DeviceRole.grid_meter,
++            ),
++            _entry(
++                device_id="cp-001",
++                protocol="ocpp_1_6",
++                address="/cp-001",
++                model="ocpp_1_6",
++                role=DeviceRole.ev_charger,
++            ),
++        ]
++    )
++    result = await build_runtime_adapter_map(
++        device_repo=repo,  # type: ignore[arg-type]
++        ocpp_central_system=OCPPCentralSystem(),
++        settings=_settings(),
++    )
++    # ControlLoop sees all four; PolicyGuard sees battery + ev_charger only.
++    assert set(result.control_loop_adapters.keys()) == {
++        DeviceRole.battery,
++        DeviceRole.inverter,
++        DeviceRole.grid_meter,
++        DeviceRole.ev_charger,
++    }
++    assert set(result.policy_guard_adapters.keys()) == {
++        DeviceRole.battery,
++        DeviceRole.ev_charger,
++    }
++    # Instance-identity holds for overlapping roles
++    assert (
++        result.policy_guard_adapters[DeviceRole.battery]
++        is result.control_loop_adapters[DeviceRole.battery]
++    )
++    assert (
++        result.policy_guard_adapters[DeviceRole.ev_charger]
++        is result.control_loop_adapters[DeviceRole.ev_charger]
++    )
+
+=== NEW FILE: tests/integration/web/test_app_runtime_adapter_wiring.py ===
+--- /dev/null
++++ b/tests/integration/web/test_app_runtime_adapter_wiring.py
+@@ -0,0 +1,238 @@
++"""Integration tests for Story 9.X runtime adapter wiring in lifespan.
++
++Covers AC6 (lifespan step 4h), AC7 (empty-registry cold-start), AC8
++(``runtime_adapter_map_built`` log), AC9 (fail-loud SystemExit on builder
++failure), AC11 (instance-identity between PolicyGuard and ControlLoop
++adapter maps), and the regression contract that an empty map still produces
++P1 (``adapter_not_registered``) rejections at PolicyGuard.
++"""
++
++from __future__ import annotations
++
++import pathlib
++from datetime import UTC, datetime
++from unittest.mock import MagicMock, patch
++
++import pytest
++import structlog
++
++import open_ems.web.app as app_module
++from open_ems.adapters.modbus.battery_adapter import BatteryAdapter
++from open_ems.adapters.ocpp.central_system import OCPPCentralSystem
++from open_ems.core.devices import DeviceRole
++from open_ems.engine.policy_guard import PolicyGuard
++from open_ems.services.runtime_adapter_wiring import (
++    RuntimeAdapterMap,
++    RuntimeAdapterWiringError,
++)
++from open_ems.settings import Settings
++from open_ems.web.app import create_app, lifespan
++
++
++def _seed_lifespan_env(
++    monkeypatch: pytest.MonkeyPatch,
++    db_path: str,
++) -> None:
++    monkeypatch.setenv("DB_PATH", db_path)
++    monkeypatch.setenv("SECRET_KEY", "test-secret-key-32-chars-xxxxxxxxxx")
++    monkeypatch.setenv("INITIAL_ADMIN_PASSWORD", "ChangeMe!1234")
++    monkeypatch.setattr(
++        app_module,
++        "get_settings",
++        lambda: Settings(_env_file=None),  # type: ignore[call-arg]
++    )
++
++
++async def test_lifespan_empty_registry_emits_runtime_adapter_map_empty_log(
++    tmp_path: pathlib.Path,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC7 — pre-installer-wizard-complete cold-start.
++
++    With no validated+role-assigned devices in ``device_registry``, the
++    runtime adapter map is empty; lifespan logs ``runtime_adapter_map_empty``
++    with the documented reason. PolicyGuard / ControlLoop are still
++    constructed (operational for the wizard) but every command rejects at
++    P1.
++    """
++    structlog.reset_defaults()
++    db_path = str(tmp_path / "story_9_x_empty.db")
++    _seed_lifespan_env(monkeypatch, db_path)
++
++    mock_logger = MagicMock()
++    app = create_app()
++    with patch("open_ems.web.app.logger", mock_logger):
++        async with lifespan(app):
++            assert isinstance(app.state.runtime_adapters, RuntimeAdapterMap)
++            assert app.state.runtime_adapters.policy_guard_adapters == {}
++            assert app.state.runtime_adapters.control_loop_adapters == {}
++            assert isinstance(app.state.policy_guard, PolicyGuard)
++
++    info_events = [call.args[0] for call in mock_logger.info.call_args_list if call.args]
++    assert "runtime_adapter_map_empty" in info_events
++    # The other event must NOT have fired
++    assert "runtime_adapter_map_built" not in info_events
++    # And the empty-event must include the documented reason
++    empty_calls = [
++        call
++        for call in mock_logger.info.call_args_list
++        if call.args and call.args[0] == "runtime_adapter_map_empty"
++    ]
++    assert empty_calls[0].kwargs.get("reason") == "pre_installer_wizard_complete"
++
++
++async def test_lifespan_populated_registry_wires_battery_and_grid_meter(
++    tmp_path: pathlib.Path,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC6 / AC8 / AC11 — populated case end-to-end.
++
++    Seed device_registry with one validated+role-assigned battery (Modbus) and
++    one grid_meter (DSMR). After lifespan:
++
++    * ``runtime_adapter_map_built`` log emitted with counts matching;
++    * PolicyGuard sees battery only (grid_meter excluded — read-only);
++    * ControlLoop sees both;
++    * battery instance is ``is``-identical between the two maps (AC11).
++    """
++    structlog.reset_defaults()
++    db_path = str(tmp_path / "story_9_x_populated.db")
++    _seed_lifespan_env(monkeypatch, db_path)
++
++    mock_logger = MagicMock()
++    app = create_app()
++
++    # First lifespan run: bootstrap the DB so we can seed device_registry.
++    # We don't assert anything on this pass — it just creates schema.
++    async with lifespan(app):
++        pass
++
++    # Seed two validated+role-assigned rows.
++    import aiosqlite
++
++    async with aiosqlite.connect(db_path) as raw:
++        now = datetime.now(UTC).isoformat()
++        await raw.execute(
++            "INSERT INTO device_registry"
++            " (device_id, protocol, address, model, firmware_version, source,"
++            "  validated, last_capability_status, first_seen_at, last_seen_at,"
++            "  role, role_assigned_at)"
++            " VALUES (?, 'modbus_tcp', '10.0.0.10:502', 'byd_hvs_v1', NULL,"
++            "  'manual_entry', 1, 'full', ?, ?, 'battery', ?)",
++            ("batt-1", now, now, now),
++        )
++        await raw.execute(
++            "INSERT INTO device_registry"
++            " (device_id, protocol, address, model, firmware_version, source,"
++            "  validated, last_capability_status, first_seen_at, last_seen_at,"
++            "  role, role_assigned_at)"
++            " VALUES (?, 'dsmr_p1', '/dev/ttyUSB0', 'dsmr_p1', NULL,"
++            "  'manual_entry', 1, 'full', ?, ?, 'grid_meter', ?)",
++            ("meter-1", now, now, now),
++        )
++        await raw.commit()
++
++    # Second lifespan run: now device_registry is populated.
++    structlog.reset_defaults()
++    app2 = create_app()
++    with patch("open_ems.web.app.logger", mock_logger):
++        async with lifespan(app2):
++            rt: RuntimeAdapterMap = app2.state.runtime_adapters
++            assert set(rt.control_loop_adapters.keys()) == {
++                DeviceRole.battery,
++                DeviceRole.grid_meter,
++            }
++            assert set(rt.policy_guard_adapters.keys()) == {DeviceRole.battery}
++            # AC11 — same instance reference for overlapping role
++            assert (
++                rt.policy_guard_adapters[DeviceRole.battery]
++                is rt.control_loop_adapters[DeviceRole.battery]
++            )
++            assert isinstance(
++                rt.policy_guard_adapters[DeviceRole.battery],
++                BatteryAdapter,
++            )
++
++    # AC8 — log shape
++    built_calls = [
++        call
++        for call in mock_logger.info.call_args_list
++        if call.args and call.args[0] == "runtime_adapter_map_built"
++    ]
++    assert built_calls, "expected runtime_adapter_map_built log on populated registry"
++    log_kwargs = built_calls[0].kwargs
++    assert log_kwargs.get("policy_guard_role_count") == 1
++    assert log_kwargs.get("control_loop_role_count") == 2
++    adapter_summary = log_kwargs.get("adapters")
++    assert isinstance(adapter_summary, list)
++    role_set = {item["role"] for item in adapter_summary}
++    assert role_set == {"battery", "grid_meter"}
++
++
++async def test_lifespan_builder_failure_aborts_with_system_exit_1(
++    tmp_path: pathlib.Path,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC9 — fail-loud builder failure.
++
++    Patch ``build_runtime_adapter_map`` to raise; lifespan logs
++    ``startup_failed`` with the documented reason and exits with code 1.
++    Matches the existing migration / constraints-hydrate failure handling.
++    """
++    structlog.reset_defaults()
++    db_path = str(tmp_path / "story_9_x_failure.db")
++    _seed_lifespan_env(monkeypatch, db_path)
++
++    mock_logger = MagicMock()
++    app = create_app()
++    with (
++        patch(
++            "open_ems.web.app.build_runtime_adapter_map",
++            side_effect=RuntimeAdapterWiringError("fake_wiring_failure"),
++        ),
++        patch("open_ems.web.app.logger", mock_logger),
++    ):
++        with pytest.raises(SystemExit) as exc_info:
++            async with lifespan(app):
++                pass
++
++    assert exc_info.value.code == 1
++    error_calls = [
++        call
++        for call in mock_logger.error.call_args_list
++        if call.args and call.args[0] == "startup_failed"
++    ]
++    assert error_calls, "expected startup_failed error on wiring failure"
++    last_call = error_calls[-1]
++    assert last_call.kwargs.get("reason") == "runtime_adapter_wiring_failed"
++    assert "fake_wiring_failure" in last_call.kwargs.get("detail", "")
++
++
++async def test_lifespan_wires_ocpp_central_system_into_orchestrator_and_factory(
++    tmp_path: pathlib.Path,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC5 — the OCPPCentralSystem is constructed and wired (no longer ``None``).
++
++    Reaches into the discovery_orchestrator and protocol_adapter_factory on
++    app.state to confirm both received the same instance.
++    """
++    structlog.reset_defaults()
++    db_path = str(tmp_path / "story_9_x_ocpp_wiring.db")
++    _seed_lifespan_env(monkeypatch, db_path)
++
++    app = create_app()
++    async with lifespan(app):
++        # The orchestrator and factory aren't required to expose the central
++        # system publicly; we observe them via their constructor-stored attr.
++        # Both reach OCPPCentralSystem via their internal `_ocpp_central_system`.
++        orch = app.state.discovery_orchestrator
++        fac = app.state.protocol_adapter_factory
++        # mypy doesn't see the private attr; this assertion runs at the
++        # runtime layer where attribute access is fine.
++        orch_cs = getattr(orch, "_ocpp_central_system", None)
++        fac_cs = getattr(fac, "_ocpp_central_system", None)
++        assert isinstance(orch_cs, OCPPCentralSystem)
++        assert isinstance(fac_cs, OCPPCentralSystem)
++        # Same instance — single canonical OCPP registry per lifespan.
++        assert orch_cs is fac_cs

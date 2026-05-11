@@ -16,6 +16,7 @@ from open_ems.adapters.capabilities import (
     validate_capability_registry_alignment,
 )
 from open_ems.adapters.discovery import DiscoveryService
+from open_ems.adapters.ocpp.central_system import OCPPCentralSystem
 from open_ems.core import StateStore
 from open_ems.engine.control_loop import ControlLoop
 from open_ems.engine.intent_executor import IntentExecutor
@@ -32,6 +33,11 @@ from open_ems.services.manual_entry import ManualEntryService
 from open_ems.services.protocol_adapter_factory import ProtocolAdapterFactory
 from open_ems.services.readiness import mark_ready, sd_notify
 from open_ems.services.role_assignment import RoleAssignmentService
+from open_ems.services.runtime_adapter_wiring import (
+    RuntimeAdapterMap,
+    RuntimeAdapterWiringError,
+    build_runtime_adapter_map,
+)
 from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
@@ -314,12 +320,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         # Step 4d (Story 9.1): construct the installer-wizard service objects.
         # All are stateless or in-memory caches; no DB I/O at construction time.
+        # Story 9.X: ``OCPPCentralSystem`` is constructed here (was ``None`` at
+        # discovery_orchestrator + protocol_adapter_factory before). It is the
+        # single canonical OCPP registry shared by validation-time probing
+        # (ProtocolAdapterFactory), wizard discovery, and runtime adapter
+        # wiring (build_runtime_adapter_map at step 4h).
         device_repo = DeviceRepo()
         wizard_state_repo = WizardStateRepo()
         discovery_service = DiscoveryService()
+        ocpp_central_system = OCPPCentralSystem()
         discovery_orchestrator = DeviceDiscoveryOrchestrator(
             discovery_service=discovery_service,
-            ocpp_central_system=None,  # populated once OCPP wiring lands (Story 9.2/9.3)
+            ocpp_central_system=ocpp_central_system,
             registry_provider=device_repo,  # DeviceRepo.list_all() satisfies the protocol
         )
         manual_entry_service = ManualEntryService(
@@ -347,16 +359,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Reuses the same active_constraints_provider, device_repo,
         # wizard_state_repo, and constraints_service (for the safety_pre_check
         # reuse seam — AC5 check 5) the prior steps already constructed. The
-        # ProtocolAdapterFactory is validation-only — it does NOT participate
-        # in runtime control execution (PolicyGuard's adapters mapping stays
-        # empty per the Story 8-2 deferred finding, which is its own future
-        # story per the Story 9.4 R7 triage).
+        # ProtocolAdapterFactory remains validation-only by design — its probe
+        # path goes through DiscoveryService read-only primitives and it does
+        # not issue send_command. Runtime control wiring is owned by
+        # build_runtime_adapter_map at step 4h (Story 9.X, closed 2026-05-11).
         deployment_validation_repo = DeploymentValidationResultRepo()
         protocol_adapter_factory = ProtocolAdapterFactory(
             discovery=discovery_service,
-            # OCPP central system stays None until OCPP wiring lands; the
-            # factory's OCPP probe handles the absence gracefully.
-            ocpp_central_system=None,
+            ocpp_central_system=ocpp_central_system,
         )
         # D3/D4 — DeploymentValidationService now takes the StateStore (snapshot
         # is captured at run start) and ObservabilityService (structured audit
@@ -472,14 +482,76 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _pruning_task.add_done_callback(_on_pruning_done)
         logger.info("event_log_pruning_task_started", component="observability")
 
+        # Step 4h (Story 9.X): build the runtime adapter map from device_registry.
+        # Sourced from DeviceRepo.list_all() filtered to (validated=True AND
+        # role is not None). Closes Story 8-2's [app.py:223-236] deferred
+        # finding ("adapters={} in production silently rejects all commands").
+        try:
+            runtime_adapters: RuntimeAdapterMap = await build_runtime_adapter_map(
+                device_repo=device_repo,
+                ocpp_central_system=ocpp_central_system,
+                settings=settings,
+            )
+        except RuntimeAdapterWiringError as wiring_exc:
+            logger.error(
+                "startup_failed",
+                reason="runtime_adapter_wiring_failed",
+                detail=str(wiring_exc),
+                component="startup",
+            )
+            raise SystemExit(1) from None
+        if not runtime_adapters.control_loop_adapters:
+            logger.info(
+                "runtime_adapter_map_empty",
+                reason="pre_installer_wizard_complete",
+                component="startup",
+            )
+        else:
+            logger.info(
+                "runtime_adapter_map_built",
+                policy_guard_role_count=len(runtime_adapters.policy_guard_adapters),
+                control_loop_role_count=len(runtime_adapters.control_loop_adapters),
+                adapters=[
+                    {
+                        "role": role.value,
+                        "protocol": runtime_adapters.protocols_by_role[role],
+                        "device_id": adapter.device_id,
+                    }
+                    for role, adapter in runtime_adapters.control_loop_adapters.items()
+                ],
+                component="startup",
+            )
+        app.state.runtime_adapters = runtime_adapters
+
+        # Step 4h.1 (Story 9.X): start every wired adapter. DSMR's read loop
+        # is created by ``GridMeterAdapter.connect() → DSMRAdapter.start()``;
+        # without this call grid_meter telemetry stays ``dsmr_unavailable``
+        # forever because ``_received_at`` is never set. Modbus and OCPP
+        # connects are no-ops (lazy / charger-initiated), but driving every
+        # adapter through ``connect()`` keeps the lifecycle symmetric with
+        # the shutdown ``disconnect()`` loop and avoids per-adapter special
+        # casing.
+        for role, adapter in runtime_adapters.control_loop_adapters.items():
+            try:
+                await adapter.connect()
+            except Exception:  # noqa: BLE001 — best-effort; one adapter's connect failure must not block siblings
+                logger.warning(
+                    "adapter_connect_failed",
+                    role=role.value,
+                    device_id=adapter.device_id,
+                    component="startup",
+                    exc_info=True,
+                )
+
         intent_executor = IntentExecutor()
         policy_guard = PolicyGuard(
             state_store=app.state.state_store,
-            adapters={},
+            adapters=runtime_adapters.policy_guard_adapters,
             observability=observability,
             settings=settings,
             active_constraints=active_constraints_provider,
         )
+        app.state.policy_guard = policy_guard
         retry_policy = RetryPolicy(
             policy_guard=policy_guard,
             observability=observability,
@@ -487,7 +559,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         _control_loop = ControlLoop(
             state_store=app.state.state_store,
-            adapters={},
+            adapters=runtime_adapters.control_loop_adapters,
             energy_repo=energy_repo,
             settings=settings,
             intent_executor=intent_executor,
@@ -515,6 +587,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await _control_loop_task
             except asyncio.CancelledError:
                 pass
+
+        # Step 4h shutdown (Story 9.X AC10): close every adapter in role order.
+        # Each disconnect is isolated AND bounded by a per-adapter timeout so
+        # one slow/failed disconnect does not block the rest and does not
+        # eat the systemd STOPSIGTERM grace window.
+        for role, adapter in runtime_adapters.control_loop_adapters.items():
+            try:
+                await asyncio.wait_for(adapter.disconnect(), timeout=5.0)
+            except TimeoutError:
+                logger.warning(
+                    "adapter_disconnect_timeout",
+                    role=role.value,
+                    device_id=adapter.device_id,
+                    component="shutdown",
+                    timeout_seconds=5.0,
+                )
+            except Exception:  # noqa: BLE001 — best-effort teardown; one failure must not block siblings
+                logger.warning(
+                    "adapter_disconnect_failed",
+                    role=role.value,
+                    device_id=adapter.device_id,
+                    component="shutdown",
+                    exc_info=True,
+                )
 
         if _watchdog_task is not None:
             _watchdog_task.cancel()
