@@ -67,13 +67,15 @@ async def test_migration_failure_triggers_system_exit() -> None:
 
 
 def test_device_registry_schema_created(tmp_path: pathlib.Path) -> None:
-    """Story 9.1 AC1: ``device_registry`` schema matches the migration."""
+    """Story 9.1 AC1 + Story 9.2 AC1: ``device_registry`` schema matches both
+    migrations (0009 + 0010)."""
     db_path = tmp_path / "schema_test.db"
     alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
     with sqlite3.connect(db_path) as conn:
         columns = {
             row[1]: row[2] for row in conn.execute("PRAGMA table_info(device_registry)").fetchall()
         }
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(device_registry)").fetchall()}
     assert columns == {
         "id": "INTEGER",
         "device_id": "TEXT",
@@ -88,11 +90,15 @@ def test_device_registry_schema_created(tmp_path: pathlib.Path) -> None:
         "first_seen_at": "TEXT",
         "last_seen_at": "TEXT",
         "installer_acknowledged_unvalidated_at": "TEXT",
+        "role": "TEXT",
+        "role_assigned_at": "TEXT",
     }
+    assert "ix_device_registry_role" in indexes
 
 
 def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
-    """Story 9.1 AC8: ``wizard_state.session_id`` has ON DELETE CASCADE to sessions."""
+    """Story 9.1 AC8 + Story 9.2 AC2: ``wizard_state`` schema matches both
+    migrations and ``session_id`` keeps ON DELETE CASCADE."""
     db_path = tmp_path / "wizard_state_test.db"
     alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
     with sqlite3.connect(db_path) as conn:
@@ -106,6 +112,9 @@ def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
         "step_1_complete": "INTEGER",
         "step_1_completed_at": "TEXT",
         "last_scan_id": "TEXT",
+        "step_2_complete": "INTEGER",
+        "step_2_completed_at": "TEXT",
+        "step_2_acknowledged_gaps": "TEXT",
         "created_at": "TEXT",
         "updated_at": "TEXT",
     }
@@ -121,5 +130,39 @@ def test_migration_0009_round_trips(tmp_path: pathlib.Path) -> None:
     """AC1 + dev-notes round-trip clause: upgrade head → downgrade -1 → upgrade head."""
     db_url = f"sqlite:///{tmp_path / 'roundtrip.db'}"
     alembic_command.upgrade(_make_cfg(db_url), "head")
+    # Story 9.2 added a second migration on top of 0009 — go back two steps
+    # so we exercise the 0009 round-trip and then re-stack 0010 on top.
+    alembic_command.downgrade(_make_cfg(db_url), "-2")
+    alembic_command.upgrade(_make_cfg(db_url), "head")
+
+
+def test_migration_0010_round_trips(tmp_path: pathlib.Path) -> None:
+    """Story 9.2 AC1: migration 0010 upgrades + downgrades cleanly."""
+    db_url = f"sqlite:///{tmp_path / 'roundtrip_0010.db'}"
+    alembic_command.upgrade(_make_cfg(db_url), "head")
     alembic_command.downgrade(_make_cfg(db_url), "-1")
     alembic_command.upgrade(_make_cfg(db_url), "head")
+
+
+def test_role_enum_values_stable_across_migrations(tmp_path: pathlib.Path) -> None:
+    """Story 9.2 R6 drift call-out: ``DeviceRole`` string values are part of
+    the public API of the DB schema and MUST NOT change without a migration."""
+    from open_ems.core.devices import DeviceRole
+
+    db_path = tmp_path / "enum_stable.db"
+    alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+    expected = {"inverter", "battery", "ev_charger", "grid_meter"}
+    assert {member.value for member in DeviceRole} == expected
+    # The CHECK constraint must accept exactly these values.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        for value in expected:
+            conn.execute(
+                "INSERT INTO device_registry"
+                " (device_id, protocol, address, source, validated, first_seen_at,"
+                "  role, role_assigned_at)"
+                " VALUES (?, 'modbus_tcp', '10.0.0.1:502', 'manual_entry', 0,"
+                "         '2026-05-11T12:00:00+00:00', ?, '2026-05-11T12:00:00+00:00')",
+                (f"dev-{value}", value),
+            )
+        conn.commit()

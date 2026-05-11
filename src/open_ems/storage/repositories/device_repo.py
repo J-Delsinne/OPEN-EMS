@@ -23,6 +23,7 @@ from pydantic import (
     model_validator,
 )
 
+from open_ems.core.devices import DeviceRole
 from open_ems.storage.database import get_connection, get_write_lock
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -66,6 +67,8 @@ class DeviceRegistryEntry(BaseModel):
     first_seen_at: datetime
     last_seen_at: datetime | None = None
     installer_acknowledged_unvalidated_at: datetime | None = None
+    role: DeviceRole | None = None
+    role_assigned_at: datetime | None = None
 
     @field_validator("first_seen_at")
     @classmethod
@@ -86,6 +89,13 @@ class DeviceRegistryEntry(BaseModel):
             return None
         return _require_utc(value, "installer_acknowledged_unvalidated_at")
 
+    @field_validator("role_assigned_at")
+    @classmethod
+    def _role_assigned_at_must_be_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return _require_utc(value, "role_assigned_at")
+
     @field_validator("model", "firmware_version", "last_limitation_reason")
     @classmethod
     def _optional_strings_non_empty_when_present(cls, value: str | None) -> str | None:
@@ -104,6 +114,18 @@ class DeviceRegistryEntry(BaseModel):
         if self.validated and self.last_capability_status is None:
             raise ValueError(
                 "validated=True requires last_capability_status to be set"
+                f" (device_id={self.device_id!r})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _role_and_assigned_at_paired(self) -> DeviceRegistryEntry:
+        # Story 9.2 R3 #1: role and role_assigned_at must both be NULL or both
+        # be set. The DB CHECK constraint blocks the impossible state on write;
+        # this read-side guard rejects a manually tampered row too.
+        if (self.role is None) != (self.role_assigned_at is None):
+            raise ValueError(
+                "role and role_assigned_at must both be set or both be NULL"
                 f" (device_id={self.device_id!r})"
             )
         return self
@@ -133,7 +155,8 @@ class DeviceRepo:
         async with self._conn.execute(
             "SELECT device_id, protocol, address, model, firmware_version, source,"
             " validated, last_capability_status, last_limitation_reason,"
-            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at"
+            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at,"
+            " role, role_assigned_at"
             " FROM device_registry"
             " ORDER BY first_seen_at ASC, device_id ASC"
         ) as cursor:
@@ -144,7 +167,8 @@ class DeviceRepo:
         async with self._conn.execute(
             "SELECT device_id, protocol, address, model, firmware_version, source,"
             " validated, last_capability_status, last_limitation_reason,"
-            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at"
+            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at,"
+            " role, role_assigned_at"
             " FROM device_registry WHERE device_id = ?",
             (device_id,),
         ) as cursor:
@@ -263,6 +287,34 @@ class DeviceRepo:
                     raise ValueError(f"No device_registry row for device_id={device_id!r}")
             await self._conn.commit()
 
+    async def assign_role(
+        self,
+        device_id: str,
+        *,
+        role: DeviceRole | None,
+        assigned_at: datetime,
+    ) -> None:
+        """Set or clear the role on a registry row atomically (Story 9.2 AC1).
+
+        Setting ``role`` to a ``DeviceRole`` writes both ``role`` and
+        ``role_assigned_at``; setting it to ``None`` clears both columns in the
+        same UPDATE so the paired invariant always holds. Raises ``ValueError``
+        with an exact-match message if no row matches.
+        """
+        _require_utc(assigned_at, "assigned_at")
+        role_value: str | None = role.value if role is not None else None
+        assigned_at_value: str | None = assigned_at.isoformat() if role is not None else None
+        async with get_write_lock():
+            await self._conn.commit()
+            async with self._conn.execute(
+                "UPDATE device_registry SET role = ?, role_assigned_at = ? WHERE device_id = ?",
+                (role_value, assigned_at_value, device_id),
+            ) as cursor:
+                if cursor.rowcount == 0:
+                    await self._conn.commit()
+                    raise ValueError(f"No device_registry row for device_id={device_id!r}")
+            await self._conn.commit()
+
     async def acknowledge_unvalidated(
         self,
         device_id: str,
@@ -293,6 +345,8 @@ class DeviceRepo:
 
 
 def _row_to_entry(row: aiosqlite.Row | tuple[object, ...]) -> DeviceRegistryEntry:
+    role_raw = row[12]
+    role_assigned_at_raw = row[13]
     return DeviceRegistryEntry(
         device_id=str(row[0]),
         protocol=str(row[1]),  # type: ignore[arg-type]
@@ -313,5 +367,10 @@ def _row_to_entry(row: aiosqlite.Row | tuple[object, ...]) -> DeviceRegistryEntr
         installer_acknowledged_unvalidated_at=_parse_optional_utc(
             str(row[11]) if row[11] is not None else None,
             "installer_acknowledged_unvalidated_at",
+        ),
+        role=DeviceRole(str(role_raw)) if role_raw is not None else None,
+        role_assigned_at=_parse_optional_utc(
+            str(role_assigned_at_raw) if role_assigned_at_raw is not None else None,
+            "role_assigned_at",
         ),
     )

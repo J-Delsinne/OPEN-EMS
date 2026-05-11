@@ -1,0 +1,32 @@
+{# Story 9.2 — full roles list region.
+
+   Variables:
+     assignments — tuple[RoleAssignmentRow, ...] in (first_seen_at, device_id) order
+     csrf_token  — string
+     gap_panel_oob — bool (when true, the gap panel is emitted as an HTMX
+                     out-of-band swap so the sibling region refreshes after
+                     an assign-route swap targeting #roles-list-region)
+     conflicts        — tuple[RoleConflict, ...]
+     blocking_gaps    — tuple[RoleGap, ...]
+     warning_gaps     — tuple[RoleGap, ...]
+     acknowledged_gaps — frozenset[str]
+     gate_can_advance — bool
+#}
+{% if assignments %}
+  <ul id="role-rows" aria-label="Devices and roles">
+    {% for row in assignments %}
+      {% include "installer/_setup_roles_row.html" %}
+    {% endfor %}
+  </ul>
+{% else %}
+  <p>No devices in the registry yet. Return to Step 1 to add devices.</p>
+{% endif %}
+
+{% if gap_panel_oob %}
+  <div id="gap-panel-region" hx-swap-oob="innerHTML">
+    {% include "installer/_setup_roles_gap_panel.html" %}
+  </div>
+  <div id="advance-region" hx-swap-oob="innerHTML">
+    {% include "installer/_setup_roles_advance.html" %}
+  </div>
+{% endif %}

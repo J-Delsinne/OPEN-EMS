@@ -61,7 +61,13 @@ _CREATE_DEVICE_REGISTRY = """
         last_limitation_reason TEXT,
         first_seen_at TEXT NOT NULL,
         last_seen_at TEXT,
-        installer_acknowledged_unvalidated_at TEXT
+        installer_acknowledged_unvalidated_at TEXT,
+        role TEXT
+            CHECK (role IS NULL
+                   OR role IN ('inverter', 'battery', 'ev_charger', 'grid_meter')),
+        role_assigned_at TEXT,
+        CHECK ((role IS NULL AND role_assigned_at IS NULL)
+               OR (role IS NOT NULL AND role_assigned_at IS NOT NULL))
     )
 """
 
@@ -73,6 +79,10 @@ _CREATE_WIZARD_STATE = """
             CHECK (step_1_complete IN (0, 1)),
         step_1_completed_at TEXT,
         last_scan_id TEXT,
+        step_2_complete INTEGER NOT NULL DEFAULT 0
+            CHECK (step_2_complete IN (0, 1)),
+        step_2_completed_at TEXT,
+        step_2_acknowledged_gaps TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -163,11 +173,16 @@ async def e2e_app(
         discovery_service=discovery,
     )
 
+    from open_ems.services.role_assignment import RoleAssignmentService
+
+    role_assignment = RoleAssignmentService(device_repo=device_repo)
+
     app = FastAPI()
     app.state.device_repo = device_repo
     app.state.wizard_state_repo = wizard_state_repo
     app.state.discovery_orchestrator = orchestrator
     app.state.manual_entry_service = manual_entry
+    app.state.role_assignment_service = role_assignment
     app.include_router(setup_router)
     app.add_middleware(CsrfMiddleware)
     yield app, discovery

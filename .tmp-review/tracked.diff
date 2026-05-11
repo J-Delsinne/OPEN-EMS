@@ -1,0 +1,1257 @@
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index 2799741..89d448f 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -35,7 +35,7 @@
+ # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+ 
+ generated: '2026-05-01'
+-last_updated: '2026-05-11'  # Story 9-1 code-review complete; 2 decisions resolved + 19 patches applied + 12 deferred. Quality gates: 1171 passed, 1 xfailed, mypy + ruff clean. Status: review → done.
++last_updated: '2026-05-11'  # Story 9-2 implemented; status → review. All quality gates clean (1228 passed; mypy + ruff clean). AC10 /bmad-code-review owed before review → done.
+ project_key: NOKEY
+ tracking_system: file-system
+ story_location: _bmad-output/implementation-artifacts
+@@ -123,7 +123,7 @@ development_status:
+   9-0c-capability-profile-failure-semantics: done
+   9-0d-restart-hydration-of-monthly-peak: done
+   9-1-implement-device-discovery-step-with-live-probing-capability-classification-and-manual-entry: done
+-  9-2-implement-role-assignment-with-inline-conflict-detection-and-gap-acknowledgment: backlog
++  9-2-implement-role-assignment-with-inline-conflict-detection-and-gap-acknowledgment: review
+   9-3-implement-constraint-configuration-with-staged-validation-and-single-increment-config-version: backlog
+   9-4-implement-deployment-validation-with-safe-readiness-probing-and-persisted-results: backlog
+   9-5-installer-handoff-guide: backlog
+diff --git a/src/open_ems/storage/repositories/device_repo.py b/src/open_ems/storage/repositories/device_repo.py
+index 7cf88f9..5108e27 100644
+--- a/src/open_ems/storage/repositories/device_repo.py
++++ b/src/open_ems/storage/repositories/device_repo.py
+@@ -23,6 +23,7 @@ from pydantic import (
+     model_validator,
+ )
+ 
++from open_ems.core.devices import DeviceRole
+ from open_ems.storage.database import get_connection, get_write_lock
+ 
+ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+@@ -66,6 +67,8 @@ class DeviceRegistryEntry(BaseModel):
+     first_seen_at: datetime
+     last_seen_at: datetime | None = None
+     installer_acknowledged_unvalidated_at: datetime | None = None
++    role: DeviceRole | None = None
++    role_assigned_at: datetime | None = None
+ 
+     @field_validator("first_seen_at")
+     @classmethod
+@@ -86,6 +89,13 @@ class DeviceRegistryEntry(BaseModel):
+             return None
+         return _require_utc(value, "installer_acknowledged_unvalidated_at")
+ 
++    @field_validator("role_assigned_at")
++    @classmethod
++    def _role_assigned_at_must_be_utc(cls, value: datetime | None) -> datetime | None:
++        if value is None:
++            return None
++        return _require_utc(value, "role_assigned_at")
++
+     @field_validator("model", "firmware_version", "last_limitation_reason")
+     @classmethod
+     def _optional_strings_non_empty_when_present(cls, value: str | None) -> str | None:
+@@ -108,6 +118,18 @@ class DeviceRegistryEntry(BaseModel):
+             )
+         return self
+ 
++    @model_validator(mode="after")
++    def _role_and_assigned_at_paired(self) -> DeviceRegistryEntry:
++        # Story 9.2 R3 #1: role and role_assigned_at must both be NULL or both
++        # be set. The DB CHECK constraint blocks the impossible state on write;
++        # this read-side guard rejects a manually tampered row too.
++        if (self.role is None) != (self.role_assigned_at is None):
++            raise ValueError(
++                "role and role_assigned_at must both be set or both be NULL"
++                f" (device_id={self.device_id!r})"
++            )
++        return self
++
+ 
+ class ManualDeviceEntryInput(BaseModel):
+     """Validated input for ``DeviceRepo.upsert_manual``.
+@@ -133,7 +155,8 @@ class DeviceRepo:
+         async with self._conn.execute(
+             "SELECT device_id, protocol, address, model, firmware_version, source,"
+             " validated, last_capability_status, last_limitation_reason,"
+-            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at"
++            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at,"
++            " role, role_assigned_at"
+             " FROM device_registry"
+             " ORDER BY first_seen_at ASC, device_id ASC"
+         ) as cursor:
+@@ -144,7 +167,8 @@ class DeviceRepo:
+         async with self._conn.execute(
+             "SELECT device_id, protocol, address, model, firmware_version, source,"
+             " validated, last_capability_status, last_limitation_reason,"
+-            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at"
++            " first_seen_at, last_seen_at, installer_acknowledged_unvalidated_at,"
++            " role, role_assigned_at"
+             " FROM device_registry WHERE device_id = ?",
+             (device_id,),
+         ) as cursor:
+@@ -263,6 +287,34 @@ class DeviceRepo:
+                     raise ValueError(f"No device_registry row for device_id={device_id!r}")
+             await self._conn.commit()
+ 
++    async def assign_role(
++        self,
++        device_id: str,
++        *,
++        role: DeviceRole | None,
++        assigned_at: datetime,
++    ) -> None:
++        """Set or clear the role on a registry row atomically (Story 9.2 AC1).
++
++        Setting ``role`` to a ``DeviceRole`` writes both ``role`` and
++        ``role_assigned_at``; setting it to ``None`` clears both columns in the
++        same UPDATE so the paired invariant always holds. Raises ``ValueError``
++        with an exact-match message if no row matches.
++        """
++        _require_utc(assigned_at, "assigned_at")
++        role_value: str | None = role.value if role is not None else None
++        assigned_at_value: str | None = assigned_at.isoformat() if role is not None else None
++        async with get_write_lock():
++            await self._conn.commit()
++            async with self._conn.execute(
++                "UPDATE device_registry SET role = ?, role_assigned_at = ? WHERE device_id = ?",
++                (role_value, assigned_at_value, device_id),
++            ) as cursor:
++                if cursor.rowcount == 0:
++                    await self._conn.commit()
++                    raise ValueError(f"No device_registry row for device_id={device_id!r}")
++            await self._conn.commit()
++
+     async def acknowledge_unvalidated(
+         self,
+         device_id: str,
+@@ -293,6 +345,8 @@ class DeviceRepo:
+ 
+ 
+ def _row_to_entry(row: aiosqlite.Row | tuple[object, ...]) -> DeviceRegistryEntry:
++    role_raw = row[12] if len(row) > 12 else None
++    role_assigned_at_raw = row[13] if len(row) > 13 else None
+     return DeviceRegistryEntry(
+         device_id=str(row[0]),
+         protocol=str(row[1]),  # type: ignore[arg-type]
+@@ -314,4 +368,9 @@ def _row_to_entry(row: aiosqlite.Row | tuple[object, ...]) -> DeviceRegistryEntr
+             str(row[11]) if row[11] is not None else None,
+             "installer_acknowledged_unvalidated_at",
+         ),
++        role=DeviceRole(str(role_raw)) if role_raw is not None else None,
++        role_assigned_at=_parse_optional_utc(
++            str(role_assigned_at_raw) if role_assigned_at_raw is not None else None,
++            "role_assigned_at",
++        ),
+     )
+diff --git a/src/open_ems/storage/repositories/wizard_state_repo.py b/src/open_ems/storage/repositories/wizard_state_repo.py
+index d7cc806..9dc8150 100644
+--- a/src/open_ems/storage/repositories/wizard_state_repo.py
++++ b/src/open_ems/storage/repositories/wizard_state_repo.py
+@@ -1,23 +1,37 @@
+ """``WizardStateRepo`` — per-session installer wizard step tracking.
+ 
+-Story 9.1 introduces ``step_1_*`` columns; subsequent stories will extend with
+-``step_2_*`` / ``step_3_*`` / ``step_4_*`` columns in their own migrations.
+-Rows are lazily created on first GET of ``/installer/setup/discovery`` and
+-cleaned up via the FK CASCADE when the parent ``sessions`` row is deleted.
++Story 9.1 introduces ``step_1_*`` columns; Story 9.2 extends with
++``step_2_*`` (including a JSON-encoded ``step_2_acknowledged_gaps``).
++Subsequent stories will extend with ``step_3_*`` / ``step_4_*`` columns in
++their own migrations. Rows are lazily created on first GET of
++``/installer/setup/discovery`` and cleaned up via the FK CASCADE when the
++parent ``sessions`` row is deleted.
+ """
+ 
+ from __future__ import annotations
+ 
++import json
+ from datetime import datetime
+ from typing import Annotated
+ 
+ import aiosqlite
+-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
++from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator, model_validator
+ 
+ from open_ems.storage.database import get_connection, get_write_lock
+ 
+ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+ 
++# Story 9.2: the authoritative gap-label whitelist lives in
++# ``services.role_assignment`` so the service, the model validator, the repo,
++# and the route handler all share one source. To avoid an import cycle
++# (``role_assignment`` depends on this repo's ``DeviceRepo`` peer; the repo
++# layer must not import services), we keep a frozen local copy here and the
++# service module imports it back. The matching unit test asserts both sets
++# are equal — a future drift fails loud.
++_VALID_GAP_LABELS: frozenset[str] = frozenset(
++    {"battery_missing", "inverter_missing", "ev_charger_missing"}
++)
++
+ 
+ def _require_utc(value: datetime, field_name: str) -> datetime:
+     if value.tzinfo is None or value.utcoffset() is None:
+@@ -32,6 +46,21 @@ def _parse_optional_utc(raw: str | None, field_name: str) -> datetime | None:
+     return _require_utc(parsed, field_name)
+ 
+ 
++def _decode_gap_labels(raw: str | None) -> frozenset[str]:
++    if raw is None:
++        return frozenset()
++    decoded = json.loads(raw)
++    if not isinstance(decoded, list):
++        raise ValueError("step_2_acknowledged_gaps must decode to a list")
++    if not all(isinstance(item, str) for item in decoded):
++        raise ValueError("step_2_acknowledged_gaps must contain only strings")
++    return frozenset(decoded)
++
++
++def _encode_gap_labels(labels: frozenset[str]) -> str:
++    return json.dumps(sorted(labels))
++
++
+ class WizardState(BaseModel):
+     """Immutable view of one ``wizard_state`` row."""
+ 
+@@ -41,6 +70,9 @@ class WizardState(BaseModel):
+     step_1_complete: bool
+     step_1_completed_at: datetime | None = None
+     last_scan_id: str | None = None
++    step_2_complete: bool = False
++    step_2_completed_at: datetime | None = None
++    step_2_acknowledged_gaps: frozenset[str] = frozenset()
+     created_at: datetime
+     updated_at: datetime
+ 
+@@ -56,6 +88,24 @@ class WizardState(BaseModel):
+             return None
+         return _require_utc(value, "step_1_completed_at")
+ 
++    @field_validator("step_2_completed_at")
++    @classmethod
++    def _step_2_completed_at_must_be_utc(cls, value: datetime | None) -> datetime | None:
++        if value is None:
++            return None
++        return _require_utc(value, "step_2_completed_at")
++
++    @model_validator(mode="after")
++    def _acknowledged_gaps_whitelisted(self) -> WizardState:
++        # Defense-in-depth: a tampered DB row carrying an unknown label fails
++        # loud at every read, not only on write.
++        unknown = self.step_2_acknowledged_gaps - _VALID_GAP_LABELS
++        if unknown:
++            raise ValueError(
++                f"step_2_acknowledged_gaps contains unknown labels: {sorted(unknown)!r}"
++            )
++        return self
++
+ 
+ class WizardStateRepo:
+     def __init__(self, conn: aiosqlite.Connection | None = None) -> None:
+@@ -64,6 +114,7 @@ class WizardStateRepo:
+     async def get(self, session_id: str) -> WizardState | None:
+         async with self._conn.execute(
+             "SELECT session_id, step_1_complete, step_1_completed_at, last_scan_id,"
++            " step_2_complete, step_2_completed_at, step_2_acknowledged_gaps,"
+             " created_at, updated_at"
+             " FROM wizard_state WHERE session_id = ?",
+             (session_id,),
+@@ -89,8 +140,8 @@ class WizardStateRepo:
+             try:
+                 await self._conn.execute(
+                     "INSERT INTO wizard_state"
+-                    " (session_id, step_1_complete, created_at, updated_at)"
+-                    " VALUES (?, 0, ?, ?)",
++                    " (session_id, step_1_complete, step_2_complete, created_at, updated_at)"
++                    " VALUES (?, 0, 0, ?, ?)",
+                     (session_id, now.isoformat(), now.isoformat()),
+                 )
+                 await self._conn.commit()
+@@ -149,8 +200,84 @@ class WizardStateRepo:
+                     raise ValueError(f"No wizard_state row for session_id={session_id!r}")
+             await self._conn.commit()
+ 
++    async def record_acknowledged_gaps(
++        self,
++        session_id: str,
++        *,
++        gaps: frozenset[str],
++        now: datetime,
++    ) -> None:
++        """Replace ``step_2_acknowledged_gaps`` with ``gaps`` atomically.
++
++        Raises ``ValueError`` with the exact-match message
++        ``"acknowledged_gap_label_invalid: <label>"`` for any out-of-whitelist
++        label (defense-in-depth alongside the route handler and Pydantic model).
++        Raises ``ValueError`` if no row exists for ``session_id``.
++        """
++        _require_utc(now, "now")
++        for label in sorted(gaps):
++            if label not in _VALID_GAP_LABELS:
++                raise ValueError(f"acknowledged_gap_label_invalid: {label}")
++        encoded = _encode_gap_labels(gaps)
++        async with get_write_lock():
++            await self._conn.commit()
++            async with self._conn.execute(
++                "UPDATE wizard_state SET"
++                " step_2_acknowledged_gaps = ?,"
++                " updated_at = ?"
++                " WHERE session_id = ?",
++                (encoded, now.isoformat(), session_id),
++            ) as cursor:
++                if cursor.rowcount == 0:
++                    await self._conn.commit()
++                    raise ValueError(f"No wizard_state row for session_id={session_id!r}")
++            await self._conn.commit()
++
++    async def set_step_2_complete(
++        self,
++        session_id: str,
++        *,
++        acknowledged_gaps: frozenset[str],
++        now: datetime,
++    ) -> None:
++        """Mark step 2 complete idempotently.
++
++        Writes both ``step_2_complete=1`` and the filtered acknowledged-gap set
++        atomically in the same UPDATE. Idempotent: if ``step_2_complete`` is
++        already ``1``, ``step_2_completed_at`` is preserved (no shift on retry)
++        but ``step_2_acknowledged_gaps`` is still overwritten with the supplied
++        set (the stale-acknowledgment filter must keep persisted state honest
++        even on a re-click). Raises ``ValueError`` with the exact-match
++        per-label message for any out-of-whitelist label. Raises
++        ``ValueError`` if no row exists for ``session_id``.
++        """
++        _require_utc(now, "now")
++        for label in sorted(acknowledged_gaps):
++            if label not in _VALID_GAP_LABELS:
++                raise ValueError(f"acknowledged_gap_label_invalid: {label}")
++        encoded = _encode_gap_labels(acknowledged_gaps)
++        async with get_write_lock():
++            await self._conn.commit()
++            async with self._conn.execute(
++                "UPDATE wizard_state SET"
++                " step_2_complete = 1,"
++                " step_2_completed_at = CASE"
++                "   WHEN step_2_complete = 1 THEN step_2_completed_at"
++                "   ELSE ?"
++                " END,"
++                " step_2_acknowledged_gaps = ?,"
++                " updated_at = ?"
++                " WHERE session_id = ?",
++                (now.isoformat(), encoded, now.isoformat(), session_id),
++            ) as cursor:
++                if cursor.rowcount == 0:
++                    await self._conn.commit()
++                    raise ValueError(f"No wizard_state row for session_id={session_id!r}")
++            await self._conn.commit()
++
+ 
+ def _row_to_state(row: aiosqlite.Row | tuple[object, ...]) -> WizardState:
++    step_2_acknowledged_gaps_raw = str(row[6]) if row[6] is not None else None
+     return WizardState(
+         session_id=str(row[0]),
+         step_1_complete=bool(row[1]),
+@@ -159,6 +286,12 @@ def _row_to_state(row: aiosqlite.Row | tuple[object, ...]) -> WizardState:
+             "step_1_completed_at",
+         ),
+         last_scan_id=str(row[3]) if row[3] is not None else None,
+-        created_at=datetime.fromisoformat(str(row[4])),
+-        updated_at=datetime.fromisoformat(str(row[5])),
++        step_2_complete=bool(row[4]),
++        step_2_completed_at=_parse_optional_utc(
++            str(row[5]) if row[5] is not None else None,
++            "step_2_completed_at",
++        ),
++        step_2_acknowledged_gaps=_decode_gap_labels(step_2_acknowledged_gaps_raw),
++        created_at=datetime.fromisoformat(str(row[7])),
++        updated_at=datetime.fromisoformat(str(row[8])),
+     )
+diff --git a/src/open_ems/web/app.py b/src/open_ems/web/app.py
+index 93b18ad..7784006 100644
+--- a/src/open_ems/web/app.py
++++ b/src/open_ems/web/app.py
+@@ -28,6 +28,7 @@ from open_ems.services.device_discovery import DeviceDiscoveryOrchestrator
+ from open_ems.services.loop_liveness import LoopLiveness
+ from open_ems.services.manual_entry import ManualEntryService
+ from open_ems.services.readiness import mark_ready, sd_notify
++from open_ems.services.role_assignment import RoleAssignmentService
+ from open_ems.services.time_sync import check_clock
+ from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
+ from open_ems.settings import get_settings
+@@ -315,13 +316,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+             device_repo=device_repo,
+             discovery_service=discovery_service,
+         )
++        # Step 4e (Story 9.2): construct the role-assignment evaluator. The
++        # object is stateless; no DB I/O at construction (first read happens on
++        # the first installer request, post-readiness).
++        role_assignment_service = RoleAssignmentService(device_repo=device_repo)
+         app.state.device_repo = device_repo
+         app.state.wizard_state_repo = wizard_state_repo
+         app.state.discovery_orchestrator = discovery_orchestrator
+         app.state.manual_entry_service = manual_entry_service
++        app.state.role_assignment_service = role_assignment_service
+         logger.info("device_registry_ready", component="startup")
+         logger.info("wizard_state_ready", component="startup")
+         logger.info("discovery_orchestrator_ready", component="startup")
++        logger.info("role_assignment_service_ready", component="startup")
+ 
+         # Step 5b: Admin bootstrap — create initial admin if no users exist
+         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
+diff --git a/src/open_ems/web/routes/setup.py b/src/open_ems/web/routes/setup.py
+index f1c4495..6e507d1 100644
+--- a/src/open_ems/web/routes/setup.py
++++ b/src/open_ems/web/routes/setup.py
+@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
+ from pydantic import ValidationError
+ 
+ from open_ems.adapters.capabilities import get_profile
+-from open_ems.core.devices import CapabilityStatus
++from open_ems.core.devices import CapabilityStatus, DeviceRole
+ from open_ems.services.device_discovery import (
+     DeviceDiscoveryOrchestrator,
+     DSMRScanTarget,
+@@ -35,6 +35,10 @@ from open_ems.services.manual_entry import (
+     ManualEntryFormRequest,
+     ManualEntryService,
+ )
++from open_ems.services.role_assignment import (
++    _VALID_GAP_LABELS,
++    RoleAssignmentService,
++)
+ from open_ems.services.wizard_gate import WizardGateService
+ from open_ems.storage.repositories.device_repo import (
+     CapabilityStatusLiteral,
+@@ -105,6 +109,13 @@ def _manual_entry_service(request: Request) -> ManualEntryService:
+     return svc
+ 
+ 
++def _role_assignment_service(request: Request) -> RoleAssignmentService:
++    svc = getattr(request.app.state, "role_assignment_service", None)
++    if not isinstance(svc, RoleAssignmentService):
++        raise HTTPException(status_code=503, detail="Role assignment service unavailable")
++    return svc
++
++
+ # ---------------------------------------------------------------------------
+ # Routes
+ # ---------------------------------------------------------------------------
+@@ -390,18 +401,224 @@ async def post_advance_to_step_2(
+ 
+ 
+ @router.get("/installer/setup/roles", response_class=HTMLResponse)
+-async def get_roles_placeholder(
++async def get_roles_page(
+     request: Request,
+     user: InstallerUser = Depends(require_installer),  # noqa: B008
++    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
++    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
+ ) -> HTMLResponse:
+-    """Story 9.2 placeholder. Replaced by the real role-assignment page in 9.2."""
++    now = datetime.now(UTC)
++    state = await wizard_repo.get_or_create(user.session_id, now=now)
++    gate = await role_svc.evaluate_gate(acknowledged_gaps=state.step_2_acknowledged_gaps)
++    snapshot = await role_svc.evaluate_assignments()
+     return _templates.TemplateResponse(
+         request,
+-        "installer/setup_roles_placeholder.html",
++        "installer/setup_roles.html",
+         {
+             "csrf_token": user.csrf_token,
+             "title": "Role Assignment",
+             "active_step": "roles",
++            "step_2_complete": state.step_2_complete,
++            "assignments": snapshot.assignments,
++            "conflicts": gate.conflicts,
++            "blocking_gaps": gate.blocking_gaps,
++            "warning_gaps": gate.unacknowledged_warnings,
++            "acknowledged_gaps": gate.effective_acknowledged_gaps,
++            "gate_can_advance": gate.can_advance,
++        },
++    )
++
++
++@router.post("/installer/setup/roles/{device_id}/assign", response_class=HTMLResponse)
++async def post_assign_role(
++    request: Request,
++    device_id: str,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++    device_repo: DeviceRepo = Depends(_device_repo),  # noqa: B008
++    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
++    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
++    role: str = Form(default=""),
++    csrf_token: str = Form(default=""),
++) -> HTMLResponse:
++    _ = csrf_token
++    resolved: DeviceRole | None
++    role_clean = role.strip()
++    if role_clean == "":
++        resolved = None
++    else:
++        try:
++            resolved = DeviceRole(role_clean)
++        except ValueError:
++            return _templates.TemplateResponse(
++                request,
++                "installer/_setup_roles_error.html",
++                {
++                    "reason": f"role_invalid: {role_clean!r}",
++                },
++                status_code=400,
++            )
++    try:
++        await device_repo.assign_role(device_id, role=resolved, assigned_at=datetime.now(UTC))
++    except ValueError as err:
++        raise HTTPException(status_code=404, detail=str(err)) from err
++
++    if resolved is None:
++        logger.info("role_unassigned", component="installer_setup", device_id=device_id)
++    else:
++        logger.info(
++            "role_assigned",
++            component="installer_setup",
++            device_id=device_id,
++            role=resolved.value,
++        )
++
++    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
++    gate = await role_svc.evaluate_gate(acknowledged_gaps=state.step_2_acknowledged_gaps)
++    snapshot = await role_svc.evaluate_assignments()
++    return _templates.TemplateResponse(
++        request,
++        "installer/_setup_roles_list.html",
++        {
++            "csrf_token": user.csrf_token,
++            "assignments": snapshot.assignments,
++            "conflicts": gate.conflicts,
++            "blocking_gaps": gate.blocking_gaps,
++            "warning_gaps": gate.unacknowledged_warnings,
++            "acknowledged_gaps": gate.effective_acknowledged_gaps,
++            "gate_can_advance": gate.can_advance,
++            "gap_panel_oob": True,
++        },
++    )
++
++
++@router.post("/installer/setup/roles/acknowledge-gap", response_class=HTMLResponse)
++async def post_acknowledge_gap(
++    request: Request,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
++    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
++    action: str = Form(default="acknowledge"),
++    gap_label: str = Form(...),
++    csrf_token: str = Form(default=""),
++) -> HTMLResponse:
++    _ = csrf_token
++    label_clean = gap_label.strip()
++    action_clean = action.strip().lower()
++    if action_clean not in {"acknowledge", "revoke"}:
++        return _templates.TemplateResponse(
++            request,
++            "installer/_setup_roles_error.html",
++            {"reason": f"action_invalid: {action_clean!r}"},
++            status_code=400,
++        )
++    if label_clean not in _VALID_GAP_LABELS:
++        # AC5: 'grid_meter_missing' is deliberately not in the whitelist —
++        # surface the canonical-shape rejection.
++        if label_clean == "grid_meter_missing":
++            return _templates.TemplateResponse(
++                request,
++                "installer/_setup_roles_error.html",
++                {"reason": "gap_label_not_acknowledgeable: grid_meter_missing"},
++                status_code=400,
++            )
++        return _templates.TemplateResponse(
++            request,
++            "installer/_setup_roles_error.html",
++            {"reason": f"gap_label_invalid: {label_clean!r}"},
++            status_code=400,
++        )
++
++    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
++    current = set(state.step_2_acknowledged_gaps)
++    if action_clean == "acknowledge":
++        current.add(label_clean)
++        logger.info(
++            "gap_acknowledged",
++            component="installer_setup",
++            session_id=user.session_id,
++            gap_label=label_clean,
++        )
++    else:
++        current.discard(label_clean)
++        logger.info(
++            "gap_revoked",
++            component="installer_setup",
++            session_id=user.session_id,
++            gap_label=label_clean,
++        )
++    await wizard_repo.record_acknowledged_gaps(
++        user.session_id,
++        gaps=frozenset(current),
++        now=datetime.now(UTC),
++    )
++    gate = await role_svc.evaluate_gate(acknowledged_gaps=frozenset(current))
++    return _templates.TemplateResponse(
++        request,
++        "installer/_setup_roles_gap_panel.html",
++        {
++            "csrf_token": user.csrf_token,
++            "conflicts": gate.conflicts,
++            "blocking_gaps": gate.blocking_gaps,
++            "warning_gaps": gate.unacknowledged_warnings,
++            "acknowledged_gaps": gate.effective_acknowledged_gaps,
++            "gate_can_advance": gate.can_advance,
++        },
++    )
++
++
++@router.post("/installer/setup/roles/advance")
++async def post_advance_to_step_3(
++    request: Request,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
++    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
++    csrf_token: str = Form(default=""),
++) -> Response:
++    _ = csrf_token
++    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
++    gate = await role_svc.evaluate_gate(acknowledged_gaps=state.step_2_acknowledged_gaps)
++    if not gate.can_advance:
++        return _templates.TemplateResponse(
++            request,
++            "installer/_setup_roles_error_banner.html",
++            {
++                "csrf_token": user.csrf_token,
++                "conflicts": gate.conflicts,
++                "blocking_gaps": gate.blocking_gaps,
++                "warning_gaps": gate.unacknowledged_warnings,
++            },
++            status_code=400,
++        )
++    # AC6 step 4: persist the filtered acknowledged-gaps set inside the same
++    # write that flips step_2_complete=1 (idempotent on a re-click — the
++    # repo preserves the original completed_at).
++    await wizard_repo.set_step_2_complete(
++        user.session_id,
++        acknowledged_gaps=gate.effective_acknowledged_gaps,
++        now=datetime.now(UTC),
++    )
++    logger.info(
++        "step_2_completed",
++        component="installer_setup",
++        session_id=user.session_id,
++        acknowledged_gaps=sorted(gate.effective_acknowledged_gaps),
++    )
++    return RedirectResponse(url="/installer/setup/constraints", status_code=302)
++
++
++@router.get("/installer/setup/constraints", response_class=HTMLResponse)
++async def get_constraints_placeholder(
++    request: Request,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++) -> HTMLResponse:
++    """Story 9.3 placeholder. Replaced by the real Step 3 page in 9.3."""
++    return _templates.TemplateResponse(
++        request,
++        "installer/setup_constraints_placeholder.html",
++        {
++            "csrf_token": user.csrf_token,
++            "title": "Constraints",
++            "active_step": "constraints",
+         },
+     )
+ 
+diff --git a/src/open_ems/web/templates/installer/setup_layout.html b/src/open_ems/web/templates/installer/setup_layout.html
+index af4023a..1d00acc 100644
+--- a/src/open_ems/web/templates/installer/setup_layout.html
++++ b/src/open_ems/web/templates/installer/setup_layout.html
+@@ -25,7 +25,16 @@
+   <h1>{{ title }}</h1>
+   <nav aria-label="Setup wizard progress">
+     <ol class="wizard-step-indicator">
+-      <li{% if active_step == "discovery" %} aria-current="step"{% endif %}>1. Device Discovery</li>
++      <li{% if active_step == "discovery" %} aria-current="step"{% endif %}>
++        {# Back-navigation hyperlink only when Step 2 is not yet complete (UX
++           spec line 1470 — "Browser back works"). Once Step 2 is finalized
++           we lock forward progress. #}
++        {% if active_step != "discovery" and not step_2_complete %}
++          <a href="/installer/setup/discovery">1. Device Discovery</a>
++        {% else %}
++          1. Device Discovery
++        {% endif %}
++      </li>
+       <li{% if active_step == "roles" %} aria-current="step"{% endif %}>2. Role Assignment</li>
+       <li{% if active_step == "constraints" %} aria-current="step"{% endif %}>3. Constraints</li>
+       <li{% if active_step == "validation" %} aria-current="step"{% endif %}>4. Deployment Validation</li>
+diff --git a/src/open_ems/web/templates/installer/setup_roles_placeholder.html b/src/open_ems/web/templates/installer/setup_roles_placeholder.html
+deleted file mode 100644
+index ccf5264..0000000
+--- a/src/open_ems/web/templates/installer/setup_roles_placeholder.html
++++ /dev/null
+@@ -1,5 +0,0 @@
+-{% extends "installer/setup_layout.html" %}
+-
+-{% block setup_body %}
+-<p>Step 2 — Role Assignment will be implemented in Story 9.2.</p>
+-{% endblock %}
+diff --git a/tests/integration/test_migrations.py b/tests/integration/test_migrations.py
+index b1c7b3b..8e72e7b 100644
+--- a/tests/integration/test_migrations.py
++++ b/tests/integration/test_migrations.py
+@@ -67,13 +67,15 @@ async def test_migration_failure_triggers_system_exit() -> None:
+ 
+ 
+ def test_device_registry_schema_created(tmp_path: pathlib.Path) -> None:
+-    """Story 9.1 AC1: ``device_registry`` schema matches the migration."""
++    """Story 9.1 AC1 + Story 9.2 AC1: ``device_registry`` schema matches both
++    migrations (0009 + 0010)."""
+     db_path = tmp_path / "schema_test.db"
+     alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+     with sqlite3.connect(db_path) as conn:
+         columns = {
+             row[1]: row[2] for row in conn.execute("PRAGMA table_info(device_registry)").fetchall()
+         }
++        indexes = {row[1] for row in conn.execute("PRAGMA index_list(device_registry)").fetchall()}
+     assert columns == {
+         "id": "INTEGER",
+         "device_id": "TEXT",
+@@ -88,11 +90,15 @@ def test_device_registry_schema_created(tmp_path: pathlib.Path) -> None:
+         "first_seen_at": "TEXT",
+         "last_seen_at": "TEXT",
+         "installer_acknowledged_unvalidated_at": "TEXT",
++        "role": "TEXT",
++        "role_assigned_at": "TEXT",
+     }
++    assert "ix_device_registry_role" in indexes
+ 
+ 
+ def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
+-    """Story 9.1 AC8: ``wizard_state.session_id`` has ON DELETE CASCADE to sessions."""
++    """Story 9.1 AC8 + Story 9.2 AC2: ``wizard_state`` schema matches both
++    migrations and ``session_id`` keeps ON DELETE CASCADE."""
+     db_path = tmp_path / "wizard_state_test.db"
+     alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+     with sqlite3.connect(db_path) as conn:
+@@ -106,6 +112,9 @@ def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
+         "step_1_complete": "INTEGER",
+         "step_1_completed_at": "TEXT",
+         "last_scan_id": "TEXT",
++        "step_2_complete": "INTEGER",
++        "step_2_completed_at": "TEXT",
++        "step_2_acknowledged_gaps": "TEXT",
+         "created_at": "TEXT",
+         "updated_at": "TEXT",
+     }
+@@ -121,5 +130,39 @@ def test_migration_0009_round_trips(tmp_path: pathlib.Path) -> None:
+     """AC1 + dev-notes round-trip clause: upgrade head → downgrade -1 → upgrade head."""
+     db_url = f"sqlite:///{tmp_path / 'roundtrip.db'}"
+     alembic_command.upgrade(_make_cfg(db_url), "head")
++    # Story 9.2 added a second migration on top of 0009 — go back two steps
++    # so we exercise the 0009 round-trip and then re-stack 0010 on top.
++    alembic_command.downgrade(_make_cfg(db_url), "-2")
++    alembic_command.upgrade(_make_cfg(db_url), "head")
++
++
++def test_migration_0010_round_trips(tmp_path: pathlib.Path) -> None:
++    """Story 9.2 AC1: migration 0010 upgrades + downgrades cleanly."""
++    db_url = f"sqlite:///{tmp_path / 'roundtrip_0010.db'}"
++    alembic_command.upgrade(_make_cfg(db_url), "head")
+     alembic_command.downgrade(_make_cfg(db_url), "-1")
+     alembic_command.upgrade(_make_cfg(db_url), "head")
++
++
++def test_role_enum_values_stable_across_migrations(tmp_path: pathlib.Path) -> None:
++    """Story 9.2 R6 drift call-out: ``DeviceRole`` string values are part of
++    the public API of the DB schema and MUST NOT change without a migration."""
++    from open_ems.core.devices import DeviceRole
++
++    db_path = tmp_path / "enum_stable.db"
++    alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
++    expected = {"inverter", "battery", "ev_charger", "grid_meter"}
++    assert {member.value for member in DeviceRole} == expected
++    # The CHECK constraint must accept exactly these values.
++    with sqlite3.connect(db_path) as conn:
++        conn.execute("PRAGMA foreign_keys = OFF")
++        for value in expected:
++            conn.execute(
++                "INSERT INTO device_registry"
++                " (device_id, protocol, address, source, validated, first_seen_at,"
++                "  role, role_assigned_at)"
++                " VALUES (?, 'modbus_tcp', '10.0.0.1:502', 'manual_entry', 0,"
++                "         '2026-05-11T12:00:00+00:00', ?, '2026-05-11T12:00:00+00:00')",
++                (f"dev-{value}", value),
++            )
++        conn.commit()
+diff --git a/tests/integration/web/test_app_startup.py b/tests/integration/web/test_app_startup.py
+index a259222..e4e3ae2 100644
+--- a/tests/integration/web/test_app_startup.py
++++ b/tests/integration/web/test_app_startup.py
+@@ -140,6 +140,22 @@ async def test_lifespan_wires_story_9_1_services_on_app_state(
+         assert isinstance(app.state.manual_entry_service, ManualEntryService)
+ 
+ 
++async def test_lifespan_wires_story_9_2_role_assignment_service_on_app_state(
++    tmp_path: pathlib.Path,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Story 9.2: ``role_assignment_service`` is exposed on ``app.state``."""
++    from open_ems.services.role_assignment import RoleAssignmentService
++
++    structlog.reset_defaults()
++    db_path = str(tmp_path / "story_9_2_wiring.db")
++    _seed_lifespan_env(monkeypatch, db_path)
++
++    app = create_app()
++    async with lifespan(app):
++        assert isinstance(app.state.role_assignment_service, RoleAssignmentService)
++
++
+ # ── Story 9.0d (AC8): monthly-peak lifespan hydration ──────────────────────
+ 
+ 
+diff --git a/tests/integration/web/test_setup_discovery_e2e.py b/tests/integration/web/test_setup_discovery_e2e.py
+index c505979..5a2f709 100644
+--- a/tests/integration/web/test_setup_discovery_e2e.py
++++ b/tests/integration/web/test_setup_discovery_e2e.py
+@@ -61,7 +61,13 @@ _CREATE_DEVICE_REGISTRY = """
+         last_limitation_reason TEXT,
+         first_seen_at TEXT NOT NULL,
+         last_seen_at TEXT,
+-        installer_acknowledged_unvalidated_at TEXT
++        installer_acknowledged_unvalidated_at TEXT,
++        role TEXT
++            CHECK (role IS NULL
++                   OR role IN ('inverter', 'battery', 'ev_charger', 'grid_meter')),
++        role_assigned_at TEXT,
++        CHECK ((role IS NULL AND role_assigned_at IS NULL)
++               OR (role IS NOT NULL AND role_assigned_at IS NOT NULL))
+     )
+ """
+ 
+@@ -73,6 +79,10 @@ _CREATE_WIZARD_STATE = """
+             CHECK (step_1_complete IN (0, 1)),
+         step_1_completed_at TEXT,
+         last_scan_id TEXT,
++        step_2_complete INTEGER NOT NULL DEFAULT 0
++            CHECK (step_2_complete IN (0, 1)),
++        step_2_completed_at TEXT,
++        step_2_acknowledged_gaps TEXT,
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+@@ -163,11 +173,16 @@ async def e2e_app(
+         discovery_service=discovery,
+     )
+ 
++    from open_ems.services.role_assignment import RoleAssignmentService
++
++    role_assignment = RoleAssignmentService(device_repo=device_repo)
++
+     app = FastAPI()
+     app.state.device_repo = device_repo
+     app.state.wizard_state_repo = wizard_state_repo
+     app.state.discovery_orchestrator = orchestrator
+     app.state.manual_entry_service = manual_entry
++    app.state.role_assignment_service = role_assignment
+     app.include_router(setup_router)
+     app.add_middleware(CsrfMiddleware)
+     yield app, discovery
+diff --git a/tests/unit/services/test_manual_entry_probe.py b/tests/unit/services/test_manual_entry_probe.py
+index a51bcbc..4c5f5e2 100644
+--- a/tests/unit/services/test_manual_entry_probe.py
++++ b/tests/unit/services/test_manual_entry_probe.py
+@@ -38,7 +38,13 @@ _CREATE_DEVICE_REGISTRY = """
+         last_limitation_reason TEXT,
+         first_seen_at TEXT NOT NULL,
+         last_seen_at TEXT,
+-        installer_acknowledged_unvalidated_at TEXT
++        installer_acknowledged_unvalidated_at TEXT,
++        role TEXT
++            CHECK (role IS NULL
++                   OR role IN ('inverter', 'battery', 'ev_charger', 'grid_meter')),
++        role_assigned_at TEXT,
++        CHECK ((role IS NULL AND role_assigned_at IS NULL)
++               OR (role IS NOT NULL AND role_assigned_at IS NOT NULL))
+     )
+ """
+ 
+diff --git a/tests/unit/services/test_wizard_gate.py b/tests/unit/services/test_wizard_gate.py
+index 0df1a1c..cdc836b 100644
+--- a/tests/unit/services/test_wizard_gate.py
++++ b/tests/unit/services/test_wizard_gate.py
+@@ -29,7 +29,13 @@ _CREATE_DEVICE_REGISTRY = """
+         last_limitation_reason TEXT,
+         first_seen_at TEXT NOT NULL,
+         last_seen_at TEXT,
+-        installer_acknowledged_unvalidated_at TEXT
++        installer_acknowledged_unvalidated_at TEXT,
++        role TEXT
++            CHECK (role IS NULL
++                   OR role IN ('inverter', 'battery', 'ev_charger', 'grid_meter')),
++        role_assigned_at TEXT,
++        CHECK ((role IS NULL AND role_assigned_at IS NULL)
++               OR (role IS NOT NULL AND role_assigned_at IS NOT NULL))
+     )
+ """
+ 
+diff --git a/tests/unit/storage/repositories/test_device_repo.py b/tests/unit/storage/repositories/test_device_repo.py
+index c9d6616..a7298f8 100644
+--- a/tests/unit/storage/repositories/test_device_repo.py
++++ b/tests/unit/storage/repositories/test_device_repo.py
+@@ -18,6 +18,7 @@ from open_ems.storage.repositories.device_repo import (
+ )
+ 
+ # Schema mirrors migrations/versions/0009_add_device_registry_table.py
++# plus migrations/versions/0010_add_role_to_device_registry.py.
+ _CREATE_DEVICE_REGISTRY = """
+     CREATE TABLE device_registry (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+@@ -37,7 +38,13 @@ _CREATE_DEVICE_REGISTRY = """
+         last_limitation_reason TEXT,
+         first_seen_at TEXT NOT NULL,
+         last_seen_at TEXT,
+-        installer_acknowledged_unvalidated_at TEXT
++        installer_acknowledged_unvalidated_at TEXT,
++        role TEXT
++            CHECK (role IS NULL
++                   OR role IN ('inverter', 'battery', 'ev_charger', 'grid_meter')),
++        role_assigned_at TEXT,
++        CHECK ((role IS NULL AND role_assigned_at IS NULL)
++               OR (role IS NOT NULL AND role_assigned_at IS NOT NULL))
+     )
+ """
+ 
+@@ -329,3 +336,118 @@ async def test_list_all_orders_by_first_seen_then_device_id(
+     )
+     entries = await repo.list_all()
+     assert [e.device_id for e in entries] == ["dev-a", "dev-b"]
++
++
++# ---------------------------------------------------------------------------
++# Story 9.2 — assign_role + role / role_assigned_at paired invariant
++# ---------------------------------------------------------------------------
++
++
++async def test_assign_role_round_trip_none_to_role_to_none(
++    repo_with_conn: tuple[DeviceRepo, aiosqlite.Connection],
++) -> None:
++    """Setting → reassigning → clearing keeps role and role_assigned_at paired."""
++    from open_ems.core.devices import DeviceRole
++
++    repo, _ = repo_with_conn
++    await repo.upsert_manual(_manual(), first_seen_at=_NOW)
++    # None → DeviceRole.inverter
++    await repo.assign_role("inv-001", role=DeviceRole.inverter, assigned_at=_LATER)
++    entry = await repo.get_by_device_id("inv-001")
++    assert entry is not None
++    assert entry.role is DeviceRole.inverter
++    assert entry.role_assigned_at == _LATER
++
++    # Reassign → battery
++    later2 = datetime(2026, 5, 11, 13, 0, 0, tzinfo=UTC)
++    await repo.assign_role("inv-001", role=DeviceRole.battery, assigned_at=later2)
++    entry = await repo.get_by_device_id("inv-001")
++    assert entry is not None
++    assert entry.role is DeviceRole.battery
++    assert entry.role_assigned_at == later2
++
++    # DeviceRole → None
++    later3 = datetime(2026, 5, 11, 14, 0, 0, tzinfo=UTC)
++    await repo.assign_role("inv-001", role=None, assigned_at=later3)
++    entry = await repo.get_by_device_id("inv-001")
++    assert entry is not None
++    assert entry.role is None
++    assert entry.role_assigned_at is None
++
++
++async def test_assign_role_raises_when_device_missing(
++    repo_with_conn: tuple[DeviceRepo, aiosqlite.Connection],
++) -> None:
++    from open_ems.core.devices import DeviceRole
++
++    repo, _ = repo_with_conn
++    with pytest.raises(ValueError) as exc_info:
++        await repo.assign_role("missing", role=DeviceRole.inverter, assigned_at=_LATER)
++    assert str(exc_info.value) == "No device_registry row for device_id='missing'"
++
++
++def test_role_and_role_assigned_at_must_be_paired_pydantic_side() -> None:
++    """R3 #1 (Story 9.2): the impossible state is rejected at every read."""
++    from open_ems.core.devices import DeviceRole
++
++    with pytest.raises(ValidationError, match="role and role_assigned_at must both"):
++        DeviceRegistryEntry(
++            device_id="inv-001",
++            protocol="modbus_tcp",
++            address="10.0.0.1:502",
++            model=None,
++            firmware_version=None,
++            source="manual_entry",
++            validated=False,
++            last_capability_status=None,
++            last_limitation_reason=None,
++            first_seen_at=_NOW,
++            last_seen_at=None,
++            installer_acknowledged_unvalidated_at=None,
++            role=DeviceRole.inverter,
++            role_assigned_at=None,
++        )
++    with pytest.raises(ValidationError, match="role and role_assigned_at must both"):
++        DeviceRegistryEntry(
++            device_id="inv-001",
++            protocol="modbus_tcp",
++            address="10.0.0.1:502",
++            model=None,
++            firmware_version=None,
++            source="manual_entry",
++            validated=False,
++            last_capability_status=None,
++            last_limitation_reason=None,
++            first_seen_at=_NOW,
++            last_seen_at=None,
++            installer_acknowledged_unvalidated_at=None,
++            role=None,
++            role_assigned_at=_LATER,
++        )
++
++
++async def test_db_check_rejects_role_with_no_assigned_at(
++    repo_with_conn: tuple[DeviceRepo, aiosqlite.Connection],
++) -> None:
++    """Raw DB INSERT bypassing the repo: the CHECK constraint must reject."""
++    _, conn = repo_with_conn
++    with pytest.raises(aiosqlite.IntegrityError):
++        await conn.execute(
++            "INSERT INTO device_registry"
++            " (device_id, protocol, address, source, first_seen_at, role)"
++            " VALUES (?, 'modbus_tcp', '10.0.0.1:502', 'manual_entry', ?, 'inverter')",
++            ("orphan", _NOW.isoformat()),
++        )
++
++
++async def test_db_check_rejects_unknown_role_value(
++    repo_with_conn: tuple[DeviceRepo, aiosqlite.Connection],
++) -> None:
++    _, conn = repo_with_conn
++    with pytest.raises(aiosqlite.IntegrityError):
++        await conn.execute(
++            "INSERT INTO device_registry"
++            " (device_id, protocol, address, source, first_seen_at, role, role_assigned_at)"
++            " VALUES (?, 'modbus_tcp', '10.0.0.1:502', 'manual_entry', ?, 'banana', ?)",
++            ("bad", _NOW.isoformat(), _NOW.isoformat()),
++        )
+diff --git a/tests/unit/storage/repositories/test_wizard_state_repo.py b/tests/unit/storage/repositories/test_wizard_state_repo.py
+index b1d6fae..748bd67 100644
+--- a/tests/unit/storage/repositories/test_wizard_state_repo.py
++++ b/tests/unit/storage/repositories/test_wizard_state_repo.py
+@@ -19,6 +19,10 @@ _CREATE_WIZARD_STATE = """
+             CHECK (step_1_complete IN (0, 1)),
+         step_1_completed_at TEXT,
+         last_scan_id TEXT,
++        step_2_complete INTEGER NOT NULL DEFAULT 0
++            CHECK (step_2_complete IN (0, 1)),
++        step_2_completed_at TEXT,
++        step_2_acknowledged_gaps TEXT,
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL
+     )
+@@ -109,3 +113,122 @@ async def test_get_or_create_rejects_naive_now(
+     naive = datetime(2026, 5, 11, 12, 0, 0)
+     with pytest.raises(ValueError, match="must be timezone-aware UTC"):
+         await repo.get_or_create("session-x", now=naive)
++
++
++# ---------------------------------------------------------------------------
++# Story 9.2 — step_2 columns + acknowledged-gaps JSON encoding
++# ---------------------------------------------------------------------------
++
++
++async def test_record_acknowledged_gaps_round_trip_through_json(
++    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    await repo.get_or_create("session-x", now=_NOW)
++    gaps = frozenset({"battery_missing", "inverter_missing"})
++    await repo.record_acknowledged_gaps("session-x", gaps=gaps, now=_LATER)
++    state = await repo.get("session-x")
++    assert state is not None
++    assert state.step_2_acknowledged_gaps == gaps
++
++
++async def test_record_acknowledged_gaps_rejects_out_of_whitelist_label(
++    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
++) -> None:
++    """Repo-level defense-in-depth: an invalid label is rejected with the
++    exact-match message even if the route handler is bypassed.
++    """
++    repo, _ = repo_with_conn
++    await repo.get_or_create("session-x", now=_NOW)
++    with pytest.raises(ValueError) as exc_info:
++        await repo.record_acknowledged_gaps(
++            "session-x",
++            gaps=frozenset({"grid_meter_missing"}),
++            now=_LATER,
++        )
++    assert str(exc_info.value) == "acknowledged_gap_label_invalid: grid_meter_missing"
++
++
++async def test_record_acknowledged_gaps_rejects_unknown_label(
++    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    await repo.get_or_create("session-x", now=_NOW)
++    with pytest.raises(ValueError) as exc_info:
++        await repo.record_acknowledged_gaps(
++            "session-x",
++            gaps=frozenset({"banana_missing"}),
++            now=_LATER,
++        )
++    assert str(exc_info.value) == "acknowledged_gap_label_invalid: banana_missing"
++
++
++async def test_set_step_2_complete_is_idempotent_on_completed_at(
++    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
++) -> None:
++    """A second passing advance MUST preserve the first completion timestamp."""
++    repo, _ = repo_with_conn
++    await repo.get_or_create("session-x", now=_NOW)
++    await repo.set_step_2_complete("session-x", acknowledged_gaps=frozenset(), now=_LATER)
++    first = await repo.get("session-x")
++    assert first is not None
++    assert first.step_2_complete is True
++    assert first.step_2_completed_at == _LATER
++
++    later2 = datetime(2026, 5, 11, 14, 0, 0, tzinfo=UTC)
++    await repo.set_step_2_complete("session-x", acknowledged_gaps=frozenset(), now=later2)
++    second = await repo.get("session-x")
++    assert second is not None
++    assert second.step_2_complete is True
++    # ``step_2_completed_at`` is preserved from the first pass.
++    assert second.step_2_completed_at == _LATER
++    # But ``updated_at`` advances so audit can see the latest write.
++    assert second.updated_at == later2
++
++
++async def test_set_step_2_complete_persists_filtered_acknowledged_gaps(
++    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    await repo.get_or_create("session-x", now=_NOW)
++    gaps = frozenset({"battery_missing", "inverter_missing"})
++    await repo.set_step_2_complete("session-x", acknowledged_gaps=gaps, now=_LATER)
++    state = await repo.get("session-x")
++    assert state is not None
++    assert state.step_2_acknowledged_gaps == gaps
++
++
++async def test_set_step_2_complete_rejects_invalid_label(
++    repo_with_conn: tuple[WizardStateRepo, aiosqlite.Connection],
++) -> None:
++    repo, _ = repo_with_conn
++    await repo.get_or_create("session-x", now=_NOW)
++    with pytest.raises(ValueError) as exc_info:
++        await repo.set_step_2_complete(
++            "session-x",
++            acknowledged_gaps=frozenset({"grid_meter_missing"}),
++            now=_LATER,
++        )
++    assert str(exc_info.value) == "acknowledged_gap_label_invalid: grid_meter_missing"
++
++
++async def test_wizard_state_model_rejects_tampered_acknowledged_gaps() -> None:
++    """Pydantic-level defense-in-depth: a row with an unknown label fails
++    loud at every read, not only on write.
++    """
++    from pydantic import ValidationError
++
++    from open_ems.storage.repositories.wizard_state_repo import WizardState
++
++    with pytest.raises(ValidationError, match="unknown labels"):
++        WizardState(
++            session_id="session-x",
++            step_1_complete=True,
++            step_1_completed_at=_NOW,
++            last_scan_id=None,
++            step_2_complete=False,
++            step_2_completed_at=None,
++            step_2_acknowledged_gaps=frozenset({"banana_missing"}),
++            created_at=_NOW,
++            updated_at=_NOW,
++        )
+diff --git a/tests/unit/web/test_setup_routes.py b/tests/unit/web/test_setup_routes.py
+index ab9d9f2..7c155b8 100644
+--- a/tests/unit/web/test_setup_routes.py
++++ b/tests/unit/web/test_setup_routes.py
+@@ -54,7 +54,13 @@ _CREATE_DEVICE_REGISTRY = """
+         last_limitation_reason TEXT,
+         first_seen_at TEXT NOT NULL,
+         last_seen_at TEXT,
+-        installer_acknowledged_unvalidated_at TEXT
++        installer_acknowledged_unvalidated_at TEXT,
++        role TEXT
++            CHECK (role IS NULL
++                   OR role IN ('inverter', 'battery', 'ev_charger', 'grid_meter')),
++        role_assigned_at TEXT,
++        CHECK ((role IS NULL AND role_assigned_at IS NULL)
++               OR (role IS NOT NULL AND role_assigned_at IS NOT NULL))
+     )
+ """
+ 
+@@ -66,6 +72,10 @@ _CREATE_WIZARD_STATE = """
+             CHECK (step_1_complete IN (0, 1)),
+         step_1_completed_at TEXT,
+         last_scan_id TEXT,
++        step_2_complete INTEGER NOT NULL DEFAULT 0
++            CHECK (step_2_complete IN (0, 1)),
++        step_2_completed_at TEXT,
++        step_2_acknowledged_gaps TEXT,
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL,
+         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+@@ -138,12 +148,16 @@ async def app_with_services(
+         device_repo=device_repo,
+         discovery_service=discovery,
+     )
++    from open_ems.services.role_assignment import RoleAssignmentService
++
++    role_assignment = RoleAssignmentService(device_repo=device_repo)
+ 
+     app = FastAPI()
+     app.state.device_repo = device_repo
+     app.state.wizard_state_repo = wizard_state_repo
+     app.state.discovery_orchestrator = orchestrator
+     app.state.manual_entry_service = manual_entry
++    app.state.role_assignment_service = role_assignment
+     app.include_router(setup_router)
+     app.add_middleware(CsrfMiddleware)
+     yield app
+@@ -434,14 +448,19 @@ async def test_advance_passing_gate_sets_step_1_complete(
+     assert state.step_1_completed_at is not None
+ 
+ 
+-async def test_roles_placeholder_renders_step_2_pending_message(
++async def test_roles_page_replaces_placeholder_with_real_step_2(
+     app_with_services: FastAPI,
+ ) -> None:
++    """Story 9.2: the placeholder is gone — the real Step-2 page renders the
++    devices-and-roles section and the gap panel, even on an empty registry.
++    """
+     raw_token, _ = await _create_installer_session()
+     client = TestClient(app_with_services, base_url="https://test", follow_redirects=False)
+     response = client.get("/installer/setup/roles", cookies={"session": raw_token})
+     assert response.status_code == 200
+-    assert "Story 9.2" in response.text
++    assert "Story 9.2" not in response.text
++    assert "Devices and roles" in response.text
++    assert "Configuration validity" in response.text
+ 
+ 
+ # ---------------------------------------------------------------------------

@@ -1,0 +1,7 @@
+{# Story 9.2 — inline error fragment surfaced from the assign / acknowledge
+   routes on rejection. The ``reason`` carries the exact-match contract
+   string so the integration tests can assert on it without substring use.
+#}
+<div class="error-banner" role="alert">
+  {{ reason }}
+</div>

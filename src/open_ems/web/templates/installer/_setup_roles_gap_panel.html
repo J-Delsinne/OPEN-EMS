@@ -1,0 +1,93 @@
+{# Story 9.2 — Step 2 configuration validity panel.
+
+   Variables:
+     blocking_gaps     — tuple[RoleGap, ...] (severity = hard_block)
+     warning_gaps      — tuple[RoleGap, ...] (severity = acknowledgeable_warn, NOT yet acknowledged)
+     acknowledged_gaps — frozenset[str] — labels that ARE in the acknowledged set
+     conflicts         — tuple[RoleConflict, ...]
+     csrf_token        — string
+
+   Notes:
+     - The hard-block notice wraps in ``aria-live="polite"`` so screen
+       readers announce its appearance (AC8).
+     - The whitelist of acknowledgeable labels is enforced server-side; the
+       template only renders the labels the gate emits.
+#}
+<section
+  aria-labelledby="gap-panel-heading"
+  class="gap-panel"
+>
+  <h2 id="gap-panel-heading">Configuration validity</h2>
+
+  {% set _WARN_TEXT = {
+    "battery_missing": "No battery assigned — battery dispatch optimization and reserve enforcement are unavailable.",
+    "inverter_missing": "No inverter assigned — solar production data and PV-driven optimization are unavailable.",
+    "ev_charger_missing": "No EV charger assigned — EV scheduling and charge-rate control are unavailable."
+  } %}
+
+  {% if conflicts %}
+    {% for conflict in conflicts %}
+      <div class="error-banner conflict-notice" role="alert">
+        Duplicate {{ conflict.role.value }} assignment:
+        {{ conflict.device_ids | join(", ") }}.
+        Change one of these to a different role before continuing.
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if blocking_gaps %}
+    {% for gap in blocking_gaps %}
+      <div class="error-banner hard-block-notice" aria-live="polite">
+        {% if gap.role.value == "grid_meter" %}
+          Grid meter is required for peak limiting and safety behavior — this cannot be bypassed in v1.
+        {% else %}
+          {{ gap.role.value }} is required and cannot be bypassed.
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if warning_gaps %}
+    {% for gap in warning_gaps %}
+      <div class="warn-notice" role="status">
+        <p>{{ _WARN_TEXT.get(gap.label, gap.role.value ~ " is missing.") }}</p>
+        <form
+          method="post"
+          action="/installer/setup/roles/acknowledge-gap"
+          hx-post="/installer/setup/roles/acknowledge-gap"
+          hx-target="#gap-panel-region"
+          hx-swap="innerHTML"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="action" value="acknowledge">
+          <input type="hidden" name="gap_label" value="{{ gap.label }}">
+          <button type="submit">Acknowledge</button>
+        </form>
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if acknowledged_gaps %}
+    {% for label in acknowledged_gaps | sort %}
+      <div class="acknowledged-notice" role="status">
+        <p>Acknowledged: {{ _WARN_TEXT.get(label, label) }}</p>
+        <form
+          method="post"
+          action="/installer/setup/roles/acknowledge-gap"
+          hx-post="/installer/setup/roles/acknowledge-gap"
+          hx-target="#gap-panel-region"
+          hx-swap="innerHTML"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="action" value="revoke">
+          <input type="hidden" name="gap_label" value="{{ label }}">
+          <button type="submit">Revoke acknowledgment</button>
+        </form>
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  {% if not conflicts and not blocking_gaps and not warning_gaps and not acknowledged_gaps %}
+    <p class="all-clear" role="status">All required roles are assigned with no conflicts.</p>
+  {% endif %}
+</section>

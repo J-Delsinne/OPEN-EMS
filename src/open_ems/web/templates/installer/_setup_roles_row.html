@@ -1,0 +1,61 @@
+{# Story 9.2 — single role-assignment row.
+
+   Variables:
+     row        — RoleAssignmentRow (device_id, model, role, conflicting_device_ids)
+     csrf_token — string
+#}
+<li
+  class="role-row"
+  id="role-row-{{ row.device_id }}"
+  data-device-id="{{ row.device_id }}"
+>
+  <strong>{{ row.device_id }}</strong>
+
+  {# R6 inheritance from Story 9.1: re-resolve the capability profile at
+     render time so a code-side registry update is reflected immediately. #}
+  {% set current_profile = get_profile(row.device_id, row.model or "") %}
+  {% if current_profile.capability_status == "full" %}
+    <span class="badge badge-full" role="status">FULL</span>
+  {% elif current_profile.capability_status == "reduced" %}
+    <span class="badge badge-reduced" role="status">REDUCED</span>
+    {% if current_profile.limitation_reason %}
+      <span class="limitation-reason">— {{ current_profile.limitation_reason }}</span>
+    {% endif %}
+  {% else %}
+    <span class="badge badge-unvalidated" role="status">UNSUPPORTED</span>
+  {% endif %}
+
+  <form
+    method="post"
+    action="/installer/setup/roles/{{ row.device_id }}/assign"
+    hx-post="/installer/setup/roles/{{ row.device_id }}/assign"
+    hx-target="#roles-list-region"
+    hx-swap="innerHTML"
+    class="role-picker-form"
+  >
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="visually-hidden" for="role-select-{{ row.device_id }}">
+      Role for {{ row.device_id }}
+    </label>
+    <select
+      id="role-select-{{ row.device_id }}"
+      name="role"
+      aria-label="Role for {{ row.device_id }}"
+      onchange="this.form.requestSubmit()"
+    >
+      <option value=""{% if row.role is none %} selected{% endif %}>— Unassigned —</option>
+      <option value="inverter"{% if row.role and row.role.value == "inverter" %} selected{% endif %}>Inverter</option>
+      <option value="battery"{% if row.role and row.role.value == "battery" %} selected{% endif %}>Battery</option>
+      <option value="ev_charger"{% if row.role and row.role.value == "ev_charger" %} selected{% endif %}>EV Charger</option>
+      <option value="grid_meter"{% if row.role and row.role.value == "grid_meter" %} selected{% endif %}>Grid Meter</option>
+    </select>
+    <noscript><button type="submit">Apply</button></noscript>
+  </form>
+
+  {% if row.conflicting_device_ids %}
+    <span class="conflict-indicator" role="alert">
+      Another device is already assigned this role:
+      {{ row.conflicting_device_ids | join(", ") }}
+    </span>
+  {% endif %}
+</li>

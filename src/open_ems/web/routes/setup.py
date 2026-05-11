@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from open_ems.adapters.capabilities import get_profile
-from open_ems.core.devices import CapabilityStatus
+from open_ems.core.devices import CapabilityStatus, DeviceRole
 from open_ems.services.device_discovery import (
     DeviceDiscoveryOrchestrator,
     DSMRScanTarget,
@@ -35,7 +35,12 @@ from open_ems.services.manual_entry import (
     ManualEntryFormRequest,
     ManualEntryService,
 )
+from open_ems.services.role_assignment import (
+    _VALID_GAP_LABELS,
+    RoleAssignmentService,
+)
 from open_ems.services.wizard_gate import WizardGateService
+from open_ems.storage.database import get_write_lock
 from open_ems.storage.repositories.device_repo import (
     CapabilityStatusLiteral,
     DeviceRegistryEntry,
@@ -102,6 +107,13 @@ def _manual_entry_service(request: Request) -> ManualEntryService:
     svc = getattr(request.app.state, "manual_entry_service", None)
     if not isinstance(svc, ManualEntryService):
         raise HTTPException(status_code=503, detail="Manual entry service unavailable")
+    return svc
+
+
+def _role_assignment_service(request: Request) -> RoleAssignmentService:
+    svc = getattr(request.app.state, "role_assignment_service", None)
+    if not isinstance(svc, RoleAssignmentService):
+        raise HTTPException(status_code=503, detail="Role assignment service unavailable")
     return svc
 
 
@@ -390,18 +402,266 @@ async def post_advance_to_step_2(
 
 
 @router.get("/installer/setup/roles", response_class=HTMLResponse)
-async def get_roles_placeholder(
+async def get_roles_page(
     request: Request,
     user: InstallerUser = Depends(require_installer),  # noqa: B008
-) -> HTMLResponse:
-    """Story 9.2 placeholder. Replaced by the real role-assignment page in 9.2."""
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
+) -> Response:
+    now = datetime.now(UTC)
+    state = await wizard_repo.get_or_create(user.session_id, now=now)
+    # Step-1 gate: deep-linking past discovery (e.g., bookmark to /roles) must
+    # bounce back. The discovery handler is the only writer of step_1_complete=1.
+    if not state.step_1_complete:
+        return RedirectResponse(url="/installer/setup/discovery", status_code=302)
+    gate = await role_svc.evaluate_gate(acknowledged_gaps=state.step_2_acknowledged_gaps)
+    snapshot = await role_svc.evaluate_assignments()
     return _templates.TemplateResponse(
         request,
-        "installer/setup_roles_placeholder.html",
+        "installer/setup_roles.html",
         {
             "csrf_token": user.csrf_token,
             "title": "Role Assignment",
             "active_step": "roles",
+            "step_2_complete": state.step_2_complete,
+            "assignments": snapshot.assignments,
+            "conflicts": gate.conflicts,
+            "blocking_gaps": gate.blocking_gaps,
+            "warning_gaps": gate.unacknowledged_warnings,
+            "acknowledged_gaps": gate.effective_acknowledged_gaps,
+            "gate_can_advance": gate.can_advance,
+        },
+    )
+
+
+@router.post("/installer/setup/roles/{device_id}/assign", response_class=HTMLResponse)
+async def post_assign_role(
+    request: Request,
+    device_id: str,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    device_repo: DeviceRepo = Depends(_device_repo),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
+    role: str = Form(default=""),
+    csrf_token: str = Form(default=""),
+) -> HTMLResponse:
+    _ = csrf_token
+    resolved: DeviceRole | None
+    role_clean = role.strip()
+    if role_clean == "":
+        resolved = None
+    else:
+        try:
+            resolved = DeviceRole(role_clean)
+        except ValueError:
+            return _templates.TemplateResponse(
+                request,
+                "installer/_setup_roles_error.html",
+                {
+                    "reason": f"role_invalid: {role_clean!r}",
+                },
+                status_code=400,
+            )
+    try:
+        await device_repo.assign_role(device_id, role=resolved, assigned_at=datetime.now(UTC))
+    except ValueError:
+        # HTMX-targeted route: keep the error envelope consistent with the
+        # invalid-role branch above (HTML fragment, not FastAPI default JSON).
+        return _templates.TemplateResponse(
+            request,
+            "installer/_setup_roles_error.html",
+            {"reason": f"device_not_found: {device_id!r}"},
+            status_code=404,
+        )
+
+    if resolved is None:
+        logger.info("role_unassigned", component="installer_setup", device_id=device_id)
+    else:
+        logger.info(
+            "role_assigned",
+            component="installer_setup",
+            device_id=device_id,
+            role=resolved.value,
+        )
+
+    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    gate = await role_svc.evaluate_gate(acknowledged_gaps=state.step_2_acknowledged_gaps)
+    snapshot = await role_svc.evaluate_assignments()
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_roles_list.html",
+        {
+            "csrf_token": user.csrf_token,
+            "assignments": snapshot.assignments,
+            "conflicts": gate.conflicts,
+            "blocking_gaps": gate.blocking_gaps,
+            "warning_gaps": gate.unacknowledged_warnings,
+            "acknowledged_gaps": gate.effective_acknowledged_gaps,
+            "gate_can_advance": gate.can_advance,
+            "gap_panel_oob": True,
+        },
+    )
+
+
+@router.post("/installer/setup/roles/acknowledge-gap", response_class=HTMLResponse)
+async def post_acknowledge_gap(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
+    action: str = Form(default="acknowledge"),
+    gap_label: str = Form(...),
+    csrf_token: str = Form(default=""),
+) -> HTMLResponse:
+    _ = csrf_token
+    label_clean = gap_label.strip()
+    action_clean = action.strip().lower()
+    if action_clean not in {"acknowledge", "revoke"}:
+        return _templates.TemplateResponse(
+            request,
+            "installer/_setup_roles_error.html",
+            {"reason": f"action_invalid: {action_clean!r}"},
+            status_code=400,
+        )
+    if label_clean not in _VALID_GAP_LABELS:
+        # AC5: 'grid_meter_missing' is deliberately not in the whitelist —
+        # surface the canonical-shape rejection.
+        if label_clean == "grid_meter_missing":
+            return _templates.TemplateResponse(
+                request,
+                "installer/_setup_roles_error.html",
+                {"reason": "gap_label_not_acknowledgeable: grid_meter_missing"},
+                status_code=400,
+            )
+        return _templates.TemplateResponse(
+            request,
+            "installer/_setup_roles_error.html",
+            {"reason": f"gap_label_invalid: {label_clean!r}"},
+            status_code=400,
+        )
+
+    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    current = set(state.step_2_acknowledged_gaps)
+    if action_clean == "acknowledge":
+        current.add(label_clean)
+        logger.info(
+            "gap_acknowledged",
+            component="installer_setup",
+            session_id=user.session_id,
+            gap_label=label_clean,
+        )
+    else:
+        current.discard(label_clean)
+        logger.info(
+            "gap_revoked",
+            component="installer_setup",
+            session_id=user.session_id,
+            gap_label=label_clean,
+        )
+    await wizard_repo.record_acknowledged_gaps(
+        user.session_id,
+        gaps=frozenset(current),
+        now=datetime.now(UTC),
+    )
+    gate = await role_svc.evaluate_gate(acknowledged_gaps=frozenset(current))
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_roles_gap_panel.html",
+        {
+            "csrf_token": user.csrf_token,
+            "conflicts": gate.conflicts,
+            "blocking_gaps": gate.blocking_gaps,
+            "warning_gaps": gate.unacknowledged_warnings,
+            "acknowledged_gaps": gate.effective_acknowledged_gaps,
+            "gate_can_advance": gate.can_advance,
+        },
+    )
+
+
+@router.post("/installer/setup/roles/advance")
+async def post_advance_to_step_3(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    role_svc: RoleAssignmentService = Depends(_role_assignment_service),  # noqa: B008
+    csrf_token: str = Form(default=""),
+) -> Response:
+    _ = csrf_token
+    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    gate = await role_svc.evaluate_gate(acknowledged_gaps=state.step_2_acknowledged_gaps)
+    if not gate.can_advance:
+        return _templates.TemplateResponse(
+            request,
+            "installer/_setup_roles_error_banner.html",
+            {
+                "csrf_token": user.csrf_token,
+                "conflicts": gate.conflicts,
+                "blocking_gaps": gate.blocking_gaps,
+                "warning_gaps": gate.unacknowledged_warnings,
+            },
+            status_code=400,
+        )
+    # TOCTOU close (Story 9.2 review patch): hold the process-wide write
+    # lock across the second gate evaluation AND the persistence call.
+    # DeviceRepo.assign_role and the acknowledgment write both take the
+    # same lock, so a concurrent role change between the optimistic check
+    # above and the lock acquisition here cannot land between the
+    # re-evaluation and the UPDATE. AC6 step 4: persist the filtered
+    # acknowledged-gaps set inside the same write that flips
+    # step_2_complete=1 (idempotent on a re-click — the repo preserves the
+    # original completed_at).
+    async with get_write_lock():
+        refreshed = await wizard_repo.get(user.session_id) or state
+        fresh_gate = await role_svc.evaluate_gate(
+            acknowledged_gaps=refreshed.step_2_acknowledged_gaps
+        )
+        if not fresh_gate.can_advance:
+            return _templates.TemplateResponse(
+                request,
+                "installer/_setup_roles_error_banner.html",
+                {
+                    "csrf_token": user.csrf_token,
+                    "conflicts": fresh_gate.conflicts,
+                    "blocking_gaps": fresh_gate.blocking_gaps,
+                    "warning_gaps": fresh_gate.unacknowledged_warnings,
+                },
+                status_code=400,
+            )
+        await wizard_repo.set_step_2_complete_locked(
+            user.session_id,
+            acknowledged_gaps=fresh_gate.effective_acknowledged_gaps,
+            now=datetime.now(UTC),
+        )
+        effective_for_log = fresh_gate.effective_acknowledged_gaps
+    logger.info(
+        "step_2_completed",
+        component="installer_setup",
+        session_id=user.session_id,
+        acknowledged_gaps=sorted(effective_for_log),
+    )
+    return RedirectResponse(url="/installer/setup/constraints", status_code=302)
+
+
+@router.get("/installer/setup/constraints", response_class=HTMLResponse)
+async def get_constraints_placeholder(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+) -> HTMLResponse:
+    """Story 9.3 placeholder. Replaced by the real Step 3 page in 9.3."""
+    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    return _templates.TemplateResponse(
+        request,
+        "installer/setup_constraints_placeholder.html",
+        {
+            "csrf_token": user.csrf_token,
+            "title": "Constraints",
+            "active_step": "constraints",
+            # Surface step_2_complete so the layout's back-link logic
+            # (active_step != "discovery" and not step_2_complete) sees the
+            # truthy value and correctly hides the back-link once Step 2 is
+            # finalized. Without this the back-link incorrectly renders.
+            "step_2_complete": state.step_2_complete,
         },
     )
 

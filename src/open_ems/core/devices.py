@@ -82,6 +82,18 @@ class DeviceRole(enum.StrEnum):
     grid_meter = "grid_meter"
 
 
+# Story 9.2 AC3 — the authoritative role-gap acknowledgment whitelist. ONE
+# definition, four readers (RoleAssignmentService, WizardStateRepo,
+# WizardState model_validator, the acknowledge-gap route). ``grid_meter``
+# is deliberately excluded — the grid meter is a hard block at Step 2
+# (AC5) and acknowledging it would defeat the safety property. The
+# constant lives in ``core.devices`` so storage and services can both
+# import it without crossing layers.
+_VALID_GAP_LABELS: frozenset[str] = frozenset(
+    {"battery_missing", "inverter_missing", "ev_charger_missing"}
+)
+
+
 class InverterState(BaseModel):
     """Normalized domain state for a PV inverter."""
 

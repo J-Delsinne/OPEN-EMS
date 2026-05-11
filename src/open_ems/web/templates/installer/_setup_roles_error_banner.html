@@ -1,0 +1,32 @@
+{# Story 9.2 — advance-route failure banner.
+
+   Variables:
+     conflicts      — tuple[RoleConflict, ...]
+     blocking_gaps  — tuple[RoleGap, ...]
+     warning_gaps   — tuple[RoleGap, ...] (unacknowledged warns)
+#}
+<div class="error-banner" role="alert">
+  <p><strong>Cannot continue to Step 3.</strong> Resolve the following:</p>
+  <ul>
+    {% for conflict in conflicts %}
+      <li>
+        Duplicate {{ conflict.role.value }} assignment:
+        {{ conflict.device_ids | join(", ") }}.
+      </li>
+    {% endfor %}
+    {% for gap in blocking_gaps %}
+      <li>
+        {% if gap.role.value == "grid_meter" %}
+          Grid meter is required for peak limiting and safety behavior — this cannot be bypassed in v1.
+        {% else %}
+          {{ gap.role.value }} is required and cannot be bypassed.
+        {% endif %}
+      </li>
+    {% endfor %}
+    {% for gap in warning_gaps %}
+      <li>
+        Acknowledge the missing {{ gap.role.value }} before continuing.
+      </li>
+    {% endfor %}
+  </ul>
+</div>

@@ -28,6 +28,7 @@ from open_ems.services.device_discovery import DeviceDiscoveryOrchestrator
 from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.services.manual_entry import ManualEntryService
 from open_ems.services.readiness import mark_ready, sd_notify
+from open_ems.services.role_assignment import RoleAssignmentService
 from open_ems.services.time_sync import check_clock
 from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
@@ -315,13 +316,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             device_repo=device_repo,
             discovery_service=discovery_service,
         )
+        # Step 4e (Story 9.2): construct the role-assignment evaluator. The
+        # object is stateless; no DB I/O at construction (first read happens on
+        # the first installer request, post-readiness).
+        role_assignment_service = RoleAssignmentService(device_repo=device_repo)
         app.state.device_repo = device_repo
         app.state.wizard_state_repo = wizard_state_repo
         app.state.discovery_orchestrator = discovery_orchestrator
         app.state.manual_entry_service = manual_entry_service
+        app.state.role_assignment_service = role_assignment_service
         logger.info("device_registry_ready", component="startup")
         logger.info("wizard_state_ready", component="startup")
         logger.info("discovery_orchestrator_ready", component="startup")
+        logger.info("role_assignment_service_ready", component="startup")
 
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)

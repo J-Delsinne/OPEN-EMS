@@ -25,7 +25,16 @@
   <h1>{{ title }}</h1>
   <nav aria-label="Setup wizard progress">
     <ol class="wizard-step-indicator">
-      <li{% if active_step == "discovery" %} aria-current="step"{% endif %}>1. Device Discovery</li>
+      <li{% if active_step == "discovery" %} aria-current="step"{% endif %}>
+        {# Back-navigation hyperlink only when Step 2 is not yet complete (UX
+           spec line 1470 — "Browser back works"). Once Step 2 is finalized
+           we lock forward progress. #}
+        {% if active_step != "discovery" and not step_2_complete %}
+          <a href="/installer/setup/discovery">1. Device Discovery</a>
+        {% else %}
+          1. Device Discovery
+        {% endif %}
+      </li>
       <li{% if active_step == "roles" %} aria-current="step"{% endif %}>2. Role Assignment</li>
       <li{% if active_step == "constraints" %} aria-current="step"{% endif %}>3. Constraints</li>
       <li{% if active_step == "validation" %} aria-current="step"{% endif %}>4. Deployment Validation</li>

@@ -1,0 +1,21 @@
+{% extends "installer/setup_layout.html" %}
+
+{% block setup_body %}
+<section aria-labelledby="roles-heading">
+  <h2 id="roles-heading">Devices and roles</h2>
+  <div id="roles-list-region">
+    {% include "installer/_setup_roles_list.html" %}
+  </div>
+</section>
+
+<div id="gap-panel-region">
+  {% include "installer/_setup_roles_gap_panel.html" %}
+</div>
+
+<section aria-labelledby="advance-heading">
+  <h2 id="advance-heading">Continue</h2>
+  <div id="advance-region">
+    {% include "installer/_setup_roles_advance.html" %}
+  </div>
+</section>
+{% endblock %}

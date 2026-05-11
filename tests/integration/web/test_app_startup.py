@@ -140,6 +140,22 @@ async def test_lifespan_wires_story_9_1_services_on_app_state(
         assert isinstance(app.state.manual_entry_service, ManualEntryService)
 
 
+async def test_lifespan_wires_story_9_2_role_assignment_service_on_app_state(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 9.2: ``role_assignment_service`` is exposed on ``app.state``."""
+    from open_ems.services.role_assignment import RoleAssignmentService
+
+    structlog.reset_defaults()
+    db_path = str(tmp_path / "story_9_2_wiring.db")
+    _seed_lifespan_env(monkeypatch, db_path)
+
+    app = create_app()
+    async with lifespan(app):
+        assert isinstance(app.state.role_assignment_service, RoleAssignmentService)
+
+
 # ── Story 9.0d (AC8): monthly-peak lifespan hydration ──────────────────────
 
 

@@ -1,0 +1,18 @@
+{# Story 9.2 — Step 2 advance form.
+
+   Variables:
+     gate_can_advance — bool (server-rendered disabled state, AC8)
+     csrf_token       — string
+#}
+<form
+  method="post"
+  action="/installer/setup/roles/advance"
+>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% if gate_can_advance %}
+    <button type="submit">Continue to Step 3</button>
+  {% else %}
+    <button type="submit" disabled aria-disabled="true">Continue to Step 3</button>
+    <p>Resolve the items above before continuing.</p>
+  {% endif %}
+</form>

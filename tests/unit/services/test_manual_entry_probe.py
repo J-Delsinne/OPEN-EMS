@@ -38,7 +38,13 @@ _CREATE_DEVICE_REGISTRY = """
         last_limitation_reason TEXT,
         first_seen_at TEXT NOT NULL,
         last_seen_at TEXT,
-        installer_acknowledged_unvalidated_at TEXT
+        installer_acknowledged_unvalidated_at TEXT,
+        role TEXT
+            CHECK (role IS NULL
+                   OR role IN ('inverter', 'battery', 'ev_charger', 'grid_meter')),
+        role_assigned_at TEXT,
+        CHECK ((role IS NULL AND role_assigned_at IS NULL)
+               OR (role IS NOT NULL AND role_assigned_at IS NOT NULL))
     )
 """
 
