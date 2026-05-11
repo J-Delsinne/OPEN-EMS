@@ -1,0 +1,18 @@
+{% extends "installer/setup_layout.html" %}
+{# Story 9.4 — Step 4 main page (replaces setup_validation_placeholder.html). #}
+
+{% block setup_body %}
+<section aria-labelledby="validation-heading">
+  <h2 id="validation-heading">Deployment validation</h2>
+  <p>
+    Run the six readiness checks against the live system. Validation never
+    issues device commands — only read-only protocol probes.
+  </p>
+
+  {# P11 — the included fragment already wraps its content in a
+     ``<div id="validation-region">``; do not double-wrap. The fragment is
+     also returned as a standalone HTMX response, so the id must live on
+     the fragment itself. #}
+  {% include "installer/_setup_validation_result.html" %}
+</section>
+{% endblock %}

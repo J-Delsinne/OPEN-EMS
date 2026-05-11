@@ -27,6 +27,7 @@ import structlog
 from pydantic import ValidationError
 
 from open_ems.core.constraints import (
+    ActiveConstraints,
     ActiveConstraintsInput,
     ConstraintActivationResult,
     ConstraintCheckResult,
@@ -35,6 +36,7 @@ from open_ems.core.constraints import (
     ConstraintValidationReport,
 )
 from open_ems.core.devices import BatteryState, DeviceRole, GridMeterState
+from open_ems.core.state import SystemSnapshot
 from open_ems.core.state_store import StateStore
 from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.storage.database import get_write_lock
@@ -630,113 +632,42 @@ class ConstraintsService:
             return tuple(warns)
         return (ConstraintCheckResult(name="capability_strategy", status="pass"),)
 
-    def _check_safety_pre(self, draft: ConstraintDraft) -> tuple[ConstraintCheckResult, ...]:
-        """Reads ``StateStore.get_snapshot()`` (in-memory; no DB I/O).
+    def evaluate_safety_pre_check(
+        self,
+        constraints: ActiveConstraints,
+        snapshot: SystemSnapshot,
+    ) -> tuple[ConstraintCheckResult, ...]:
+        """Story 9.4 reuse seam — public wrapper around ``_check_safety_pre``.
 
-        Produces FAIL when ``peak_limit_kw < 0.5`` (structural — no installer
-        flow recovers from a sub-0.5 kW limit). Continues to evaluate WARN
-        conditions even when FAIL fires so the installer sees every safety
-        condition this activation would trip; fixing one and re-validating
-        does not surface a fresh batch the next round-trip (R2P6 — preserves
-        P16's multi-WARN intent on the FAIL path too).
+        Lets ``DeploymentValidationService`` evaluate the safety pre-check
+        against the *currently-active* constraints + a snapshot the caller
+        already captured (D4 — the deployment-validation run captures one
+        StateStore snapshot at run start and threads it through every check
+        so the six checks observe a consistent state moment).
 
-        Story 9.3 P16 — multiple safety conditions can co-trip in one
-        activation (e.g. reserve floor above SoC AND grid currently over the
-        new peak limit). Each surfaces as its own row. R2P6 — the structural
-        FAIL no longer early-returns: it joins the result tuple alongside any
-        WARNs.
-
-        R2P11 — ``BatteryState.soc_percent`` can be ``NaN`` (sensor read error
-        before staleness kicks in). ``NaN > x`` evaluates ``False``, which
-        would suppress the reserve-floor WARN even though the soc is
-        effectively unknown. Treat NaN as "state not yet known" and surface
-        the P15 unknown-state WARN explicitly.
+        Read-only: no DB writes, no state mutation. Safe to call from any
+        thread that holds a reference to this service instance.
         """
-        results: list[ConstraintCheckResult] = []
-        if draft.peak_limit_kw < _PEAK_LIMIT_FAIL_THRESHOLD_KW:
-            results.append(
-                ConstraintCheckResult(
-                    name="safety_pre_check",
-                    status="fail",
-                    field="peak_limit_kw",
-                    message=("Peak limit below 0.5 kW would block all grid imports indefinitely."),
-                )
-            )
-        snapshot = self._state_store.get_snapshot()
-        battery_state_known = isinstance(snapshot.battery, BatteryState) and not math.isnan(
-            snapshot.battery.soc_percent
+        return _check_safety_pre_pure(
+            peak_limit_kw=constraints.peak_limit_kw,
+            battery_reserve_floor_percent=constraints.battery_reserve_floor_percent,
+            snapshot=snapshot,
         )
-        if battery_state_known:
-            # mypy: narrowing through the isinstance check is preserved.
-            assert isinstance(snapshot.battery, BatteryState)
-            if draft.battery_reserve_floor_percent > snapshot.battery.soc_percent:
-                results.append(
-                    ConstraintCheckResult(
-                        name="safety_pre_check",
-                        status="warn",
-                        field="battery_reserve_floor_percent",
-                        message=(
-                            f"Battery is currently at {snapshot.battery.soc_percent:.1f}%"
-                            f" SoC. Activating a reserve floor of"
-                            f" {draft.battery_reserve_floor_percent:.1f}% would"
-                            " immediately block discharge until SoC rises above"
-                            " the floor."
-                        ),
-                    )
-                )
-        elif draft.battery_reserve_floor_percent > 0.0:
-            # P15 + R2P11 — battery state not yet published OR sensor returned
-            # NaN. Surface the unknown-state WARN so the installer activates
-            # eyes-open rather than silently entering blocked-discharge once
-            # the battery reports a real SoC below the floor.
-            results.append(
-                ConstraintCheckResult(
-                    name="safety_pre_check",
-                    status="warn",
-                    field="battery_reserve_floor_percent",
-                    message=(
-                        "Battery state is not yet known. The reserve floor will"
-                        " take effect once the battery reports SoC; if current"
-                        " SoC is below the floor, discharge will be blocked"
-                        " immediately."
-                    ),
-                )
-            )
-        if isinstance(snapshot.grid_meter, GridMeterState) and not math.isnan(
-            snapshot.grid_meter.grid_power_kw
-        ):
-            if snapshot.grid_meter.grid_power_kw > draft.peak_limit_kw:
-                results.append(
-                    ConstraintCheckResult(
-                        name="safety_pre_check",
-                        status="warn",
-                        field="peak_limit_kw",
-                        message=(
-                            f"Grid is currently importing"
-                            f" {snapshot.grid_meter.grid_power_kw:.1f} kW;"
-                            f" activating a peak limit of {draft.peak_limit_kw:.1f}"
-                            " kW would immediately put the site over limit."
-                        ),
-                    )
-                )
-        else:
-            # P15 + R2P11 — grid meter state not yet published OR NaN power.
-            # Peak limit is always set (Pydantic gt=0.0), so surface the
-            # unknown-state WARN.
-            results.append(
-                ConstraintCheckResult(
-                    name="safety_pre_check",
-                    status="warn",
-                    field="peak_limit_kw",
-                    message=(
-                        "Grid meter state is not yet known. The peak limit will"
-                        " take effect once telemetry arrives."
-                    ),
-                )
-            )
-        if results:
-            return tuple(results)
-        return (ConstraintCheckResult(name="safety_pre_check", status="pass"),)
+
+    def _check_safety_pre(self, draft: ConstraintDraft) -> tuple[ConstraintCheckResult, ...]:
+        """Read StateStore and delegate to ``_check_safety_pre_pure``.
+
+        Thin wrapper retained for the internal ``_run_validation`` flow which
+        does not have a pre-captured snapshot (each validate-draft pass reads
+        the live store at evaluation time, by design — the activate path
+        re-runs validation inside the write lock against the current state).
+        """
+        snapshot = self._state_store.get_snapshot()
+        return _check_safety_pre_pure(
+            peak_limit_kw=draft.peak_limit_kw,
+            battery_reserve_floor_percent=draft.battery_reserve_floor_percent,
+            snapshot=snapshot,
+        )
 
     def _snapshot_safe(self) -> _PreviousSnapshot:
         """Capture the pre-activation provider state for the changed-fields
@@ -769,6 +700,107 @@ class _PreviousSnapshot:
     battery_reserve_floor_percent: float | None
     ev_charging_window_start: str | None
     ev_charging_window_end: str | None
+
+
+def _check_safety_pre_pure(
+    *,
+    peak_limit_kw: float,
+    battery_reserve_floor_percent: float,
+    snapshot: SystemSnapshot,
+) -> tuple[ConstraintCheckResult, ...]:
+    """Pure evaluator for the safety pre-check rule set.
+
+    Reads only the three inputs it is passed; no I/O, no shared mutable
+    state. The two callers (private ``_check_safety_pre`` for validate-draft;
+    public ``evaluate_safety_pre_check`` for deployment validation) both
+    delegate here so the rule set has exactly one implementation per the
+    single-evaluator principle (Epic 7 retro).
+
+    Story 9.3 P16 + R2P6 — multiple safety conditions can co-trip; each
+    surfaces as its own row. The structural FAIL (peak_limit_kw < 0.5)
+    joins the result tuple alongside any WARNs rather than early-returning.
+
+    R2P11 — ``BatteryState.soc_percent`` can be ``NaN``. ``NaN > x``
+    evaluates ``False``, which would suppress the reserve-floor WARN even
+    though the soc is effectively unknown. Treat NaN as "state not yet
+    known" and surface the unknown-state WARN explicitly.
+    """
+    results: list[ConstraintCheckResult] = []
+    if peak_limit_kw < _PEAK_LIMIT_FAIL_THRESHOLD_KW:
+        results.append(
+            ConstraintCheckResult(
+                name="safety_pre_check",
+                status="fail",
+                field="peak_limit_kw",
+                message=("Peak limit below 0.5 kW would block all grid imports indefinitely."),
+            )
+        )
+    battery_state_known = isinstance(snapshot.battery, BatteryState) and not math.isnan(
+        snapshot.battery.soc_percent
+    )
+    if battery_state_known:
+        assert isinstance(snapshot.battery, BatteryState)
+        if battery_reserve_floor_percent > snapshot.battery.soc_percent:
+            results.append(
+                ConstraintCheckResult(
+                    name="safety_pre_check",
+                    status="warn",
+                    field="battery_reserve_floor_percent",
+                    message=(
+                        f"Battery is currently at {snapshot.battery.soc_percent:.1f}%"
+                        f" SoC. Activating a reserve floor of"
+                        f" {battery_reserve_floor_percent:.1f}% would"
+                        " immediately block discharge until SoC rises above"
+                        " the floor."
+                    ),
+                )
+            )
+    elif battery_reserve_floor_percent > 0.0:
+        results.append(
+            ConstraintCheckResult(
+                name="safety_pre_check",
+                status="warn",
+                field="battery_reserve_floor_percent",
+                message=(
+                    "Battery state is not yet known. The reserve floor will"
+                    " take effect once the battery reports SoC; if current"
+                    " SoC is below the floor, discharge will be blocked"
+                    " immediately."
+                ),
+            )
+        )
+    if isinstance(snapshot.grid_meter, GridMeterState) and not math.isnan(
+        snapshot.grid_meter.grid_power_kw
+    ):
+        if snapshot.grid_meter.grid_power_kw > peak_limit_kw:
+            results.append(
+                ConstraintCheckResult(
+                    name="safety_pre_check",
+                    status="warn",
+                    field="peak_limit_kw",
+                    message=(
+                        f"Grid is currently importing"
+                        f" {snapshot.grid_meter.grid_power_kw:.1f} kW;"
+                        f" activating a peak limit of {peak_limit_kw:.1f}"
+                        " kW would immediately put the site over limit."
+                    ),
+                )
+            )
+    else:
+        results.append(
+            ConstraintCheckResult(
+                name="safety_pre_check",
+                status="warn",
+                field="peak_limit_kw",
+                message=(
+                    "Grid meter state is not yet known. The peak limit will"
+                    " take effect once telemetry arrives."
+                ),
+            )
+        )
+    if results:
+        return tuple(results)
+    return (ConstraintCheckResult(name="safety_pre_check", status="pass"),)
 
 
 def _changed_fields(draft: ConstraintDraft, previous: _PreviousSnapshot) -> list[str]:

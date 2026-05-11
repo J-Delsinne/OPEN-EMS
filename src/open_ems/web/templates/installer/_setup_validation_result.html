@@ -1,0 +1,42 @@
+{# Story 9.4 — full validation region (banner + check list + actions).
+
+    This single fragment is the target of:
+      - POST /installer/setup/validation/run             (full re-render)
+      - GET  /installer/setup/validation/poll            (progressive re-render)
+      - POST /installer/setup/validation/acknowledge/... (server-side ack + re-render)
+      - POST /installer/setup/validation/revoke/...      (symmetric)
+
+    Sub-includes:
+      - _setup_validation_banner.html       (UX component #10)
+      - _setup_validation_check_row.html    (UX component #9, one per check)
+      - _setup_validation_actions.html      (Run + Handoff buttons)
+#}
+<div id="validation-region">
+  {% include "installer/_setup_validation_banner.html" %}
+
+  {% if view.result and view.result.checks %}
+    <ol class="validation-checks" aria-label="Per-check validation results">
+      {% for check in view.result.checks %}
+        {% set acked = check.name in view.result.acknowledged_warnings %}
+        {% include "installer/_setup_validation_check_row.html" %}
+      {% endfor %}
+    </ol>
+  {% endif %}
+
+  {% include "installer/_setup_validation_actions.html" %}
+
+  {# Polling trigger — only active while the persisted run is still running.
+     The /poll endpoint emits HX-Trigger: validation-complete when the run
+     leaves the running state, which the listener below uses to remove
+     itself from the page. #}
+  {% if view.result and view.result.overall_status == "running" %}
+    <div
+      id="validation-poll"
+      hx-get="/installer/setup/validation/poll"
+      hx-trigger="every 2s"
+      hx-target="#validation-region"
+      hx-swap="outerHTML"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+    ></div>
+  {% endif %}
+</div>

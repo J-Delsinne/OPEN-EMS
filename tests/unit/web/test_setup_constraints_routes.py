@@ -78,6 +78,9 @@ _CREATE_WIZARD_STATE = """
         step_3_complete INTEGER NOT NULL DEFAULT 0,
         step_3_completed_at TEXT,
         step_3_activated_config_version INTEGER,
+        step_4_complete INTEGER NOT NULL DEFAULT 0,
+        step_4_completed_at TEXT,
+        step_4_completed_config_version INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -663,11 +666,8 @@ async def test_post_activate_step_prereq_not_met_returns_400_exact_match(
     assert "step_prerequisites_not_met: step_1_complete=1 step_2_complete=0" in response.text
 
 
-async def test_get_validation_placeholder_renders(
-    app_with_constraints: FastAPI,
-) -> None:
-    raw_token, _ = await _create_installer_session()
-    client = TestClient(app_with_constraints, base_url="https://test", follow_redirects=False)
-    response = client.get("/installer/setup/validation", cookies={"session": raw_token})
-    assert response.status_code == 200
-    assert "Story 9.4" in response.text
+# Story 9.4 NOTE: the prior ``test_get_validation_placeholder_renders`` was
+# removed — Story 9.4 replaces ``/installer/setup/validation`` with the real
+# Step 4 page (``setup_validation.html``). The 9.4 route tests in
+# ``tests/unit/web/test_setup_validation_routes.py`` cover the new route's
+# step-gate + render with the full service fixture.

@@ -119,6 +119,9 @@ def test_wizard_state_schema_with_cascade_fk(tmp_path: pathlib.Path) -> None:
         "step_3_complete": "INTEGER",
         "step_3_completed_at": "TEXT",
         "step_3_activated_config_version": "INTEGER",
+        "step_4_complete": "INTEGER",
+        "step_4_completed_at": "TEXT",
+        "step_4_completed_config_version": "INTEGER",
         "created_at": "TEXT",
         "updated_at": "TEXT",
     }
@@ -189,9 +192,9 @@ def test_migration_0009_round_trips(tmp_path: pathlib.Path) -> None:
     """AC1 + dev-notes round-trip clause: upgrade head → downgrade -1 → upgrade head."""
     db_url = f"sqlite:///{tmp_path / 'roundtrip.db'}"
     alembic_command.upgrade(_make_cfg(db_url), "head")
-    # Stories 9.2 + 9.3 added two more migrations on top of 0009 — go back
-    # three steps so we exercise the 0009 round-trip and then re-stack on top.
-    alembic_command.downgrade(_make_cfg(db_url), "-3")
+    # Stories 9.2 + 9.3 + 9.4 added three more migrations on top of 0009 —
+    # go back four steps so we exercise the 0009 round-trip and re-stack on top.
+    alembic_command.downgrade(_make_cfg(db_url), "-4")
     alembic_command.upgrade(_make_cfg(db_url), "head")
 
 
@@ -199,9 +202,9 @@ def test_migration_0010_round_trips(tmp_path: pathlib.Path) -> None:
     """Story 9.2 AC1: migration 0010 upgrades + downgrades cleanly."""
     db_url = f"sqlite:///{tmp_path / 'roundtrip_0010.db'}"
     alembic_command.upgrade(_make_cfg(db_url), "head")
-    # Story 9.3 added 0011 on top of 0010 — go back two steps so we exercise
-    # the 0010 round-trip and then re-stack 0011 on top.
-    alembic_command.downgrade(_make_cfg(db_url), "-2")
+    # Stories 9.3 + 9.4 added two more migrations on top of 0010 — go back
+    # three steps so we exercise the 0010 round-trip and re-stack on top.
+    alembic_command.downgrade(_make_cfg(db_url), "-3")
     alembic_command.upgrade(_make_cfg(db_url), "head")
 
 
@@ -209,8 +212,75 @@ def test_migration_0011_round_trips(tmp_path: pathlib.Path) -> None:
     """Story 9.3 AC1: migration 0011 upgrades + downgrades cleanly."""
     db_url = f"sqlite:///{tmp_path / 'roundtrip_0011.db'}"
     alembic_command.upgrade(_make_cfg(db_url), "head")
+    # Story 9.4 added 0012 on top of 0011 — go back two steps so 0011's
+    # round-trip is exercised, then re-stack on top.
+    alembic_command.downgrade(_make_cfg(db_url), "-2")
+    alembic_command.upgrade(_make_cfg(db_url), "head")
+
+
+def test_migration_0012_round_trips(tmp_path: pathlib.Path) -> None:
+    """Story 9.4 AC1: migration 0012 upgrades + downgrades cleanly."""
+    db_url = f"sqlite:///{tmp_path / 'roundtrip_0012.db'}"
+    alembic_command.upgrade(_make_cfg(db_url), "head")
     alembic_command.downgrade(_make_cfg(db_url), "-1")
     alembic_command.upgrade(_make_cfg(db_url), "head")
+
+
+def test_deployment_validation_results_schema(tmp_path: pathlib.Path) -> None:
+    """Story 9.4 AC1: ``deployment_validation_results`` schema + FK SET NULL."""
+    db_path = tmp_path / "dv_results_test.db"
+    alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(deployment_validation_results)").fetchall()
+        }
+        fkeys = conn.execute("PRAGMA foreign_key_list(deployment_validation_results)").fetchall()
+    assert columns == {
+        "id": "INTEGER",
+        "started_at": "TEXT",
+        "completed_at": "TEXT",
+        "config_version": "INTEGER",
+        "overall_status": "TEXT",
+        "checks_json": "TEXT",
+        "triggered_by_session_id": "TEXT",
+        "summary_text": "TEXT",
+    }
+    assert len(fkeys) == 1
+    assert fkeys[0][2] == "sessions"
+    assert fkeys[0][3] == "triggered_by_session_id"
+    assert fkeys[0][4] == "id"
+    # SET NULL — the validation result survives session deletion; only
+    # session attribution becomes NULL.
+    assert fkeys[0][6] == "SET NULL"
+
+
+def test_deployment_validation_acks_schema(tmp_path: pathlib.Path) -> None:
+    """Story 9.4 AC1: ``deployment_validation_acks`` schema + CASCADE FK."""
+    db_path = tmp_path / "dv_acks_test.db"
+    alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(deployment_validation_acks)").fetchall()
+        }
+        indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(deployment_validation_acks)").fetchall()
+        }
+        fkeys = conn.execute("PRAGMA foreign_key_list(deployment_validation_acks)").fetchall()
+    assert columns == {
+        "id": "INTEGER",
+        "validation_result_id": "INTEGER",
+        "check_name": "TEXT",
+        "acknowledged_at": "TEXT",
+        "acknowledged_by_session_id": "TEXT",
+    }
+    assert "ix_deployment_validation_acks_validation_result_id" in indexes
+    # Two FKs: validation_result_id (CASCADE), acknowledged_by_session_id (SET NULL)
+    fkey_targets = {(fk[2], fk[6]) for fk in fkeys}
+    assert ("deployment_validation_results", "CASCADE") in fkey_targets
+    assert ("sessions", "SET NULL") in fkey_targets
 
 
 def test_role_enum_values_stable_across_migrations(tmp_path: pathlib.Path) -> None:

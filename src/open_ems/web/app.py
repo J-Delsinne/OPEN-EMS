@@ -25,9 +25,11 @@ from open_ems.logging_config import configure_logging
 from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.services.audit_log import ObservabilityService
 from open_ems.services.constraints import ConstraintsService
+from open_ems.services.deployment_validation import DeploymentValidationService
 from open_ems.services.device_discovery import DeviceDiscoveryOrchestrator
 from open_ems.services.loop_liveness import LoopLiveness
 from open_ems.services.manual_entry import ManualEntryService
+from open_ems.services.protocol_adapter_factory import ProtocolAdapterFactory
 from open_ems.services.readiness import mark_ready, sd_notify
 from open_ems.services.role_assignment import RoleAssignmentService
 from open_ems.services.time_sync import check_clock
@@ -35,6 +37,9 @@ from open_ems.services.watchdog import get_watchdog_interval, watchdog_task
 from open_ems.settings import get_settings
 from open_ems.storage.database import close_database, init_database
 from open_ems.storage.repositories.config_repo import ConfigRepo
+from open_ems.storage.repositories.deployment_validation_repo import (
+    DeploymentValidationResultRepo,
+)
 from open_ems.storage.repositories.device_repo import DeviceRepo
 from open_ems.storage.repositories.draft_constraints_repo import DraftConstraintsRepo
 from open_ems.storage.repositories.energy_repo import EnergyRepo
@@ -338,6 +343,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             device_repo=device_repo,
             state_store=app.state.state_store,
         )
+        # Step 4g (Story 9.4): construct the deployment-validation evaluator.
+        # Reuses the same active_constraints_provider, device_repo,
+        # wizard_state_repo, and constraints_service (for the safety_pre_check
+        # reuse seam — AC5 check 5) the prior steps already constructed. The
+        # ProtocolAdapterFactory is validation-only — it does NOT participate
+        # in runtime control execution (PolicyGuard's adapters mapping stays
+        # empty per the Story 8-2 deferred finding, which is its own future
+        # story per the Story 9.4 R7 triage).
+        deployment_validation_repo = DeploymentValidationResultRepo()
+        protocol_adapter_factory = ProtocolAdapterFactory(
+            discovery=discovery_service,
+            # OCPP central system stays None until OCPP wiring lands; the
+            # factory's OCPP probe handles the absence gracefully.
+            ocpp_central_system=None,
+        )
+        # D3/D4 — DeploymentValidationService now takes the StateStore (snapshot
+        # is captured at run start) and ObservabilityService (structured audit
+        # log attribution for run/ack/handoff events) as documented in the
+        # amended AC4 / AC10. ObservabilityService is constructed once here so
+        # the validation, watchdog, and control-loop services share the same
+        # sink.
+        observability = ObservabilityService()
+        app.state.observability = observability
+        deployment_validation_service = DeploymentValidationService(
+            validation_repo=deployment_validation_repo,
+            device_repo=device_repo,
+            wizard_state_repo=wizard_state_repo,
+            active_constraints_provider=active_constraints_provider,
+            constraints_service=constraints_service,
+            protocol_adapter_factory=protocol_adapter_factory,
+            state_store=app.state.state_store,
+            observability=observability,
+            check_timeout_seconds=settings.deployment_validation_check_timeout_seconds,
+            device_probe_timeout_seconds=settings.deployment_validation_device_probe_timeout_seconds,
+        )
         app.state.device_repo = device_repo
         app.state.wizard_state_repo = wizard_state_repo
         app.state.discovery_orchestrator = discovery_orchestrator
@@ -345,12 +385,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.role_assignment_service = role_assignment_service
         app.state.draft_constraints_repo = draft_constraints_repo
         app.state.constraints_service = constraints_service
+        app.state.deployment_validation_repo = deployment_validation_repo
+        app.state.protocol_adapter_factory = protocol_adapter_factory
+        app.state.deployment_validation_service = deployment_validation_service
         logger.info("device_registry_ready", component="startup")
         logger.info("wizard_state_ready", component="startup")
         logger.info("discovery_orchestrator_ready", component="startup")
         logger.info("role_assignment_service_ready", component="startup")
         logger.info("draft_constraints_repo_ready", component="startup")
         logger.info("constraints_service_ready", component="startup")
+        logger.info("deployment_validation_repo_ready", component="startup")
+        logger.info("deployment_validation_service_ready", component="startup")
 
         # Step 5b: Admin bootstrap — create initial admin if no users exist
         await _bootstrap_admin_if_needed(UserRepo(), settings.initial_admin_password)
@@ -359,9 +404,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         mark_ready()
         logger.info("system_ready", component="startup")
 
-        # Construct shared services BEFORE the watchdog and control loop start so both
-        # share the same LoopLiveness signal and ObservabilityService instance.
-        observability = ObservabilityService()
+        # Construct LoopLiveness — ObservabilityService is already constructed
+        # above (Step 4g) and shared with the deployment-validation service.
         loop_liveness = LoopLiveness(
             missed_cycle_threshold_seconds=(
                 settings.watchdog_missed_cycle_threshold * settings.control_loop_interval_seconds

@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     command_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=5.0)
     watchdog_missed_cycle_threshold: int = Field(default=2, ge=1, le=10)
     watchdog_cycle_deadline_seconds: float = Field(default=60.0, gt=0.0, le=300.0)
+    # Story 9.4 — Deployment validation bounded timeouts. Per-check upper bound
+    # for the whole check including any per-device fan-out; per-device probe
+    # bound sized below the check bound so a single slow device cannot starve
+    # sibling probes. Addresses Story 9.1's deferred-finding for bounded probe
+    # fan-out in the validation context.
+    deployment_validation_check_timeout_seconds: float = Field(default=15.0, gt=0.0, le=120.0)
+    deployment_validation_device_probe_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
 
 
 _settings: Settings | None = None

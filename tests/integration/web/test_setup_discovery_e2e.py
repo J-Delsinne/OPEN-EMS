@@ -87,6 +87,10 @@ _CREATE_WIZARD_STATE = """
             CHECK (step_3_complete IN (0, 1)),
         step_3_completed_at TEXT,
         step_3_activated_config_version INTEGER,
+        step_4_complete INTEGER NOT NULL DEFAULT 0
+            CHECK (step_4_complete IN (0, 1)),
+        step_4_completed_at TEXT,
+        step_4_completed_config_version INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
@@ -97,6 +101,14 @@ _CREATE_WIZARD_STATE = """
             OR (step_3_complete = 1
                 AND step_3_completed_at IS NOT NULL
                 AND step_3_activated_config_version IS NOT NULL)
+        ),
+        CHECK (
+            (step_4_complete = 0
+             AND step_4_completed_at IS NULL
+             AND step_4_completed_config_version IS NULL)
+            OR (step_4_complete = 1
+                AND step_4_completed_at IS NOT NULL
+                AND step_4_completed_config_version IS NOT NULL)
         )
     )
 """

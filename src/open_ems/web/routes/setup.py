@@ -24,12 +24,20 @@ from pydantic import ValidationError
 
 from open_ems.adapters.capabilities import get_profile
 from open_ems.core.constraints import ConstraintDraftInput
+from open_ems.core.deployment_validation import DeploymentCheckName
 from open_ems.core.devices import CapabilityStatus, DeviceRole
 from open_ems.services.constraints import (
     ConstraintActivationError,
     ConstraintsService,
     ProviderNotReadyError,
     reason_to_user_message,
+)
+from open_ems.services.deployment_validation import (
+    CheckNotWarnableError,
+    DeploymentValidationService,
+    NoCurrentResultError,
+    NotAckEligibleError,
+    NotHandoffEligibleError,
 )
 from open_ems.services.device_discovery import (
     DeviceDiscoveryOrchestrator,
@@ -129,6 +137,55 @@ def _constraints_service(request: Request) -> ConstraintsService:
     if not isinstance(svc, ConstraintsService):
         raise HTTPException(status_code=503, detail="Constraints service unavailable")
     return svc
+
+
+def _deployment_validation_service(
+    request: Request,
+) -> DeploymentValidationService:
+    svc = getattr(request.app.state, "deployment_validation_service", None)
+    if not isinstance(svc, DeploymentValidationService):
+        raise HTTPException(status_code=503, detail="Deployment validation service unavailable")
+    return svc
+
+
+_VALID_CHECK_NAMES: frozenset[str] = frozenset(
+    {
+        "connectivity",
+        "role_completeness",
+        "capability_strategy",
+        "constraint_completeness",
+        "constraint_safety_pre_check",
+        "control_readiness",
+    }
+)
+
+
+def _validate_check_name(raw: str) -> DeploymentCheckName:
+    # P27 — return 400 to align with every other validation rejection in this
+    # route module. 404 was previously inconsistent (the path is well-known;
+    # the check_name is the bad input, which is a 400 concern).
+    if raw not in _VALID_CHECK_NAMES:
+        raise HTTPException(status_code=400, detail=f"unknown_check_name: {raw}")
+    return raw  # type: ignore[return-value]
+
+
+async def _require_step_3_complete(
+    user_session_id: str,
+    wizard_repo: WizardStateRepo,
+) -> None:
+    """P13 — shared step-gate for every mutating Step 4 route.
+
+    Raises HTTPException 403 with exact-match reason when the installer has
+    not yet completed Steps 1-3. The `get_validation_page` GET handler
+    redirects (its UX gate); the mutation handlers reject hard.
+    """
+    state = await wizard_repo.get_or_create(user_session_id, now=datetime.now(UTC))
+    if not state.step_1_complete:
+        raise HTTPException(status_code=403, detail="step_prerequisites_not_met: step_1")
+    if not state.step_2_complete:
+        raise HTTPException(status_code=403, detail="step_prerequisites_not_met: step_2")
+    if not state.step_3_complete:
+        raise HTTPException(status_code=403, detail="step_prerequisites_not_met: step_3")
 
 
 # ---------------------------------------------------------------------------
@@ -861,22 +918,220 @@ def _activate_success_redirect(is_htmx: bool) -> Response:
 
 
 @router.get("/installer/setup/validation", response_class=HTMLResponse)
-async def get_validation_placeholder(
+async def get_validation_page(
     request: Request,
     user: InstallerUser = Depends(require_installer),  # noqa: B008
     wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
-) -> HTMLResponse:
-    """Story 9.3 placeholder. Replaced by the real Step 4 page in 9.4."""
-    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
+) -> Response:
+    """Story 9.4 — Step 4 main page.
+
+    Step-gate enforcement (mirrors 9.3): deep-linking past discovery / roles /
+    constraints bounces back. There is no idempotent forward redirect here
+    because Step 4 IS the terminal step of the wizard.
+    """
+    now = datetime.now(UTC)
+    state = await wizard_repo.get_or_create(user.session_id, now=now)
+    if not state.step_1_complete:
+        return RedirectResponse(url="/installer/setup/discovery", status_code=302)
+    if not state.step_2_complete:
+        return RedirectResponse(url="/installer/setup/roles", status_code=302)
+    if not state.step_3_complete:
+        return RedirectResponse(url="/installer/setup/constraints", status_code=302)
+    view = await svc.get_current_view()
     return _templates.TemplateResponse(
         request,
-        "installer/setup_validation_placeholder.html",
+        "installer/setup_validation.html",
         {
             "csrf_token": user.csrf_token,
             "title": "Deployment Validation",
             "active_step": "validation",
             "step_2_complete": state.step_2_complete,
             "step_3_complete": state.step_3_complete,
+            "step_4_complete": state.step_4_complete,
+            "view": view,
+        },
+    )
+
+
+@router.post("/installer/setup/validation/run", response_class=HTMLResponse)
+async def post_run_validation(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
+) -> HTMLResponse:
+    """Trigger one validation run. Blocks until completion (validation runs
+    are bounded by per-check timeouts; a slow run still returns within
+    ~check_timeout_s × 1.x). Returns the full result fragment.
+
+    P29 — CSRF is validated by `CsrfMiddleware` (it reads the header or the
+    form body's `csrf_token` field directly). The route handler does not need
+    a Form parameter for that, and previously accepting one with a silent
+    default obscured where the validation actually happens.
+
+    P13 — explicit step-3 gate so a curl/HTMX caller cannot bypass the
+    GET-handler redirect chain.
+    """
+    await _require_step_3_complete(user.session_id, wizard_repo)
+    await svc.run(triggered_by_session_id=user.session_id, now=datetime.now(UTC))
+    view = await svc.get_current_view()
+    response = _templates.TemplateResponse(
+        request,
+        "installer/_setup_validation_result.html",
+        {
+            "csrf_token": user.csrf_token,
+            "view": view,
+        },
+    )
+    # Signal HTMX polling clients (if any are subscribed) that the run is done.
+    response.headers["HX-Trigger"] = "validation-complete"
+    return response
+
+
+@router.get("/installer/setup/validation/poll", response_class=HTMLResponse)
+async def get_validation_poll(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
+) -> HTMLResponse:
+    """HTMX polling endpoint — read-only re-render of the result fragment.
+
+    The page sets ``hx-trigger="every 2s"`` on this endpoint while
+    ``overall_status='running'``. When the persisted state leaves running,
+    this handler emits ``HX-Trigger: validation-complete`` so the client
+    can stop polling.
+
+    P13 — step gate prevents an authenticated installer who has not yet
+    finished Steps 1-3 from polling and observing another session's run.
+    """
+    await _require_step_3_complete(user.session_id, wizard_repo)
+    view = await svc.get_current_view()
+    response = _templates.TemplateResponse(
+        request,
+        "installer/_setup_validation_result.html",
+        {
+            "csrf_token": user.csrf_token,
+            "view": view,
+        },
+    )
+    if view.result is not None and view.result.overall_status != "running":
+        response.headers["HX-Trigger"] = "validation-complete"
+    return response
+
+
+@router.post(
+    "/installer/setup/validation/acknowledge/{check_name}",
+    response_class=HTMLResponse,
+)
+async def post_acknowledge_warning(
+    request: Request,
+    check_name: str,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
+) -> HTMLResponse:
+    await _require_step_3_complete(user.session_id, wizard_repo)
+    name = _validate_check_name(check_name)
+    try:
+        await svc.acknowledge_warning(
+            check_name=name,
+            acknowledged_by_session_id=user.session_id,
+            now=datetime.now(UTC),
+        )
+    except NoCurrentResultError as exc:
+        raise HTTPException(status_code=400, detail="no_current_result") from exc
+    except (NotAckEligibleError, CheckNotWarnableError) as exc:
+        raise HTTPException(status_code=400, detail=exc.reason) from exc
+    view = await svc.get_current_view()
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_validation_result.html",
+        {
+            "csrf_token": user.csrf_token,
+            "view": view,
+        },
+    )
+
+
+@router.post(
+    "/installer/setup/validation/revoke/{check_name}",
+    response_class=HTMLResponse,
+)
+async def post_revoke_warning(
+    request: Request,
+    check_name: str,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
+) -> HTMLResponse:
+    await _require_step_3_complete(user.session_id, wizard_repo)
+    name = _validate_check_name(check_name)
+    try:
+        await svc.revoke_warning(check_name=name)
+    except NoCurrentResultError as exc:
+        raise HTTPException(status_code=400, detail="no_current_result") from exc
+    view = await svc.get_current_view()
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_validation_result.html",
+        {
+            "csrf_token": user.csrf_token,
+            "view": view,
+        },
+    )
+
+
+@router.post("/installer/setup/validation/handoff")
+async def post_handoff(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+    svc: DeploymentValidationService = Depends(_deployment_validation_service),  # noqa: B008
+) -> Response:
+    """Finalize Step 4: gate-evaluator + wizard advance + success redirect.
+
+    Server-side gate enforcement — the client's button state is hint only;
+    the route re-evaluates the full handoff gate inside the write lock.
+    Exact-match rejection reasons per AC8 / AC11.
+    """
+    await _require_step_3_complete(user.session_id, wizard_repo)
+    is_htmx = request.headers.get("HX-Request", "").lower() == "true"
+    try:
+        await svc.mark_step_4_complete(session_id=user.session_id, now=datetime.now(UTC))
+    except NotHandoffEligibleError as exc:
+        raise HTTPException(status_code=400, detail=exc.reason) from exc
+    target = "/installer/handoff"
+    if is_htmx:
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return RedirectResponse(url=target, status_code=302)
+
+
+@router.get("/installer/handoff", response_class=HTMLResponse)
+async def get_handoff_success(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    wizard_repo: WizardStateRepo = Depends(_wizard_state_repo),  # noqa: B008
+) -> Response:
+    """Story 9.4 placeholder — minimal success page after the handoff gate
+    passes. Story 9.5 will replace the body with the printable installer
+    guide; this route stays put.
+    """
+    state = await wizard_repo.get_or_create(user.session_id, now=datetime.now(UTC))
+    if not state.step_4_complete:
+        return RedirectResponse(url="/installer/setup/validation", status_code=302)
+    return _templates.TemplateResponse(
+        request,
+        "installer/_setup_validation_handoff_success.html",
+        {
+            "csrf_token": user.csrf_token,
+            "title": "Handoff Complete",
+            "active_step": "validation",
+            "step_2_complete": state.step_2_complete,
+            "step_3_complete": state.step_3_complete,
+            "step_4_complete": state.step_4_complete,
+            "step_4_completed_config_version": state.step_4_completed_config_version,
         },
     )
 

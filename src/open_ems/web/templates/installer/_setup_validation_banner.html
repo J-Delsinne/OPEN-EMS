@@ -1,0 +1,51 @@
+{# UX spec Component #10 — Validation State Banner. Text strings verbatim
+   from the UX spec table. Server-rendered; never client-derived. #}
+{% set result = view.result %}
+{% if result is none %}
+  {# never_run #}
+  <div class="banner banner-never-run" role="status" aria-live="polite">
+    <p>Run validation to check deployment readiness</p>
+  </div>
+{% elif result.overall_status == "running" %}
+  <div class="banner banner-running" role="status" aria-live="polite">
+    <p>Validation running…</p>
+  </div>
+{% elif view.is_outdated %}
+  {# Outdated takes precedence over PASS/WARN/FAIL banner text — user
+     guardrail #3 / AC6: outdated is a derived render-time state. #}
+  <div
+    class="banner banner-outdated"
+    role="status"
+    aria-live="polite"
+    data-status="outdated"
+  >
+    <p>Configuration changed — re-run validation before handoff.</p>
+  </div>
+{% elif result.overall_status == "complete-PASS" %}
+  <div class="banner banner-pass" role="status" aria-live="polite">
+    <p>System is ready. You can complete handoff.</p>
+    {% if result.completed_at %}
+      <small class="timestamp">
+        Last run: {{ result.completed_at.strftime("%Y-%m-%d %H:%M UTC") }}
+      </small>
+    {% endif %}
+  </div>
+{% elif result.overall_status == "complete-WARN" %}
+  <div class="banner banner-warn" role="status" aria-live="polite">
+    <p>System is ready with limitations. Review warnings.</p>
+    {% if result.completed_at %}
+      <small class="timestamp">
+        Last run: {{ result.completed_at.strftime("%Y-%m-%d %H:%M UTC") }}
+      </small>
+    {% endif %}
+  </div>
+{% elif result.overall_status == "complete-FAIL" %}
+  <div class="banner banner-fail" role="alert" aria-live="assertive">
+    <p>Deployment blocked. Resolve failures before handoff.</p>
+    {% if result.completed_at %}
+      <small class="timestamp">
+        Last run: {{ result.completed_at.strftime("%Y-%m-%d %H:%M UTC") }}
+      </small>
+    {% endif %}
+  </div>
+{% endif %}

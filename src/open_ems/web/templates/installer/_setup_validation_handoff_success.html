@@ -1,0 +1,17 @@
+{% extends "installer/setup_layout.html" %}
+{# Story 9.4 placeholder for the handoff page; Story 9.5 will replace the
+   body with the printable installer guide. The route + URL stay put. #}
+
+{% block setup_body %}
+<section aria-labelledby="handoff-heading">
+  <h2 id="handoff-heading">Handoff complete</h2>
+  <p>
+    Deployment validation passed and handoff has been recorded at
+    config_version {{ step_4_completed_config_version }}.
+  </p>
+  <p>
+    The full printable installer handoff guide will be available once
+    Story 9.5 ships. For now you can safely close this window.
+  </p>
+</section>
+{% endblock %}

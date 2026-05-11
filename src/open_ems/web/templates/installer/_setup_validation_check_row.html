@@ -1,0 +1,62 @@
+{# UX spec Component #9 — Validation Result Row.
+   Rendered once per check from a {% for %} loop in
+   _setup_validation_result.html. Inputs: ``check`` (DeploymentCheckResult)
+   and ``acked`` (bool, true if this check has an installer ack). #}
+{% set status_class = "status-" ~ check.status %}
+<li
+  class="validation-row {{ status_class }}"
+  role="region"
+  aria-label="Check: {{ check.name }}"
+  data-check-name="{{ check.name }}"
+  data-check-status="{{ check.status }}"
+>
+  {% if check.status == "pass" %}
+    <span class="badge badge-pass" aria-live="polite">PASS</span>
+  {% elif check.status == "warn" %}
+    <span class="badge badge-warn" aria-live="polite">WARN</span>
+  {% elif check.status == "timeout" %}
+    {# AC5 / UX spec: TIMEOUT is WARN-class with explicit TIMEOUT label. #}
+    <span class="badge badge-warn" aria-live="polite">TIMEOUT</span>
+  {% elif check.status == "fail" %}
+    <span class="badge badge-fail" aria-live="assertive">FAIL</span>
+  {% else %}
+    <span class="badge badge-pending" aria-live="polite">Checking…</span>
+  {% endif %}
+
+  <span class="check-name">{{ check.name }}</span>
+  <p class="check-summary">{{ check.summary }}</p>
+
+  {% if check.corrective_action %}
+    <p class="check-corrective">{{ check.corrective_action }}</p>
+  {% endif %}
+
+  {% if check.status in ("warn", "timeout") and view.result.overall_status == "complete-WARN" %}
+    {% if acked %}
+      <p class="ack-state">
+        Acknowledged
+        <form
+          method="post"
+          action="/installer/setup/validation/revoke/{{ check.name }}"
+          hx-post="/installer/setup/validation/revoke/{{ check.name }}"
+          hx-target="#validation-region"
+          hx-swap="outerHTML"
+          style="display:inline"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <button type="submit" class="link">Revoke</button>
+        </form>
+      </p>
+    {% else %}
+      <form
+        method="post"
+        action="/installer/setup/validation/acknowledge/{{ check.name }}"
+        hx-post="/installer/setup/validation/acknowledge/{{ check.name }}"
+        hx-target="#validation-region"
+        hx-swap="outerHTML"
+      >
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <button type="submit" class="ack-button">Acknowledge</button>
+      </form>
+    {% endif %}
+  {% endif %}
+</li>

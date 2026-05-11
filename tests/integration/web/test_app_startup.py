@@ -178,6 +178,31 @@ async def test_lifespan_wires_story_9_3_constraints_service_on_app_state(
         assert isinstance(app.state.draft_constraints_repo, DraftConstraintsRepo)
 
 
+async def test_lifespan_wires_story_9_4_deployment_validation_on_app_state(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 9.4: ``deployment_validation_service``, ``deployment_validation_repo``
+    and ``protocol_adapter_factory`` are exposed on ``app.state`` after the
+    lifespan reaches the application body.
+    """
+    from open_ems.services.deployment_validation import DeploymentValidationService
+    from open_ems.services.protocol_adapter_factory import ProtocolAdapterFactory
+    from open_ems.storage.repositories.deployment_validation_repo import (
+        DeploymentValidationResultRepo,
+    )
+
+    structlog.reset_defaults()
+    db_path = str(tmp_path / "story_9_4_wiring.db")
+    _seed_lifespan_env(monkeypatch, db_path)
+
+    app = create_app()
+    async with lifespan(app):
+        assert isinstance(app.state.deployment_validation_service, DeploymentValidationService)
+        assert isinstance(app.state.deployment_validation_repo, DeploymentValidationResultRepo)
+        assert isinstance(app.state.protocol_adapter_factory, ProtocolAdapterFactory)
+
+
 # ── Story 9.0d (AC8): monthly-peak lifespan hydration ──────────────────────
 
 

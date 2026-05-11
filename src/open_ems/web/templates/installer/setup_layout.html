@@ -45,8 +45,37 @@
           2. Role Assignment
         {% endif %}
       </li>
-      <li{% if active_step == "constraints" %} aria-current="step"{% endif %}>3. Constraints</li>
-      <li{% if active_step == "validation" %} aria-current="step"{% endif %}>4. Deployment Validation</li>
+      <li{% if active_step == "constraints" %} aria-current="step"{% endif %}>
+        {# Story 9.4 — back-navigation hyperlink only when Step 4 is not yet
+           complete; mirrors the Step 1 / Step 2 hyperlink patterns. Once
+           Step 4 is finalized all back-links are hidden.
+           P12 — guard ``step_4_complete`` with ``is defined`` so this layout
+           does not StrictUndefined-explode when rendered from non-Step-4
+           pages (discovery/roles/constraints) that do not pass the flag. #}
+        {% set _step_4_done = (step_4_complete if step_4_complete is defined else False) %}
+        {% if active_step != "discovery"
+              and active_step != "roles"
+              and active_step != "constraints"
+              and not _step_4_done %}
+          <a href="/installer/setup/constraints">3. Constraints</a>
+        {% else %}
+          3. Constraints
+        {% endif %}
+      </li>
+      <li
+        {% if active_step == "validation" %} aria-current="step"{% endif %}
+        {# Story 9.4 — render the outdated marker (UX spec component #14)
+           when the persisted validation result no longer matches the active
+           config_version. ``view`` may be absent on non-Step-4 pages. #}
+        {% if view is defined and view and view.is_outdated %}
+          data-status="outdated"
+        {% endif %}
+      >
+        4. Deployment Validation
+        {% if view is defined and view and view.is_outdated %}
+          <small class="badge-outdated"> · Re-run</small>
+        {% endif %}
+      </li>
     </ol>
   </nav>
 </header>
