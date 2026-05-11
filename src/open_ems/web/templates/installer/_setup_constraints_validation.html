@@ -8,7 +8,11 @@
                             via hx-swap-oob so the disabled→enabled transition
                             is atomic with the report swap.
 #}
-{% set report = report if (report is defined) else view.validation_report %}
+{# R2P14 — ``view`` may be undefined when this fragment is included from the
+   error-envelope path; fall back to None so the {% if report is not none %}
+   below renders the empty state instead of raising TemplateError. #}
+{% set report = report if (report is defined)
+                else (view.validation_report if (view is defined and view is not none) else none) %}
 {% if report is not none %}
   <ul class="validation-results">
     {% for check in report.checks %}
@@ -31,7 +35,12 @@
   Click <strong>Validate</strong> to run server-side checks.</p>
 {% endif %}
 
-{% if render_activate_oob|default(false) %}
+{# R2P9 — only render the OOB activate fragment when there is a view to render
+   from. A concurrent draft DELETE between the validate call and the OOB include
+   would otherwise dereference a None view. The route always passes view via
+   ``get_or_default``, but it can fall back to the seeded (no-persisted-draft)
+   shape if the draft vanished mid-request. #}
+{% if render_activate_oob|default(false) and view is defined and view is not none %}
   <div id="constraints-activate-region" hx-swap-oob="innerHTML">
     {% include "installer/_setup_constraints_activate.html" %}
   </div>

@@ -17,10 +17,12 @@ the rule set has exactly one implementation (single-evaluator principle —
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, cast
 
+import aiosqlite
 import structlog
 from pydantic import ValidationError
 
@@ -122,6 +124,18 @@ _REASON_USER_MESSAGES: dict[str, str] = {
     ),
     "step_3_already_complete": (
         "Constraints have already been activated for this session. Continue to Step 4."
+    ),
+    # R2P2 — wizard CASCADE race on happy path. The session was deleted between
+    # the prerequisite check and the in-transaction wizard UPDATE; surface as a
+    # structured rejection rather than a 500.
+    "session_gone_during_activate": (
+        "Your session ended before activation could complete. Please sign in again and retry."
+    ),
+    # R2P13 — SQLite lock contention surfaces as a retryable rejection rather
+    # than the raw OperationalError 500. The route handler can render this with
+    # an HX-Retry-After header in a future hardening pass.
+    "activation_busy": (
+        "The system is currently busy applying another change. Please try again in a moment."
     ),
 }
 
@@ -314,13 +328,15 @@ class ConstraintsService:
         (DB is authoritative; restart re-hydrates correctly) but is logged at
         ERROR so observability surfaces in-memory drift.
         """
-        # Capture the pre-activation provider snapshot BEFORE the lock so the
-        # structured-log changed_fields summary reflects the actual transition.
-        # Reading it after provider.reload() would always return the new
-        # values, making changed_fields trivially empty (Story 9.3 P4).
-        previous_snapshot = self._snapshot_safe()
-
         async with get_write_lock():
+            # R2P4 — capture the pre-activation provider snapshot INSIDE the
+            # write lock. Reading it before the lock allowed a concurrent
+            # activator to land between the snapshot read and the lock
+            # acquisition, producing a structlog ``changed_fields`` payload
+            # that lied about which fields this activation actually changed.
+            # The audit log was always correct (it reads ``get_active()``
+            # inside the transaction); only the observability line was wrong.
+            previous_snapshot = self._snapshot_safe()
             # Step 2 — wizard prerequisite check.
             wizard = await self._wizard_repo.get(session_id)
             step_1 = 1 if (wizard is not None and wizard.step_1_complete) else 0
@@ -375,16 +391,31 @@ class ConstraintsService:
             # as active_constraints + config_audit_log (P13). If any side
             # fails, all four roll back.
             async def _in_txn_post_writes(new_version: int, _now_utc: datetime) -> None:
-                # Use the activate route's `now` for wizard timestamping so a
-                # single moment timestamps every row touched by this
-                # activation. The repo helpers honor commit=False to defer
-                # the COMMIT to ConfigRepo._activate_locked.
-                await self._wizard_repo.set_step_3_complete_locked(
-                    session_id,
-                    activated_config_version=new_version,
-                    now=now,
-                    commit=False,
-                )
+                # R2P10 — ``_now_utc`` IS the route's ``now`` thanks to
+                # ``_activate_locked(now=now)``; pass it through so the wizard
+                # write and the active_constraints write share one timestamp
+                # exactly (no sub-millisecond divergence).
+                # The repo helpers honor commit=False to defer the COMMIT to
+                # ConfigRepo._activate_locked.
+                try:
+                    await self._wizard_repo.set_step_3_complete_locked(
+                        session_id,
+                        activated_config_version=new_version,
+                        now=_now_utc,
+                        commit=False,
+                    )
+                except ValueError as wizard_exc:
+                    # R2P2 — wizard CASCADE race on the happy path: the
+                    # session was admin-purged between the prerequisite check
+                    # above and this in-transaction UPDATE, so rowcount==0
+                    # triggers ``ValueError("No wizard_state row...")``. Map
+                    # to a structured rejection so the route renders 400
+                    # instead of a 500 with a raw stack trace. Re-raising as
+                    # ConstraintActivationError propagates through
+                    # _activate_locked's outer ``except Exception`` which
+                    # rolls back the transaction atomically — the same wire
+                    # contract as any other in-txn failure.
+                    raise ConstraintActivationError("session_gone_during_activate") from wizard_exc
                 await self._draft_repo.delete_locked(session_id, commit=False)
 
             try:
@@ -392,9 +423,22 @@ class ConstraintsService:
                     input_model,
                     actor=actor,
                     inside_transaction=_in_txn_post_writes,
+                    now=now,
                 )
             except NoChangedFieldsError as exc:
                 raise ConstraintActivationError("activate_called_with_no_changed_fields") from exc
+            except ConstraintActivationError:
+                # R2P2 — already-typed rejection bubbled out of the
+                # in-transaction callback (e.g. ``session_gone_during_activate``).
+                # _activate_locked's ``except Exception`` rolled back the
+                # transaction; surface the structured reason to the route.
+                raise
+            except aiosqlite.OperationalError as exc:
+                # R2P13 — SQLite "database is locked" / similar contention. The
+                # transaction was rolled back by ``_activate_locked``. Surface
+                # as a retryable rejection so the route returns a 400 banner
+                # instead of leaking a 500 stack trace.
+                raise ConstraintActivationError("activation_busy") from exc
 
             # Step 8 — refresh the in-memory snapshot. A reload failure is
             # logged but does NOT roll back the activation (DB is the
@@ -506,9 +550,20 @@ class ConstraintsService:
             first: object = errors[0] if errors else {"msg": "schema validation failed"}
             first_dict = first if isinstance(first, dict) else {}
             field_loc = first_dict.get("loc", ())
-            field = field_loc[0] if field_loc else None
-            field_str = str(field) if field is not None else None
-            message = _spec_schema_message(field_str, first_dict)
+            raw_field = (
+                str(field_loc[0]) if isinstance(field_loc, tuple | list) and field_loc else None
+            )
+            message = _spec_schema_message(raw_field, first_dict)
+            # R2P7 — AC7 check 1 mandates ``field='ev_charging_window'`` (the
+            # unified semantic slot) for any EV-window-related rejection.
+            # Pydantic surfaces three different shapes for this concern:
+            #   (a) model-level paired-NULL validator → ``loc=()``
+            #   (b) format error on ev_charging_window_start → ``loc=('ev_charging_window_start',)``
+            #   (c) format error on ev_charging_window_end   → ``loc=('ev_charging_window_end',)``
+            # All three should surface the same ``field='ev_charging_window'``
+            # contract value so route handlers and tests can match on a single
+            # slot regardless of which endpoint the user mis-typed.
+            field_str = _normalize_schema_field(raw_field, first_dict)
             return ConstraintCheckResult(
                 name="schema",
                 status="fail",
@@ -579,29 +634,43 @@ class ConstraintsService:
         """Reads ``StateStore.get_snapshot()`` (in-memory; no DB I/O).
 
         Produces FAIL when ``peak_limit_kw < 0.5`` (structural — no installer
-        flow recovers from a sub-0.5 kW limit). Otherwise produces WARNs for
-        each safety condition that activating the draft would trip
-        immediately, plus WARNs (P15) when the device state is not yet known
-        and the corresponding constraint would matter once it is.
+        flow recovers from a sub-0.5 kW limit). Continues to evaluate WARN
+        conditions even when FAIL fires so the installer sees every safety
+        condition this activation would trip; fixing one and re-validating
+        does not surface a fresh batch the next round-trip (R2P6 — preserves
+        P16's multi-WARN intent on the FAIL path too).
 
         Story 9.3 P16 — multiple safety conditions can co-trip in one
         activation (e.g. reserve floor above SoC AND grid currently over the
-        new peak limit). Each surfaces as its own row.
+        new peak limit). Each surfaces as its own row. R2P6 — the structural
+        FAIL no longer early-returns: it joins the result tuple alongside any
+        WARNs.
+
+        R2P11 — ``BatteryState.soc_percent`` can be ``NaN`` (sensor read error
+        before staleness kicks in). ``NaN > x`` evaluates ``False``, which
+        would suppress the reserve-floor WARN even though the soc is
+        effectively unknown. Treat NaN as "state not yet known" and surface
+        the P15 unknown-state WARN explicitly.
         """
+        results: list[ConstraintCheckResult] = []
         if draft.peak_limit_kw < _PEAK_LIMIT_FAIL_THRESHOLD_KW:
-            return (
+            results.append(
                 ConstraintCheckResult(
                     name="safety_pre_check",
                     status="fail",
                     field="peak_limit_kw",
                     message=("Peak limit below 0.5 kW would block all grid imports indefinitely."),
-                ),
+                )
             )
         snapshot = self._state_store.get_snapshot()
-        warns: list[ConstraintCheckResult] = []
-        if isinstance(snapshot.battery, BatteryState):
+        battery_state_known = isinstance(snapshot.battery, BatteryState) and not math.isnan(
+            snapshot.battery.soc_percent
+        )
+        if battery_state_known:
+            # mypy: narrowing through the isinstance check is preserved.
+            assert isinstance(snapshot.battery, BatteryState)
             if draft.battery_reserve_floor_percent > snapshot.battery.soc_percent:
-                warns.append(
+                results.append(
                     ConstraintCheckResult(
                         name="safety_pre_check",
                         status="warn",
@@ -616,10 +685,11 @@ class ConstraintsService:
                     )
                 )
         elif draft.battery_reserve_floor_percent > 0.0:
-            # P15 — battery state not yet published. Surface a WARN so the
-            # installer activates eyes-open rather than silently entering
-            # blocked-discharge once the battery reports SoC.
-            warns.append(
+            # P15 + R2P11 — battery state not yet published OR sensor returned
+            # NaN. Surface the unknown-state WARN so the installer activates
+            # eyes-open rather than silently entering blocked-discharge once
+            # the battery reports a real SoC below the floor.
+            results.append(
                 ConstraintCheckResult(
                     name="safety_pre_check",
                     status="warn",
@@ -632,9 +702,11 @@ class ConstraintsService:
                     ),
                 )
             )
-        if isinstance(snapshot.grid_meter, GridMeterState):
+        if isinstance(snapshot.grid_meter, GridMeterState) and not math.isnan(
+            snapshot.grid_meter.grid_power_kw
+        ):
             if snapshot.grid_meter.grid_power_kw > draft.peak_limit_kw:
-                warns.append(
+                results.append(
                     ConstraintCheckResult(
                         name="safety_pre_check",
                         status="warn",
@@ -648,9 +720,10 @@ class ConstraintsService:
                     )
                 )
         else:
-            # P15 — grid meter state not yet published. Peak limit is always
-            # set (Pydantic gt=0.0), so surface the unknown-state WARN.
-            warns.append(
+            # P15 + R2P11 — grid meter state not yet published OR NaN power.
+            # Peak limit is always set (Pydantic gt=0.0), so surface the
+            # unknown-state WARN.
+            results.append(
                 ConstraintCheckResult(
                     name="safety_pre_check",
                     status="warn",
@@ -661,8 +734,8 @@ class ConstraintsService:
                     ),
                 )
             )
-        if warns:
-            return tuple(warns)
+        if results:
+            return tuple(results)
         return (ConstraintCheckResult(name="safety_pre_check", status="pass"),)
 
     def _snapshot_safe(self) -> _PreviousSnapshot:
@@ -711,6 +784,31 @@ def _changed_fields(draft: ConstraintDraft, previous: _PreviousSnapshot) -> list
     ):
         fields.add("ev_charging_window")
     return sorted(fields)
+
+
+def _normalize_schema_field(raw_field: str | None, pydantic_error: object) -> str | None:
+    """R2P7 — collapse EV-window-related Pydantic locations to the AC7-mandated
+    unified slot ``ev_charging_window``.
+
+    Pydantic surfaces three shapes for the same semantic concern (paired-NULL
+    invariant, HH:MM format on start, HH:MM format on end). AC7 check 1
+    requires one ``field`` value covering all three. Other fields pass through
+    unchanged.
+    """
+    err = pydantic_error if isinstance(pydantic_error, dict) else {}
+    raw_msg = str(err.get("msg", ""))
+    if raw_field in ("ev_charging_window_start", "ev_charging_window_end"):
+        return "ev_charging_window"
+    # Model-level paired-NULL validator: ``loc=()`` → ``raw_field=None``. The
+    # ``_ev_window_paired`` validator's ValueError carries the canonical
+    # substring; recognising it lets us assign the unified slot even when
+    # Pydantic does not surface a ``loc``.
+    if raw_field is None and (
+        "must both be set or both be NULL" in raw_msg
+        or "must both be set or both be None" in raw_msg
+    ):
+        return "ev_charging_window"
+    return raw_field
 
 
 def _spec_schema_message(field: str | None, pydantic_error: object) -> str:

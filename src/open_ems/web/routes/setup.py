@@ -821,9 +821,18 @@ async def post_activate_constraints(
     csrf_token: str = Form(default=""),
 ) -> Response:
     _ = csrf_token
+    is_htmx = request.headers.get("HX-Request", "").lower() == "true"
     try:
         result = await svc.activate_draft(user.session_id, actor="installer", now=datetime.now(UTC))
     except ConstraintActivationError as exc:
+        # R2P5 — A re-click after a successful first activation lands here
+        # with ``reason='step_3_already_complete'`` (the service's gate fires
+        # on the second pass before any state change). Functionally the user
+        # IS in the post-activation state; treat the redundant click as a
+        # forward-redirect rather than an error banner so a double-click
+        # doesn't turn a successful activation into a 400 in the user's view.
+        if exc.reason == "step_3_already_complete":
+            return _activate_success_redirect(is_htmx)
         return _render_constraints_error_banner(request, user, exc, status_code=400)
     logger.info(
         "constraints_activated_via_route",
@@ -831,7 +840,24 @@ async def post_activate_constraints(
         session_id=user.session_id,
         config_version=result.config_version,
     )
-    return RedirectResponse(url="/installer/setup/validation", status_code=302)
+    return _activate_success_redirect(is_htmx)
+
+
+def _activate_success_redirect(is_htmx: bool) -> Response:
+    """R2P5 — return the correct redirect shape for the client class.
+
+    Plain form POST: HTTP 302 ``Location: …`` — the browser follows.
+    HTMX POST (``HX-Request: true``): HTTP 204 + ``HX-Redirect: …`` — HTMX
+    does not follow 302 / 303 on ``hx-post`` by default, so the route must
+    surface the redirect via the dedicated header. The activate form is
+    plain HTML today; the HX-aware branch is a forward-compat guard so a
+    future ``hx-post`` migration does not silently leave the user stuck on
+    Step 3 with an injected redirect document.
+    """
+    target = "/installer/setup/validation"
+    if is_htmx:
+        return Response(status_code=204, headers={"HX-Redirect": target})
+    return RedirectResponse(url=target, status_code=302)
 
 
 @router.get("/installer/setup/validation", response_class=HTMLResponse)
@@ -917,13 +943,24 @@ def _render_constraints_error_envelope(
     *,
     status_code: int,
 ) -> HTMLResponse:
-    """Render the inline single-error envelope used by the validate route (P6)."""
+    """Render the inline single-error envelope used by the validate route (P6).
+
+    R2P14 — thread ``exc.report`` into the template context. The original
+    envelope discarded the report payload entirely, so a validate call that
+    triggered the rejection with a populated ``ConstraintValidationReport``
+    showed only the top-level contract reason to the user — every
+    check-level error was hidden. The template's ``{% if report is defined
+    and report is not none %}`` guard renders nothing when the report is
+    absent, so callers that don't have a report continue to render the same
+    minimal envelope as before.
+    """
     return _templates.TemplateResponse(
         request,
         "installer/_setup_constraints_error.html",
         {
             "reason": exc.reason,
             "reason_message": reason_to_user_message(exc.reason),
+            "report": exc.report,
         },
         status_code=status_code,
     )

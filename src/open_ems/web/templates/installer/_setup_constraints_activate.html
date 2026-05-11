@@ -14,7 +14,11 @@
     {% if c.status == "warn" %}{% set _has_warn = true %}{% endif %}
   {% endfor %}
 {% endif %}
-{% set _can_activate = (view.validation_status == "valid") %}
+{# R2P15 — gate on BOTH status AND report presence. A concurrent draft delete +
+   re-upsert can transiently produce status='valid' with report=None; activating
+   in that window would activate against a report the user never saw. #}
+{% set _can_activate = (view.validation_status == "valid"
+                        and view.validation_report is not none) %}
 
 <form
   method="post"

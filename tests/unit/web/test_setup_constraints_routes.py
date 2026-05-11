@@ -361,6 +361,107 @@ async def test_get_constraints_short_circuits_to_step_4_when_step_3_complete(
     assert response.headers["location"] == "/installer/setup/validation"
 
 
+# R2P18 — Round-2 review patch: the service-layer ``assert_step_prerequisites``
+# gate is invoked from every state-mutating POST (P12 from round 1), but only
+# the GET path's step_3_already_complete short-circuit had a route-level test.
+# The two tests below assert the contract that POST /draft and POST /validate
+# both surface the exact-match ``step_3_already_complete`` rejection after the
+# wizard has been advanced — protecting against scripted callers (or HTMX
+# retries) that bypass the GET handler's redirect.
+
+
+async def test_post_draft_rejected_when_step_3_already_complete(
+    app_with_constraints: FastAPI,
+) -> None:
+    raw_token, session_id = await _create_installer_session()
+    wizard_repo = WizardStateRepo()
+    await wizard_repo.set_step_3_complete(
+        session_id, activated_config_version=1, now=datetime.now(UTC)
+    )
+    client = TestClient(app_with_constraints, base_url="https://test", follow_redirects=False)
+    response = client.post(
+        "/installer/setup/constraints/draft",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": _CSRF},
+        data={
+            "peak_limit_kw": "30",
+            "battery_reserve_floor_percent": "25",
+            "ev_charging_window_start": "",
+            "ev_charging_window_end": "",
+        },
+    )
+    assert response.status_code == 400
+    # Exact-match contract reason per AC11 — surfaced via the banner's
+    # ``data-reason`` attribute so tests / scripted callers can match.
+    assert 'data-reason="step_3_already_complete"' in response.text
+
+
+async def test_post_validate_rejected_when_step_3_already_complete(
+    app_with_constraints: FastAPI,
+) -> None:
+    raw_token, session_id = await _create_installer_session()
+    wizard_repo = WizardStateRepo()
+    await wizard_repo.set_step_3_complete(
+        session_id, activated_config_version=1, now=datetime.now(UTC)
+    )
+    client = TestClient(app_with_constraints, base_url="https://test", follow_redirects=False)
+    response = client.post(
+        "/installer/setup/constraints/validate",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": _CSRF},
+    )
+    assert response.status_code == 400
+    assert 'data-reason="step_3_already_complete"' in response.text
+
+
+async def test_post_activate_after_success_redirects_instead_of_400(
+    app_with_constraints: FastAPI,
+) -> None:
+    """R2P5 — a double-click on Activate (or a scripted retry) lands here once
+    Step 3 is already complete. The service-layer gate fires
+    ``step_3_already_complete`` BEFORE any state change; the route maps the
+    user-visible response to a forward-redirect rather than a 400 banner so
+    the second click does not turn a successful activation into an error.
+    """
+    raw_token, session_id = await _create_installer_session()
+    wizard_repo = WizardStateRepo()
+    await wizard_repo.set_step_3_complete(
+        session_id, activated_config_version=1, now=datetime.now(UTC)
+    )
+    client = TestClient(app_with_constraints, base_url="https://test", follow_redirects=False)
+    response = client.post(
+        "/installer/setup/constraints/activate",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": _CSRF},
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "/installer/setup/validation"
+
+
+async def test_post_activate_with_hx_request_returns_204_and_hx_redirect(
+    app_with_constraints: FastAPI,
+) -> None:
+    """R2P5 — HTMX clients (``HX-Request: true``) receive 204 + HX-Redirect
+    instead of a 302 redirect document so the activate response is handled by
+    HTMX's redirect mechanism rather than swapped into the activate region.
+    The activate form is plain HTML today; this test pins the forward-compat
+    HX behaviour so a future ``hx-post`` migration does not regress.
+    """
+    raw_token, session_id = await _create_installer_session()
+    wizard_repo = WizardStateRepo()
+    await wizard_repo.set_step_3_complete(
+        session_id, activated_config_version=1, now=datetime.now(UTC)
+    )
+    client = TestClient(app_with_constraints, base_url="https://test", follow_redirects=False)
+    response = client.post(
+        "/installer/setup/constraints/activate",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": _CSRF, "HX-Request": "true"},
+    )
+    assert response.status_code == 204
+    assert response.headers.get("HX-Redirect") == "/installer/setup/validation"
+
+
 # ---------------------------------------------------------------------------
 # GET render
 # ---------------------------------------------------------------------------

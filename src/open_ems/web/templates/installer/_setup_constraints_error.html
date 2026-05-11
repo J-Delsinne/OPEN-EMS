@@ -3,7 +3,25 @@
    Variables:
      reason          — exact-match contract string (machine-readable)
      reason_message  — operator-facing copy mapped from the contract reason (P6)
+     report          — ConstraintValidationReport | None (R2P14 — when a
+                       validation outcome triggered the rejection, surface the
+                       check-level breakdown so the installer sees the same
+                       detail the activate banner shows). Optional; the
+                       previous template ignored exc.report entirely so the
+                       check-level errors never reached the user.
 #}
 <div class="error-banner" role="alert" data-reason="{{ reason }}">
   {{ reason_message or reason }}
+  {% if report is defined and report is not none %}
+    <ul>
+      {% for check in report.checks %}
+        {% if check.status != "pass" %}
+          <li>
+            <span class="badge badge-{{ check.status }}">{{ check.status|upper }}</span>
+            {{ check.name }}{% if check.message %}: {{ check.message }}{% endif %}
+          </li>
+        {% endif %}
+      {% endfor %}
+    </ul>
+  {% endif %}
 </div>

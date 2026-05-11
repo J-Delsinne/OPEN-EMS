@@ -44,7 +44,14 @@ def _decode_report(raw: str | None) -> ConstraintValidationReport | None:
 
 
 def _encode_report(report: ConstraintValidationReport) -> str:
-    return json.dumps(report.model_dump(mode="json"))
+    # R2P1 — surface JSON encoding errors as typed ``ValueError`` rather than
+    # letting raw ``TypeError`` propagate. Defensive: ``ConstraintValidationReport``
+    # is a frozen Pydantic model with no exotic types so this should not fire,
+    # but any future field addition (e.g. arbitrary metadata) could regress.
+    try:
+        return json.dumps(report.model_dump(mode="json"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"ConstraintValidationReport JSON encoding failed: {exc}") from exc
 
 
 class ConstraintDraft(BaseModel):
@@ -175,12 +182,19 @@ class DraftConstraintsRepo:
         status: ConstraintDraftValidationStatus,
         report: ConstraintValidationReport,
         now: datetime,
+        commit: bool = True,
     ) -> None:
         """Lock-free variant — caller MUST already hold ``get_write_lock()``.
 
         Same error contract as ``record_validation_outcome``. Used by the
         activate route to update the draft's persisted validation state inside
         the same write-lock window that owns the activate transaction.
+
+        R2P1 — ``commit`` matches the convention of sibling ``_locked`` helpers
+        (``delete_locked``, ``set_step_3_complete_locked``). With ``commit=False``
+        the caller owns an outer ``BEGIN IMMEDIATE`` transaction; this method
+        joins it (no leading flush, no trailing commit) so the persisted FAIL
+        outcome rolls back atomically if a sibling write fails.
         """
         if status not in ("valid", "failed"):
             raise ValueError(
@@ -188,7 +202,8 @@ class DraftConstraintsRepo:
             )
         _require_utc(now, "now")
         encoded = _encode_report(report)
-        await self._conn.commit()
+        if commit:
+            await self._conn.commit()
         async with self._conn.execute(
             "UPDATE draft_constraints SET"
             " validation_status = ?,"
@@ -198,9 +213,15 @@ class DraftConstraintsRepo:
             (status, encoded, now.isoformat(), session_id),
         ) as cursor:
             if cursor.rowcount == 0:
-                await self._conn.commit()
+                # Symmetric to ``set_step_3_complete_locked`` — when commit=False
+                # we are inside the caller's transaction so we propagate and let
+                # the caller roll back; when commit=True we flush so the failed
+                # UPDATE is not left in an implicit transaction.
+                if commit:
+                    await self._conn.commit()
                 raise ValueError(f"No draft_constraints row for session_id={session_id!r}")
-        await self._conn.commit()
+        if commit:
+            await self._conn.commit()
 
     async def delete(self, session_id: str) -> None:
         """Remove the draft row. No-op if no row exists."""

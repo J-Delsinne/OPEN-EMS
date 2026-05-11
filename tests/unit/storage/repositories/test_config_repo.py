@@ -346,6 +346,12 @@ async def test_all_three_field_change_shares_single_config_version(
 ) -> None:
     """Story 9.3 AC2: peak + floor + EV window change in one activate() emits
     exactly THREE audit rows with the same config_version.
+
+    R2P19 — Round-2 review patch: this test previously asserted the audit-row
+    side of the invariant only. Extend with a cross-table JOIN against
+    ``active_constraints`` so the full invariant ("all audit rows + the
+    active_constraints row share one config_version, and that row's values
+    match the audit-emitted new_values") is pinned by a single test.
     """
     repo, conn = repo_with_conn
     await repo.activate(_input(25.0, 20.0), actor="installer")
@@ -363,6 +369,29 @@ async def test_all_three_field_change_shares_single_config_version(
         "peak_consumption_limit",
     ]
     assert {r["config_version"] for r in rows} == {2}
+    # R2P19 cross-table JOIN: the active_constraints row at config_version=2
+    # must exist AND its values must match the audit-emitted new values. A
+    # COUNT(*) over the join with a HAVING-equivalent shape would also work;
+    # the explicit SELECT below pins the value-side correctness too.
+    async with conn.execute(
+        "SELECT ac.peak_limit_kw, ac.battery_reserve_floor_percent,"
+        "       ac.ev_charging_window_start, ac.ev_charging_window_end,"
+        "       COUNT(cal.id) AS audit_row_count"
+        " FROM active_constraints AS ac"
+        " JOIN config_audit_log AS cal"
+        "   ON cal.config_version = ac.config_version"
+        " WHERE ac.config_version = 2"
+        " GROUP BY ac.config_version"
+    ) as cur:
+        join_row = await cur.fetchone()
+    assert join_row is not None, "active_constraints row missing at config_version=2"
+    assert int(join_row["audit_row_count"]) == 3, (
+        "expected exactly 3 audit rows joined to the active row at config_version=2"
+    )
+    assert float(join_row["peak_limit_kw"]) == 30.0
+    assert float(join_row["battery_reserve_floor_percent"]) == 25.0
+    assert str(join_row["ev_charging_window_start"]) == "09:00"
+    assert str(join_row["ev_charging_window_end"]) == "17:00"
 
 
 async def test_unchanged_ev_window_emits_no_audit_row(

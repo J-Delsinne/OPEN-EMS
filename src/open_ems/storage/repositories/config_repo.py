@@ -18,10 +18,11 @@ one ``config_version`` increment and one combined audit row.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import aiosqlite
+import structlog
 from pydantic import ValidationError
 
 from open_ems.core.constraints import ActiveConstraints, ActiveConstraintsInput
@@ -30,6 +31,8 @@ from open_ems.storage.repositories.config_audit_repo import (
     ConfigAuditChange,
     ConfigAuditRepo,
 )
+
+logger = structlog.get_logger(__name__)
 
 VALID_ACTIVATION_ACTORS: frozenset[str] = frozenset({"system", "installer"})
 
@@ -118,6 +121,7 @@ class ConfigRepo:
         *,
         actor: Literal["system", "installer"],
         inside_transaction: Callable[[int, datetime], Awaitable[None]] | None = None,
+        now: datetime | None = None,
     ) -> int:
         """Lock-free body of ``activate``. Caller MUST hold ``get_write_lock()``.
 
@@ -133,12 +137,25 @@ class ConfigRepo:
         four-table activation is atomic. If the callback raises, the whole
         transaction rolls back (no partial commits across tables).
 
+        R2P10 — when ``now`` is provided, it is used as the single timestamp
+        threaded through every row touched by this activation (the
+        ``active_constraints.activated_at`` column, the ``inside_transaction``
+        callback parameter, and — transitively — any wizard / draft row written
+        by the callback). Callers that want the implicit
+        ``datetime.now(UTC)`` semantics (e.g. the public ``activate`` entry
+        point) leave ``now=None``. Threading one ``now`` eliminates the
+        sub-millisecond divergence between ``active_constraints.activated_at``
+        and ``wizard_state.step_3_completed_at`` that the spec docstring
+        promises to be a single moment.
+
         Raises ``NoChangedFieldsError`` (a ``ValueError`` subclass) when the
         input matches the active row — callers may catch the specific type to
         map to a stable contract reason.
         """
         if actor not in VALID_ACTIVATION_ACTORS:
             raise ValueError(f"Invalid actor {actor!r}")
+        if now is not None and (now.tzinfo is None or now.utcoffset() != timedelta(0)):
+            raise ValueError("now must be timezone-aware UTC")
 
         # Flush any implicit transaction the connection may have opened so
         # BEGIN IMMEDIATE below acquires the write lock cleanly.
@@ -169,7 +186,7 @@ class ConfigRepo:
             if version_row is None:
                 raise RuntimeError("SQLite did not return a config version")
             next_version = int(version_row[0])
-            now_utc = datetime.now(UTC)
+            now_utc = now if now is not None else datetime.now(UTC)
             now_iso = now_utc.isoformat()
 
             await self._conn.execute(
@@ -197,10 +214,38 @@ class ConfigRepo:
             if inside_transaction is not None:
                 await inside_transaction(next_version, now_utc)
             await self._conn.commit()
+        except aiosqlite.OperationalError:
+            # R2P13 — SQLite lock-contention / "database is locked" surfaces as
+            # a typed OperationalError so callers (the service layer) can map
+            # it to a retryable rejection (``ConstraintActivationError(
+            # "activation_busy")``) rather than letting it bubble as a raw 500.
+            await _safe_rollback(self._conn)
+            raise
         except Exception:
-            await self._conn.rollback()
+            # R2P13 — shield the rollback so a connection-died failure during
+            # rollback cannot mask the originating exception. The original
+            # error is what tells the operator what actually went wrong.
+            await _safe_rollback(self._conn)
             raise
         return next_version
+
+
+async def _safe_rollback(conn: aiosqlite.Connection) -> None:
+    """R2P13 — Roll back without masking the originating exception.
+
+    A connection-died failure during rollback (rare but documented in
+    aiosqlite) would otherwise replace the real cause in the traceback. The
+    rollback failure is logged at WARN and swallowed; the caller still sees
+    the original exception via its own ``raise``.
+    """
+    try:
+        await conn.rollback()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "config_repo_rollback_failed",
+            component="config_repo",
+            exc_info=True,
+        )
 
 
 def _build_audit_changes(
