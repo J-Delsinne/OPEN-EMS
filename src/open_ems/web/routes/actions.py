@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
@@ -33,16 +33,19 @@ from open_ems.core import (
     StateStore,
 )
 from open_ems.engine.policy_guard import PolicyGuard
-from open_ems.services.audit_log import ObservabilityService
+from open_ems.services.audit_log import MAX_INSTALLER_NOTE_LENGTH, ObservabilityService
 from open_ems.services.installer_anomaly import (
     detect_anomaly_from_snapshot,
     dismiss_signature,
     get_dismissed_signature,
 )
 from open_ems.settings import Settings
+from open_ems.storage.repositories.event_log_repo import EventLogRepo
 from open_ems.web.dependencies import (
     HomeownerUser,
     InstallerUser,
+    get_event_log_repo,
+    get_observability_service,
     get_policy_guard,
     get_settings_dep,
     get_state_store,
@@ -52,6 +55,8 @@ from open_ems.web.dependencies import (
 from open_ems.web.state_serialization import (
     build_homeowner_headline_context,
     build_installer_anomaly_notice_context,
+    build_installer_event_log_row_context,
+    build_installer_note_form_context,
 )
 
 router = APIRouter()
@@ -495,3 +500,165 @@ async def dismiss_installer_anomaly(
         "fragments/installer/anomaly-notice.html",
         context,
     )
+
+
+# ── Story 11.2 AC10 — POST /actions/installer-note ───────────────────────────
+
+
+_NOTE_ERROR_TOO_LONG = "Note exceeds 2,000 characters."
+_NOTE_ERROR_EMPTY = "Note cannot be empty."
+_NOTE_ERROR_GENERIC = "Could not save note. Please try again."
+
+
+def _render_note_form_only(
+    request: Request,
+    *,
+    note_value: str,
+    error_message: str | None,
+    csrf_token: str,
+) -> HTMLResponse:
+    context = build_installer_note_form_context(
+        note_value=note_value,
+        error_message=error_message,
+        csrf_token=csrf_token,
+    )
+    return _templates.TemplateResponse(
+        request,
+        "fragments/installer/event-log-note-form.html",
+        {"note_form": context},
+    )
+
+
+@router.post("/actions/installer-note", response_class=HTMLResponse)
+async def post_installer_note(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    observability: ObservabilityService = Depends(get_observability_service),  # noqa: B008
+    event_log_repo: EventLogRepo = Depends(get_event_log_repo),  # noqa: B008
+    note: str = Form(""),
+) -> HTMLResponse:
+    """Story 11.2 AC10: resilient installer-note submission.
+
+    On success: re-renders the empty note form fragment AND emits an OOB swap
+    carrying the new INSTALLER row (``hx-swap-oob="afterbegin:#event-log-list-rows"``)
+    so HTMX prepends it without a full-page reload.
+
+    On failure: returns the form fragment with preserved textarea value + an
+    inline error. The textarea content is NEVER lost — installer can edit and
+    resubmit without retyping.
+    """
+    # Server-side length check (audit_log.installer_note also enforces this,
+    # but checking here lets us short-circuit before the service call and
+    # avoid a misleading "Could not save" message for a quota-style problem).
+    if len(note) > MAX_INSTALLER_NOTE_LENGTH:
+        return _render_note_form_only(
+            request,
+            note_value=note,
+            error_message=_NOTE_ERROR_TOO_LONG,
+            csrf_token=user.csrf_token,
+        )
+    if note.strip() == "":
+        return _render_note_form_only(
+            request,
+            note_value=note,
+            error_message=_NOTE_ERROR_EMPTY,
+            csrf_token=user.csrf_token,
+        )
+
+    try:
+        await observability.installer_note(note)
+    except ValueError as exc:
+        # Defensive — service-layer ValueErrors should already be gated above.
+        logger.warning(
+            "installer_note_service_validation_failed",
+            error=str(exc),
+            component="installer_event_log",
+        )
+        return _render_note_form_only(
+            request,
+            note_value=note,
+            error_message=_NOTE_ERROR_EMPTY,
+            csrf_token=user.csrf_token,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "installer_note_persist_failed",
+            error=str(exc),
+            component="installer_event_log",
+        )
+        return _render_note_form_only(
+            request,
+            note_value=note,
+            error_message=_NOTE_ERROR_GENERIC,
+            csrf_token=user.csrf_token,
+        )
+
+    # Success: pull the just-inserted row to render the OOB swap. The row's
+    # summary on disk is HTML-escaped (audit_log.installer_note escapes via
+    # html.escape) and Jinja autoescape applies a second time on render — the
+    # double-escape is correct because the DB stores e.g. "&lt;script&gt;" and
+    # we want the page to display the literal "&lt;script&gt;" text, not a
+    # `<script>` tag.
+    #
+    # If the read returns zero rows (transaction-visibility race) OR if the
+    # downstream row/template render raises, the note IS already persisted —
+    # surface a form-only success (textarea clears, no OOB row) and let the
+    # next page reload show the row. Leaking a 500 here would prompt the
+    # installer to retry → duplicate note.
+    form_ctx = build_installer_note_form_context(
+        note_value="",
+        error_message=None,
+        csrf_token=user.csrf_token,
+    )
+    try:
+        rows = await event_log_repo.list_filtered(
+            event_types=frozenset({"INSTALLER"}),
+            device_id=None,
+            since=None,
+            until=None,
+            keyword="",
+            limit=1,
+            offset=0,
+        )
+        if not rows:
+            logger.warning(
+                "installer_note_post_persist_read_returned_empty",
+                session_id=user.session_id,
+                note_length=len(note),
+                component="installer_event_log",
+            )
+            return _templates.TemplateResponse(
+                request,
+                "fragments/installer/event-log-note-form.html",
+                {"note_form": form_ctx},
+            )
+        latest = rows[0]
+        row_ctx = build_installer_event_log_row_context(latest)
+        logger.info(
+            "installer_note_persisted",
+            session_id=user.session_id,
+            note_length=len(note),
+            event_log_id=latest.id,
+            component="installer_event_log",
+        )
+        return _templates.TemplateResponse(
+            request,
+            "fragments/installer/event-log-note-form.html",
+            {
+                "note_form": form_ctx,
+                "oob_row": row_ctx,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "installer_note_post_persist_render_failed",
+            session_id=user.session_id,
+            note_length=len(note),
+            error=repr(exc),
+            component="installer_event_log",
+        )
+        return _templates.TemplateResponse(
+            request,
+            "fragments/installer/event-log-note-form.html",
+            {"note_form": form_ctx},
+        )

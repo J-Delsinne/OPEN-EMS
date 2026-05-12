@@ -391,3 +391,454 @@ def test_event_log_entry_is_frozen() -> None:
     )
     with pytest.raises((TypeError, ValueError)):
         entry.summary = "mutated"  # type: ignore[misc]
+
+
+# ── Story 11.2 AC14 — list_filtered + count_filtered ─────────────────────────
+
+
+async def _insert(
+    conn: aiosqlite.Connection,
+    *,
+    event_type: str = "SYSTEM",
+    timestamp: datetime | None = None,
+    summary: str = "test event",
+    device_id: str | None = None,
+    actor: str = "system",
+) -> None:
+    """Flexible insert helper for filter tests."""
+    ts = timestamp if timestamp is not None else _NOW
+    await conn.execute(
+        "INSERT INTO event_log"
+        " (schema_version, timestamp, actor, event_type, summary, device_id)"
+        " VALUES (1, ?, ?, ?, ?, ?)",
+        (ts.isoformat(), actor, event_type, summary, device_id),
+    )
+    await conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_no_filter_returns_all_ordered_by_timestamp_desc_then_id_desc(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: empty filter returns all rows newest-first."""
+    repo, conn = repo_with_conn
+    await _insert(conn, event_type="A", timestamp=_NOW - timedelta(minutes=3))
+    await _insert(conn, event_type="B", timestamp=_NOW - timedelta(minutes=1))
+    await _insert(conn, event_type="C", timestamp=_NOW - timedelta(minutes=2))
+    result = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="",
+        limit=50,
+        offset=0,
+    )
+    assert [e.event_type for e in result] == ["B", "C", "A"]
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_respects_limit_and_offset(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: pagination via LIMIT + OFFSET."""
+    repo, conn = repo_with_conn
+    for i in range(10):
+        await _insert(
+            conn,
+            event_type=f"E{i:02d}",
+            timestamp=_NOW - timedelta(minutes=i),
+        )
+    page1 = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="",
+        limit=3,
+        offset=0,
+    )
+    page2 = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="",
+        limit=3,
+        offset=3,
+    )
+    assert [e.event_type for e in page1] == ["E00", "E01", "E02"]
+    assert [e.event_type for e in page2] == ["E03", "E04", "E05"]
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_by_single_event_type(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: filter on one event_type."""
+    repo, conn = repo_with_conn
+    await _insert(conn, event_type="DECISION")
+    await _insert(conn, event_type="DEVICE")
+    await _insert(conn, event_type="SYSTEM")
+    result = await repo.list_filtered(
+        event_types=frozenset({"DECISION"}),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="",
+        limit=50,
+        offset=0,
+    )
+    assert [e.event_type for e in result] == ["DECISION"]
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_by_multiple_event_types_with_in_clause(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: IN clause over multi-type filter."""
+    repo, conn = repo_with_conn
+    await _insert(conn, event_type="DECISION", timestamp=_NOW - timedelta(minutes=4))
+    await _insert(conn, event_type="DEVICE", timestamp=_NOW - timedelta(minutes=3))
+    await _insert(conn, event_type="SYSTEM", timestamp=_NOW - timedelta(minutes=2))
+    await _insert(conn, event_type="CONSTRAINT", timestamp=_NOW - timedelta(minutes=1))
+    result = await repo.list_filtered(
+        event_types=frozenset({"DECISION", "DEVICE"}),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="",
+        limit=50,
+        offset=0,
+    )
+    assert {e.event_type for e in result} == {"DECISION", "DEVICE"}
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_by_device_id_excludes_null_device_rows(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC18: device_id filter does NOT match NULL rows (SQLite NULL semantics)."""
+    repo, conn = repo_with_conn
+    await _insert(conn, event_type="DECISION", device_id="batt-1")
+    await _insert(conn, event_type="DECISION", device_id=None)
+    await _insert(conn, event_type="DECISION", device_id="inv-1")
+    result = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id="batt-1",
+        since=None,
+        until=None,
+        keyword="",
+        limit=50,
+        offset=0,
+    )
+    assert len(result) == 1
+    assert result[0].device_id == "batt-1"
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_by_since_only(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: open-ended since boundary."""
+    repo, conn = repo_with_conn
+    await _insert(conn, timestamp=_NOW - timedelta(days=5))  # old
+    await _insert(conn, timestamp=_NOW - timedelta(days=1))  # recent
+    result = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=_NOW - timedelta(days=2),
+        until=None,
+        keyword="",
+        limit=50,
+        offset=0,
+    )
+    assert len(result) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_by_until_only(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: open-ended until boundary."""
+    repo, conn = repo_with_conn
+    await _insert(conn, timestamp=_NOW - timedelta(days=5))
+    await _insert(conn, timestamp=_NOW - timedelta(days=1))
+    result = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=_NOW - timedelta(days=2),
+        keyword="",
+        limit=50,
+        offset=0,
+    )
+    assert len(result) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_by_since_and_until_inclusive_exclusive_semantics(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: since is inclusive (>=), until is exclusive (<)."""
+    repo, conn = repo_with_conn
+    boundary = _NOW - timedelta(days=2)
+    await _insert(conn, timestamp=boundary - timedelta(seconds=1))  # before since
+    await _insert(conn, timestamp=boundary)  # exactly at since (included)
+    await _insert(conn, timestamp=_NOW - timedelta(days=1))  # within
+    await _insert(conn, timestamp=_NOW)  # exactly at until (excluded)
+    result = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=boundary,
+        until=_NOW,
+        keyword="",
+        limit=50,
+        offset=0,
+    )
+    assert len(result) == 2  # boundary itself + within
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_keyword_substring_match_on_summary_only(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: keyword matches via LIKE on summary; not actor / event_type / device_id."""
+    repo, conn = repo_with_conn
+    await _insert(conn, summary="peak limit reached")
+    await _insert(conn, summary="battery dispatched")
+    await _insert(conn, summary="EV charging started", actor="peak-system")
+    result = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="peak",
+        limit=50,
+        offset=0,
+    )
+    assert len(result) == 1
+    assert result[0].summary == "peak limit reached"
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_keyword_escapes_sql_wildcards_percent_and_underscore(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: %, _ in user keyword are escaped — a literal % search matches only literal %."""
+    repo, conn = repo_with_conn
+    await _insert(conn, summary="100% efficient")
+    await _insert(conn, summary="100_efficient")
+    await _insert(conn, summary="100 percent efficient")
+    result_percent = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="%",
+        limit=50,
+        offset=0,
+    )
+    assert [e.summary for e in result_percent] == ["100% efficient"]
+
+    result_underscore = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="_",
+        limit=50,
+        offset=0,
+    )
+    assert [e.summary for e in result_underscore] == ["100_efficient"]
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_keyword_escapes_backslash(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: backslash in user keyword is escaped first (ESCAPE '\\' literal preserved)."""
+    repo, conn = repo_with_conn
+    await _insert(conn, summary="path\\to\\thing")
+    await _insert(conn, summary="other thing")
+    result = await repo.list_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="path\\",
+        limit=50,
+        offset=0,
+    )
+    assert [e.summary for e in result] == ["path\\to\\thing"]
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_combined_filters_apply_AND_semantics(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: type + device + date + keyword all AND-combined."""
+    repo, conn = repo_with_conn
+    await _insert(
+        conn,
+        event_type="DECISION",
+        device_id="batt-1",
+        summary="peak limit applied",
+        timestamp=_NOW - timedelta(minutes=1),
+    )
+    await _insert(
+        conn,
+        event_type="DEVICE",
+        device_id="batt-1",
+        summary="peak limit applied",
+        timestamp=_NOW - timedelta(minutes=2),
+    )
+    await _insert(
+        conn,
+        event_type="DECISION",
+        device_id="inv-1",
+        summary="peak limit applied",
+        timestamp=_NOW - timedelta(minutes=3),
+    )
+    await _insert(
+        conn,
+        event_type="DECISION",
+        device_id="batt-1",
+        summary="strategy changed",
+        timestamp=_NOW - timedelta(minutes=4),
+    )
+    result = await repo.list_filtered(
+        event_types=frozenset({"DECISION"}),
+        device_id="batt-1",
+        since=_NOW - timedelta(minutes=10),
+        until=_NOW,
+        keyword="peak",
+        limit=50,
+        offset=0,
+    )
+    assert len(result) == 1
+    assert result[0].event_type == "DECISION"
+    assert result[0].device_id == "batt-1"
+    assert "peak" in result[0].summary
+
+
+@pytest.mark.asyncio
+async def test_count_filtered_matches_list_filtered_length_under_same_filter(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: count and list share the SAME WHERE clause."""
+    repo, conn = repo_with_conn
+    for i in range(5):
+        await _insert(
+            conn,
+            event_type="DECISION",
+            summary=f"event {i}",
+            timestamp=_NOW - timedelta(minutes=i),
+        )
+    for i in range(3):
+        await _insert(conn, event_type="SYSTEM", timestamp=_NOW - timedelta(minutes=i))
+
+    filt = {
+        "event_types": frozenset({"DECISION"}),
+        "device_id": None,
+        "since": None,
+        "until": None,
+        "keyword": "",
+    }
+    listed = await repo.list_filtered(**filt, limit=50, offset=0)  # type: ignore[arg-type]
+    counted = await repo.count_filtered(**filt)  # type: ignore[arg-type]
+    assert len(listed) == counted == 5
+
+
+@pytest.mark.asyncio
+async def test_count_filtered_no_filter_returns_full_table_count(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: empty filter → full COUNT(*)."""
+    repo, conn = repo_with_conn
+    for _ in range(7):
+        await _insert(conn)
+    counted = await repo.count_filtered(
+        event_types=frozenset(),
+        device_id=None,
+        since=None,
+        until=None,
+        keyword="",
+    )
+    assert counted == 7
+
+
+@pytest.mark.asyncio
+async def test_count_filtered_with_type_filter(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: count with type filter."""
+    repo, conn = repo_with_conn
+    for _ in range(4):
+        await _insert(conn, event_type="DECISION")
+    for _ in range(2):
+        await _insert(conn, event_type="SYSTEM")
+    assert (
+        await repo.count_filtered(
+            event_types=frozenset({"DECISION"}),
+            device_id=None,
+            since=None,
+            until=None,
+            keyword="",
+        )
+        == 4
+    )
+
+
+@pytest.mark.asyncio
+async def test_count_filtered_with_keyword(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC14: count with keyword filter."""
+    repo, conn = repo_with_conn
+    await _insert(conn, summary="peak limit hit")
+    await _insert(conn, summary="peak limit hit again")
+    await _insert(conn, summary="battery dispatched")
+    assert (
+        await repo.count_filtered(
+            event_types=frozenset(),
+            device_id=None,
+            since=None,
+            until=None,
+            keyword="peak",
+        )
+        == 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_rejects_negative_offset() -> None:
+    """AC14: defensive guard — offset must be >= 0."""
+    repo = EventLogRepo(conn=MagicMock())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="offset must be"):
+        await repo.list_filtered(
+            event_types=frozenset(),
+            device_id=None,
+            since=None,
+            until=None,
+            keyword="",
+            limit=50,
+            offset=-1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_filtered_rejects_zero_or_negative_limit() -> None:
+    """AC14: defensive guard — limit must be >= 1."""
+    repo = EventLogRepo(conn=MagicMock())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="limit must be"):
+        await repo.list_filtered(
+            event_types=frozenset(),
+            device_id=None,
+            since=None,
+            until=None,
+            keyword="",
+            limit=0,
+            offset=0,
+        )

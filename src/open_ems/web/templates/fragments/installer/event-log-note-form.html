@@ -1,0 +1,57 @@
+{#
+  Story 11.2 AC10 — installer note entry form.
+
+  Used by:
+    - Initial page render (event_log.html includes this with empty value, no error)
+    - POST /actions/installer-note success response (rendered standalone — empty
+      value + OOB swap to prepend the new INSTALLER row)
+    - POST /actions/installer-note failure response (rendered standalone with
+      preserved value + inline error)
+
+  Required context:
+    note_form: { note_value, error_message, csrf_token, max_length }
+#}
+<form
+  id="installer-note-form"
+  class="installer-event-log-note-form"
+  method="post"
+  action="/actions/installer-note"
+  hx-post="/actions/installer-note"
+  hx-target="#installer-note-form"
+  hx-swap="outerHTML"
+  aria-label="Add an installer note"
+>
+  <input type="hidden" name="csrf_token" value="{{ note_form.csrf_token }}">
+  <label class="installer-event-log-note-form__label" for="installer-note-textarea">
+    Add a note to the event log
+  </label>
+  <textarea
+    id="installer-note-textarea"
+    name="note"
+    rows="3"
+    maxlength="{{ note_form.max_length }}"
+    class="installer-event-log-note-form__textarea"
+    aria-label="Add installer note"
+  >{{ note_form.note_value }}</textarea>
+  {% if note_form.error_message %}
+  <p class="installer-event-log-note-form__error" role="alert">{{ note_form.error_message }}</p>
+  {% endif %}
+  <button type="submit" class="installer-event-log-note-form__submit">Add note</button>
+</form>
+{% if oob_row is defined and oob_row %}
+{# AC10: out-of-band swap — prepend the new INSTALLER row to the top of the list. #}
+<ol hx-swap-oob="afterbegin:#event-log-list-rows">
+  {% with row = oob_row %}
+    {% include "fragments/installer/event-log-row.html" %}
+  {% endwith %}
+</ol>
+{# Hide the empty-state caption — the list now has at least one row. The
+   element always exists in the list fragment (see event-log-list.html); when
+   the list was already non-empty this OOB swap is a no-op replacement. #}
+<p
+  id="event-log-empty-state"
+  class="installer-event-log-list__empty"
+  hidden
+  hx-swap-oob="outerHTML"
+></p>
+{% endif %}

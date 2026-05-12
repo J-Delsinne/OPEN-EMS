@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pathlib
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -25,6 +26,7 @@ from open_ems.web.dependencies import (
     require_homeowner,
     require_installer,
 )
+from open_ems.web.event_log_filters import EVENT_LOG_PAGE_SIZE, _parse_event_log_filters
 from open_ems.web.state_serialization import (
     HomeownerCard,
     build_homeowner_card_context,
@@ -33,6 +35,7 @@ from open_ems.web.state_serialization import (
     build_homeowner_weekly_summary_context,
     build_installer_anomaly_notice_context,
     build_installer_device_row_context,
+    build_installer_event_log_list_context,
     build_installer_event_log_preview_context,
     build_installer_health_indicator_context,
     build_installer_peak_tracker_context,
@@ -230,6 +233,71 @@ async def installer_anomaly_notice(
     return _templates.TemplateResponse(
         request,
         "fragments/installer/anomaly-notice.html",
+        context,
+    )
+
+
+@router.get("/fragments/installer/event-log-list", response_class=HTMLResponse)
+async def installer_event_log_list(
+    request: Request,
+    _user: InstallerUser = Depends(require_installer),  # noqa: B008
+    event_log_repo: EventLogRepo = Depends(get_event_log_repo),  # noqa: B008
+    type: str | None = None,
+    device_id: str | None = None,
+    window: str | None = None,
+    from_date: Annotated[str | None, Query(alias="from")] = None,
+    to_date: Annotated[str | None, Query(alias="to")] = None,
+    q: str | None = None,
+    offset: int = 0,
+) -> HTMLResponse:
+    """Story 11.2 AC3 / AC6: HTMX fragment route serving filtered + paginated
+    event-log rows.
+
+    Reuses ``_parse_event_log_filters`` so the filter contract matches the
+    page route 1:1. Returns the list-wrapper section (count caption + list +
+    load-more button) for outerHTML swap into ``#event-log-list-wrapper``.
+    """
+    filt = _parse_event_log_filters(
+        type=type,
+        device_id=device_id,
+        window=window,
+        from_date=from_date,
+        to_date=to_date,
+        q=q,
+    )
+    safe_offset = max(0, offset)
+    rows = await event_log_repo.list_filtered(
+        event_types=filt.event_types,
+        device_id=filt.device_id,
+        since=filt.since,
+        until=filt.until,
+        keyword=filt.keyword,
+        limit=EVENT_LOG_PAGE_SIZE,
+        offset=safe_offset,
+    )
+    total_count = (
+        await event_log_repo.count_filtered(
+            event_types=filt.event_types,
+            device_id=filt.device_id,
+            since=filt.since,
+            until=filt.until,
+            keyword=filt.keyword,
+        )
+        if filt.is_filtered()
+        else len(rows) + safe_offset
+    )
+    context = {
+        "list": build_installer_event_log_list_context(
+            rows=rows,
+            total_count=total_count,
+            current_offset=safe_offset,
+            filter=filt,
+            page_size=EVENT_LOG_PAGE_SIZE,
+        )
+    }
+    return _templates.TemplateResponse(
+        request,
+        "fragments/installer/event-log-list.html",
         context,
     )
 

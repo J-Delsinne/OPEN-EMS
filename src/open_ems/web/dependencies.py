@@ -12,6 +12,7 @@ from open_ems.core import StateStore
 from open_ems.core.constraints import ActiveConstraints
 from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.services.active_constraints import ActiveConstraintsProvider
+from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import Settings, get_settings
 from open_ems.storage.repositories.device_repo import DeviceRepo
 from open_ems.storage.repositories.energy_repo import EnergyRepo
@@ -156,6 +157,17 @@ def get_device_repo(request: Request) -> DeviceRepo:
     """Story 11.1 AC4: DeviceRepo dependency for the per-device-row fragment."""
     del request
     return DeviceRepo()
+
+
+def get_observability_service(request: Request) -> ObservabilityService:
+    """Story 11.2 AC10: ObservabilityService dependency for the installer-note POST.
+
+    Constructs a fresh instance per request (the underlying EventLogRepo
+    re-uses the shared aiosqlite pool). Mirrors the ``get_event_log_repo``
+    pattern.
+    """
+    del request
+    return ObservabilityService()
 
 
 def _next_url(request: Request) -> str:

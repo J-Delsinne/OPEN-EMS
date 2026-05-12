@@ -1,0 +1,26 @@
+{#
+  Story 11.2 — single event_log row partial.
+
+  Used by:
+    - event-log-list.html (list rendering)
+    - POST /actions/installer-note OOB swap response (single row prepended via
+      hx-swap-oob="afterbegin:#event-log-list-rows")
+
+  Required context (row scope):
+    row: {
+      id, utc_iso, display_timestamp, event_type, event_type_css_modifier,
+      summary, device_id
+    }
+#}
+<li class="installer-event-log-list__row" data-row-id="{{ row.id }}">
+  <time
+    class="installer-event-log-list__timestamp"
+    datetime="{{ row.utc_iso }}"
+    data-utc="{{ row.utc_iso }}"
+  >{{ row.display_timestamp }}</time>
+  <span class="event-badge event-badge--{{ row.event_type_css_modifier }}">{{ row.event_type }}</span>
+  <span class="installer-event-log-list__summary">{{ row.summary }}</span>
+  {% if row.device_id %}
+  <span class="installer-event-log-list__device-id">{{ row.device_id }}</span>
+  {% endif %}
+</li>

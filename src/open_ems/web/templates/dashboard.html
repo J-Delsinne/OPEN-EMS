@@ -54,28 +54,9 @@
     <section id="weekly-summary-panel" x-show="expanded" x-cloak></section>
   </section>
   {% elif dashboard_role == "installer" %}
+  {% set active = "dashboard" %}
   <section class="installer-dashboard" x-data="installerSidebar()">
-    <button
-      type="button"
-      class="installer-sidebar__hamburger"
-      aria-controls="installer-sidebar"
-      aria-label="Toggle navigation"
-      x-on:click="open = !open"
-    >☰</button>
-    <nav
-      id="installer-sidebar"
-      class="installer-sidebar"
-      x-bind:class="open ? 'installer-sidebar--open' : ''"
-    >
-      <span class="installer-sidebar__site-name">OPEN-EMS</span>
-      <ul class="installer-sidebar__items">
-        <li><a class="installer-sidebar__item installer-sidebar__item--active" href="/installer/dashboard" aria-current="page">Dashboard</a></li>
-        <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Devices</a></li>
-        <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Event Log</a></li>
-        <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Settings</a></li>
-        <li><a class="installer-sidebar__item" href="/installer/setup/discovery">Setup</a></li>
-      </ul>
-    </nav>
+    {% include "installer/_sidebar.html" %}
     <section class="installer-dashboard__main" aria-label="Live system state">
       <section
         id="installer-anomaly-notice"

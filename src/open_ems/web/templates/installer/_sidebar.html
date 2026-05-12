@@ -1,0 +1,45 @@
+{#
+  Story 11.2 AC2 — shared installer sidebar partial.
+
+  Used by:
+    - dashboard.html (installer branch) with active="dashboard"
+    - event_log.html with active="event-log"
+    - future installer pages (devices, settings) when those land
+
+  The mobile-collapse Alpine factory `installerSidebar` lives in
+  dashboard.html / event_log.html scripts blocks; this partial expects
+  the surrounding wrapper to declare `x-data="installerSidebar()"`.
+
+  Required context variables:
+    - active: one of "dashboard" | "event-log" | "devices" | "settings" | "setup"
+              (any other value renders no active item — safe default)
+#}
+<button
+  type="button"
+  class="installer-sidebar__hamburger"
+  aria-controls="installer-sidebar"
+  aria-label="Toggle navigation"
+  x-on:click="open = !open"
+>☰</button>
+<nav
+  id="installer-sidebar"
+  class="installer-sidebar"
+  x-bind:class="open ? 'installer-sidebar--open' : ''"
+>
+  <span class="installer-sidebar__site-name">OPEN-EMS</span>
+  <ul class="installer-sidebar__items">
+    <li><a
+      class="installer-sidebar__item{% if active == 'dashboard' %} installer-sidebar__item--active{% endif %}"
+      href="/installer/dashboard"
+      {% if active == 'dashboard' %}aria-current="page"{% endif %}
+    >Dashboard</a></li>
+    <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Devices</a></li>
+    <li><a
+      class="installer-sidebar__item{% if active == 'event-log' %} installer-sidebar__item--active{% endif %}"
+      href="/installer/event-log"
+      {% if active == 'event-log' %}aria-current="page"{% endif %}
+    >Event Log</a></li>
+    <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Settings</a></li>
+    <li><a class="installer-sidebar__item" href="/installer/setup/discovery">Setup</a></li>
+  </ul>
+</nav>

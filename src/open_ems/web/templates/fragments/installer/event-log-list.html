@@ -1,0 +1,56 @@
+{#
+  Story 11.2 — installer event-log list fragment.
+
+  Used by:
+    - event_log.html page (initial render — included via {% include %})
+    - GET /fragments/installer/event-log-list (HTMX filter / "Load more" replace)
+
+  Required context:
+    list: {
+      rows: list of row dicts,
+      is_empty: bool,
+      is_filtered: bool,
+      show_result_count: bool,
+      result_count_shown: int,
+      result_count_total: int,
+      has_more: bool,
+      next_offset: int | None,
+      load_more_query: str,
+    }
+#}
+<section id="event-log-list-wrapper" class="installer-event-log-list-wrapper" aria-live="polite">
+  {% if list.show_result_count %}
+  <p class="installer-event-log-result-count">
+    Showing {{ list.result_count_shown }} of {{ list.result_count_total }} events
+  </p>
+  {% endif %}
+
+  {# The ``<ol id="event-log-list-rows">`` MUST always exist so the note
+     POST's OOB swap (``hx-swap-oob="afterbegin:#event-log-list-rows"``) has
+     a stable target — even on a fresh install with zero events. The
+     empty-state caption is a sibling element with a stable id so the same
+     OOB response can clear it when the first row is prepended. #}
+  <p
+    id="event-log-empty-state"
+    class="installer-event-log-list__empty"
+    {% if not list.show_empty_state %}hidden{% endif %}
+  >
+    {% if list.is_filtered %}No events match this filter.{% else %}No events yet. Events will appear here as the system makes decisions.{% endif %}
+  </p>
+  <ol id="event-log-list-rows" class="installer-event-log-list">
+    {% for row in list.rows %}
+      {% include "fragments/installer/event-log-row.html" %}
+    {% endfor %}
+  </ol>
+
+  {% if list.has_more %}
+  <button
+    type="button"
+    class="installer-event-log-load-more"
+    hx-get="/fragments/installer/event-log-list{{ list.load_more_query }}"
+    hx-target="#event-log-list-rows"
+    hx-swap="beforeend"
+    hx-select="#event-log-list-rows > li"
+  >Load more</button>
+  {% endif %}
+</section>

@@ -1,0 +1,182 @@
+{#
+  Story 11.2 — installer event-log page.
+
+  Server-rendered shell with:
+    - shared installer sidebar (active="event-log")
+    - note entry form (AC10)
+    - filter bar: pills + date range + keyword search (AC4-AC7)
+    - result count caption when filter active (AC8)
+    - paginated list with "Load more" (AC3)
+
+  Filter changes are server-driven via HTMX (hx-get on the form, target the
+  list wrapper, push URL to history). Note submission is server-driven via
+  HTMX POST with OOB row prepend on success / preserved-value form on failure.
+
+  Client-side script at end of {% block scripts %} walks [data-utc] elements
+  and rewrites textContent to the browser-local timezone (AC12 Layer B).
+#}
+{% extends "base.html" %}
+
+{% block title %}{{ title }} — OPEN-EMS{% endblock %}
+
+{% block content %}
+<main>
+  <h1>{{ title }}</h1>
+  <section class="installer-event-log-page" x-data="installerSidebar()">
+    {% include "installer/_sidebar.html" %}
+    <section class="installer-event-log-page__main" aria-label="Event log">
+
+      {# AC10 — note entry form. Preserved-value semantics on failure. #}
+      {% include "fragments/installer/event-log-note-form.html" %}
+
+      {# AC4-AC7 — filter bar. Single form, multiple HTMX triggers. The
+         pills are type="button" (not submit) so clicking one fires its own
+         hx-get with the toggled type set; date/keyword inputs are change-
+         triggered and read the hidden type/window inputs via hx-include. #}
+      <form
+        class="installer-event-log-filter-bar"
+        method="get"
+        action="/installer/event-log"
+        hx-get="/fragments/installer/event-log-list"
+        hx-target="#event-log-list-wrapper"
+        hx-swap="outerHTML"
+        hx-push-url="true"
+        aria-label="Event log filters"
+      >
+        {# Hidden inputs carry the current type/window state across keyword/
+           date changes. Pill clicks override ``type`` via ``hx-vals``. #}
+        <input type="hidden" name="type" value="{{ filter_type_value }}">
+        {% if filter_window %}
+        <input type="hidden" name="window" value="{{ filter_window }}">
+        {% endif %}
+
+        <fieldset class="installer-event-log-filter-bar__pills">
+          <legend class="visually-hidden">Filter by event type</legend>
+          {% for pill in filter_pills %}
+          <button
+            type="button"
+            class="event-log-filter-pill event-log-filter-pill--{{ pill.css_modifier }}{% if pill.active %} event-log-filter-pill--active{% endif %}"
+            aria-pressed="{% if pill.active %}true{% else %}false{% endif %}"
+            hx-get="/fragments/installer/event-log-list"
+            hx-vals='{"type": "{{ pill.toggle_value }}"}'
+            hx-include="closest form"
+            hx-target="#event-log-list-wrapper"
+            hx-swap="outerHTML"
+            hx-push-url="true"
+          >{{ pill.value }}</button>
+          {% endfor %}
+        </fieldset>
+
+        <label class="installer-event-log-filter-bar__date">
+          <span>From</span>
+          <input
+            type="date"
+            name="from"
+            value="{{ filter_from }}"
+            aria-describedby="event-log-utc-hint"
+            hx-trigger="change"
+            hx-get="/fragments/installer/event-log-list"
+            hx-target="#event-log-list-wrapper"
+            hx-include="closest form"
+            hx-push-url="true"
+          >
+        </label>
+        <label class="installer-event-log-filter-bar__date">
+          <span>To</span>
+          <input
+            type="date"
+            name="to"
+            value="{{ filter_to }}"
+            aria-describedby="event-log-utc-hint"
+            hx-trigger="change"
+            hx-get="/fragments/installer/event-log-list"
+            hx-target="#event-log-list-wrapper"
+            hx-include="closest form"
+            hx-push-url="true"
+          >
+        </label>
+        <p id="event-log-utc-hint" class="installer-event-log-filter-bar__hint">
+          Dates are interpreted in UTC.
+        </p>
+
+        <label class="installer-event-log-filter-bar__keyword">
+          <span class="visually-hidden">Search summaries</span>
+          <input
+            type="search"
+            name="q"
+            value="{{ filter_keyword }}"
+            placeholder="Search summaries"
+            hx-trigger="input changed delay:300ms"
+            hx-get="/fragments/installer/event-log-list"
+            hx-target="#event-log-list-wrapper"
+            hx-include="closest form"
+            hx-push-url="true"
+          >
+        </label>
+
+        {% if filter_device_id %}
+        <input type="hidden" name="device_id" value="{{ filter_device_id }}">
+        {% endif %}
+      </form>
+
+      {# AC3 — list wrapper. Filter changes outerHTML-swap this entire section. #}
+      {% include "fragments/installer/event-log-list.html" %}
+
+    </section>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Story 11.1 AC2 — Installer sidebar mobile-collapse factory.
+  // Single ``open`` boolean drives the hamburger toggle on ≤640px. On
+  // desktop the CSS media query overrides the Alpine binding so the sidebar
+  // is always visible.
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('installerSidebar', () => ({
+      open: false,
+    }));
+  });
+
+  // Story 11.2 AC12 Layer B — client-side timezone localization.
+  //
+  // Walks all [data-utc] elements and rewrites textContent to the
+  // browser-local timezone via Intl.DateTimeFormat. Runs on initial
+  // DOMContentLoaded AND after every HTMX outerHTML swap (htmx:afterSwap)
+  // so newly-loaded rows (filter changes, "Load more", OOB-prepended INSTALLER
+  // rows from the note POST) are localized consistently.
+  //
+  // The server-side Brussels fallback textContent stays in place when:
+  //   - JS is disabled
+  //   - Intl is missing or broken in the browser
+  //   - data-utc is malformed (defensive — should never happen with the
+  //     server contract that emits ISO-8601 UTC from astimezone(UTC).isoformat())
+  (function () {
+    function localizeOne(el) {
+      var utc = el.getAttribute('data-utc');
+      if (!utc) return;
+      var d = new Date(utc);
+      if (isNaN(d.getTime())) return;
+      var opts = {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit',
+        timeZoneName: 'short',
+      };
+      try {
+        el.textContent = new Intl.DateTimeFormat(undefined, opts).format(d);
+      } catch (e) {
+        /* keep server-side fallback on Intl failure */
+      }
+    }
+    function localizeAll(root) {
+      var nodes = (root || document).querySelectorAll('[data-utc]');
+      for (var i = 0; i < nodes.length; i++) localizeOne(nodes[i]);
+    }
+    document.addEventListener('DOMContentLoaded', function () { localizeAll(document); });
+    document.body.addEventListener('htmx:afterSwap', function (evt) {
+      localizeAll(evt.detail.elt);
+    });
+  })();
+</script>
+{% endblock %}

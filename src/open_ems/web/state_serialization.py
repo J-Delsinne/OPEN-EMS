@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -24,6 +24,7 @@ from open_ems.core import (
 from open_ems.core.constraints import ActiveConstraints
 from open_ems.core.energy import WeeklyEnergySummaryRow
 from open_ems.core.state import DeviceSlot
+from open_ems.services.audit_log import MAX_INSTALLER_NOTE_LENGTH
 from open_ems.services.installer_anomaly import (
     AnomalySignature,
     detect_anomaly_from_snapshot,
@@ -31,6 +32,7 @@ from open_ems.services.installer_anomaly import (
 )
 from open_ems.storage.repositories.device_repo import DeviceRegistryEntry
 from open_ems.storage.repositories.event_log_repo import EventLogEntry
+from open_ems.web.event_log_filters import EventLogFilter
 
 _serialization_logger = structlog.get_logger(__name__)
 
@@ -95,10 +97,48 @@ _PEAK_APPROACH_RATIO = 0.9
 # AC6: event-log preview summary truncation length.
 _EVENT_LOG_PREVIEW_SUMMARY_MAX = 80
 
-# AC6: server-side fallback timezone for the event-log preview. Story 11.2
-# will replace with client-side Intl.DateTimeFormat. The DST-aware Brussels
-# zone is the deployment target for OPEN-EMS v1.
+# AC6: server-side fallback timezone for the event-log preview + Story 11.2's
+# full event-log page. The DST-aware Brussels zone is the deployment target for
+# OPEN-EMS v1; the event-log page additionally rewrites textContent to the
+# browser-local zone via Intl.DateTimeFormat client-side (Story 11.2 AC12 Layer B).
 _EVENT_LOG_DISPLAY_TIMEZONE = "Europe/Brussels"
+
+
+def _format_event_log_timestamp_brussels_fallback(ts: datetime) -> str:
+    """Story 11.1 AC6 / Story 11.2 T3: server-side Brussels-locale fallback
+    display string for ``event_log.timestamp`` values.
+
+    Used by the dashboard preview (11.1) and the full event-log page (11.2).
+    Both surfaces emit this string as the initial ``textContent``; the event-log
+    page adds a client-side Intl.DateTimeFormat rewrite that overrides on
+    browsers with a working ``Intl`` implementation. The Brussels fallback is
+    what JS-disabled clients, screen readers reading the raw HTML, and
+    Intl-broken browsers see.
+
+    The format is ``"YYYY-MM-DD HH:MM <tz_abbrev> / UTC<+/-N>"``.
+
+    P11 review-fix carry-over: the except clause is narrowed to zoneinfo
+    data-absent failures only so programming errors bubble up instead of being
+    masked by the UTC fallback. A warning is logged the first time the fallback
+    fires.
+    """
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
+
+        local_ts = ts.astimezone(ZoneInfo(_EVENT_LOG_DISPLAY_TIMEZONE))
+        offset = local_ts.utcoffset()
+        offset_hours = int(offset.total_seconds() // 3600) if offset is not None else 0
+        tz_abbrev = local_ts.tzname() or "UTC"
+        return f"{local_ts.strftime('%Y-%m-%d %H:%M')} {tz_abbrev} / UTC{offset_hours:+d}"
+    except (ZoneInfoNotFoundError, ImportError) as exc:
+        _serialization_logger.warning(
+            "event_log_preview_zoneinfo_fallback",
+            timezone=_EVENT_LOG_DISPLAY_TIMEZONE,
+            error=str(exc),
+            component="state_serialization",
+        )
+        return f"{ts.astimezone(UTC).strftime('%Y-%m-%d %H:%M')} UTC"
+
 
 # AC5 / AC14 — plain-language labels mapped 1:1 from EnergyStrategy enum values.
 # Per the structural contract, the headline reads ONLY from operating_mode +
@@ -867,30 +907,11 @@ def build_installer_event_log_preview_context(
         # server-side fallback with Intl.DateTimeFormat).
         utc_iso = entry.timestamp.astimezone(UTC).isoformat()
 
-        # Server-side fallback display string in Europe/Brussels. Uses
-        # zoneinfo (stdlib) — no new dependency. P11 review fix: narrowed
-        # the except clause to zoneinfo-data-absent failures only so programming
-        # errors (AttributeError, TypeError) bubble up instead of being masked
-        # by the silent UTC fallback. Logs a warning the first time we fall
-        # back so the gap surfaces in production logs.
-        try:
-            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
-
-            local_ts = entry.timestamp.astimezone(ZoneInfo(_EVENT_LOG_DISPLAY_TIMEZONE))
-            offset = local_ts.utcoffset()
-            offset_hours = int(offset.total_seconds() // 3600) if offset is not None else 0
-            tz_abbrev = local_ts.tzname() or "UTC"
-            display_timestamp = (
-                f"{local_ts.strftime('%Y-%m-%d %H:%M')} {tz_abbrev} / UTC{offset_hours:+d}"
-            )
-        except (ZoneInfoNotFoundError, ImportError) as exc:
-            _serialization_logger.warning(
-                "event_log_preview_zoneinfo_fallback",
-                timezone=_EVENT_LOG_DISPLAY_TIMEZONE,
-                error=str(exc),
-                component="state_serialization",
-            )
-            display_timestamp = f"{entry.timestamp.astimezone(UTC).strftime('%Y-%m-%d %H:%M')} UTC"
+        # Story 11.2 T3: lifted to module-level helper so the event-log page
+        # (Story 11.2) and the dashboard preview (Story 11.1) call the same
+        # code path. Behavior must remain byte-for-byte identical here so the
+        # existing 11.1 preview tests do not regress.
+        display_timestamp = _format_event_log_timestamp_brussels_fallback(entry.timestamp)
 
         summary = entry.summary
         if len(summary) > _EVENT_LOG_PREVIEW_SUMMARY_MAX:
@@ -944,3 +965,216 @@ def build_installer_anomaly_notice_context(
         "event_log_link": f"/installer/event-log{current.link_query}",
         "anomaly_types_sorted": sorted(current.anomaly_types),
     }
+
+
+# ── Story 11.2 — installer event-log page surface ────────────────────────────
+
+# AC4 / AC6 / UX spec line 1241: the five event-type pills shown in the filter
+# bar. The list is rendered in this fixed order regardless of which pills are
+# currently active; ``aria-pressed`` reflects the active set.
+_INSTALLER_EVENT_LOG_FILTER_PILLS: tuple[str, ...] = (
+    "DECISION",
+    "DEVICE",
+    "SYSTEM",
+    "CONSTRAINT",
+    "INSTALLER",
+)
+
+
+def build_installer_event_log_row_context(entry: EventLogEntry) -> dict[str, object]:
+    """Story 11.2: render one ``EventLogEntry`` into a row context dict.
+
+    The page (and the OOB-swap response from the note POST) render rows via
+    the SAME row template so the shape is canonical here. Summary is NOT
+    truncated for the full event-log page (unlike the dashboard preview at
+    11.1 AC6); UX spec §"Event Log Row" line 1219 calls for the full summary
+    in the list view.
+    """
+    return {
+        "id": entry.id,
+        "utc_iso": entry.timestamp.astimezone(UTC).isoformat(),
+        "display_timestamp": _format_event_log_timestamp_brussels_fallback(entry.timestamp),
+        "event_type": entry.event_type,
+        "event_type_css_modifier": entry.event_type.lower(),
+        "summary": entry.summary,
+        "device_id": entry.device_id,
+    }
+
+
+def build_installer_event_log_list_context(
+    *,
+    rows: list[EventLogEntry],
+    total_count: int,
+    current_offset: int,
+    filter: EventLogFilter,  # noqa: A002 — match the dataclass name; not the builtin
+    page_size: int,
+) -> dict[str, object]:
+    """Story 11.2: list-fragment context (subset of the page context).
+
+    Used by both the page-route initial render (composed into the full page)
+    and the ``/fragments/installer/event-log-list`` HTMX fragment route.
+    """
+    rendered_rows = [build_installer_event_log_row_context(e) for e in rows]
+    has_more = len(rows) == page_size
+    next_offset = current_offset + len(rows) if has_more else None
+    is_filtered = filter.is_filtered()
+    is_empty = len(rows) == 0
+    return {
+        "rows": rendered_rows,
+        "is_empty": is_empty,
+        "is_filtered": is_filtered,
+        # The empty-state caption shows only when the FIRST page returns no
+        # rows. Past-end pagination (``offset > 0`` with empty results) does
+        # NOT show the caption — the user paginated past the end of a result
+        # set that DOES have matches at offset 0.
+        "show_empty_state": is_empty and current_offset == 0,
+        # AC8: "Showing N of M events" — only when filter is active.
+        "show_result_count": is_filtered,
+        "result_count_shown": current_offset + len(rows),
+        "result_count_total": total_count,
+        # AC3: "Load more" only when more rows exist beyond this page.
+        "has_more": has_more,
+        "next_offset": next_offset,
+        # Used by the "Load more" link to preserve filter state in the URL.
+        "load_more_query": _build_event_log_query_string(filter, next_offset),
+    }
+
+
+def build_installer_event_log_page_context(
+    *,
+    rows: list[EventLogEntry],
+    total_count: int,
+    current_offset: int,
+    filter: EventLogFilter,  # noqa: A002
+    page_size: int,
+    csrf_token: str,
+) -> dict[str, object]:
+    """Story 11.2: full event-log page context.
+
+    Composes the filter-pill active states + date inputs + keyword input +
+    the list-fragment context + the note-form context. Sidebar partial reads
+    ``active`` from the global context; the route sets ``active="event-log"``.
+
+    When ``filter.window`` is set (date range derived from ``?window=...``),
+    the form's date inputs render empty and a hidden ``window`` input carries
+    the relative vocabulary forward — resubmitting the form preserves the
+    now-relative semantics rather than freezing to the literal "yesterday"
+    date that ``_filter_until_to_iso`` would otherwise emit.
+    """
+    list_ctx = build_installer_event_log_list_context(
+        rows=rows,
+        total_count=total_count,
+        current_offset=current_offset,
+        filter=filter,
+        page_size=page_size,
+    )
+    window_active = filter.window is not None
+    return {
+        "active": "event-log",
+        "csrf_token": csrf_token,
+        # Filter bar — pill active states + per-pill toggle value for HTMX clicks.
+        "filter_pills": [
+            {
+                "value": pill,
+                "css_modifier": pill.lower(),
+                "active": pill in filter.event_types,
+                # Comma-joined sorted type set after toggling this pill;
+                # the pill's ``hx-vals`` sends this as the new ``type`` param.
+                "toggle_value": _toggle_event_type(filter.event_types, pill),
+            }
+            for pill in _INSTALLER_EVENT_LOG_FILTER_PILLS
+        ],
+        # Hidden form fields preserve the current type/window filter across
+        # date/keyword changes; pill clicks override ``type`` via ``hx-vals``.
+        "filter_type_value": ",".join(sorted(filter.event_types)),
+        "filter_window": filter.window or "",
+        "filter_device_id": filter.device_id or "",
+        # When the range is window-derived, leave date inputs empty so the
+        # form doesn't freeze the relative window into literal dates.
+        "filter_from": (
+            "" if window_active or filter.since is None else _filter_date_to_iso(filter.since)
+        ),
+        "filter_to": (
+            "" if window_active or filter.until is None else _filter_until_to_iso(filter.until)
+        ),
+        "filter_keyword": filter.keyword,
+        # Compose the list fragment context.
+        "list": list_ctx,
+        # Note form initial state (empty value, no error).
+        "note_form": build_installer_note_form_context(
+            note_value="", error_message=None, csrf_token=csrf_token
+        ),
+    }
+
+
+def _toggle_event_type(active: frozenset[str], pill: str) -> str:
+    """Compute the comma-list value for ``type`` after toggling ``pill``."""
+    new_set = (active - {pill}) if pill in active else (active | {pill})
+    return ",".join(sorted(new_set))
+
+
+def build_installer_note_form_context(
+    *,
+    note_value: str,
+    error_message: str | None,
+    csrf_token: str,
+) -> dict[str, object]:
+    """Story 11.2 AC10: note form context.
+
+    Used for initial page render (empty value, no error), successful POST
+    response (empty value, no error — textarea clears), and failed POST
+    response (preserved value, inline error).
+    """
+    return {
+        "note_value": note_value,
+        "error_message": error_message,
+        "csrf_token": csrf_token,
+        # AC10: client-side maxlength on the textarea (UI nudge). The
+        # server-side check in ObservabilityService.installer_note is the
+        # authoritative gate.
+        "max_length": MAX_INSTALLER_NOTE_LENGTH,
+    }
+
+
+def _filter_date_to_iso(d: datetime) -> str:
+    """Format a since datetime back into YYYY-MM-DD for the form input."""
+    return d.astimezone(UTC).strftime("%Y-%m-%d")
+
+
+def _filter_until_to_iso(d: datetime) -> str:
+    """The until value is stored as next-day-midnight (exclusive); subtract 1 day to
+    surface the inclusive end-date the installer originally typed."""
+    return (d.astimezone(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _build_event_log_query_string(
+    filter: EventLogFilter,  # noqa: A002
+    offset: int | None,
+) -> str:
+    """Build the query string for the "Load more" link, preserving filters.
+
+    Returns a string starting with ``?`` (or empty if nothing to add). The
+    offset is included only when paginating forward (offset is not None).
+
+    Window-derived ranges emit ``window=...`` (NOT literal ``from``/``to``) so
+    the now-relative semantics survive across "Load more" clicks.
+    """
+    params: list[tuple[str, str]] = []
+    if filter.event_types:
+        params.append(("type", ",".join(sorted(filter.event_types))))
+    if filter.device_id:
+        params.append(("device_id", filter.device_id))
+    if filter.window is not None:
+        params.append(("window", filter.window))
+    else:
+        if filter.since is not None:
+            params.append(("from", _filter_date_to_iso(filter.since)))
+        if filter.until is not None:
+            params.append(("to", _filter_until_to_iso(filter.until)))
+    if filter.keyword:
+        params.append(("q", filter.keyword))
+    if offset is not None:
+        params.append(("offset", str(offset)))
+    if not params:
+        return ""
+    return "?" + "&".join(f"{k}={quote(v, safe=',')}" for k, v in params)
