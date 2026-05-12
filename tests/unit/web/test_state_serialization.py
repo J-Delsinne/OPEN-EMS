@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import re
+import uuid
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,14 +16,20 @@ from open_ems.core import (
     DeviceRole,
     EnergyStrategy,
     EVChargerState,
+    EVOverrideState,
     GlobalState,
     GridMeterState,
     InverterState,
     SystemOperatingMode,
     SystemSnapshot,
 )
+from open_ems.core.constraints import ActiveConstraints
 from open_ems.web.state_serialization import (
+    _OVERRIDE_FAILURE_FALLBACK,
+    _OVERRIDE_FAILURE_REASONS,
+    _resolve_failure_reason_plain,
     build_homeowner_card_context,
+    build_homeowner_ev_card_context,
     build_homeowner_headline_context,
     serialize_homeowner_snapshot,
     serialize_installer_snapshot,
@@ -441,3 +450,309 @@ def test_degraded_explanations_cover_every_operating_mode() -> None:
     from open_ems.web.state_serialization import _DEGRADED_EXPLANATIONS
 
     assert set(_DEGRADED_EXPLANATIONS.keys()) == set(SystemOperatingMode)
+
+
+# ---------------------------------------------------------------------------
+# Story 10.2 — AC10/AC11/AC12 serializer + EV-card-context coverage
+# ---------------------------------------------------------------------------
+
+
+def _override(
+    *,
+    dispatch_status: str = "pending",
+    failure_reason: str | None = None,
+    session_observed_active: bool = False,
+) -> EVOverrideState:
+    return EVOverrideState(
+        correlation_id=uuid.uuid4(),
+        requested_at=_NOW_UTC,
+        expires_at=_NOW_UTC + timedelta(hours=2),
+        dispatch_status=dispatch_status,  # type: ignore[arg-type]
+        failure_reason=failure_reason,
+        session_observed_active=session_observed_active,
+    )
+
+
+def _idle_ev_charger() -> EVChargerState:
+    return EVChargerState(
+        device_id="ev-001",
+        status="available",
+        session_active=False,
+        current_power_kw=0.0,
+        power_source="meter_values",
+        power_measured_at=_NOW_UTC,
+        read_at=_NOW_UTC,
+    )
+
+
+_UNSET = object()
+
+
+def _snapshot_with(
+    *,
+    override: EVOverrideState | None = None,
+    ev_charger: Any = _UNSET,
+    operating_mode: SystemOperatingMode = SystemOperatingMode.normal,
+) -> SystemSnapshot:
+    if ev_charger is _UNSET:
+        ev_charger = _idle_ev_charger()
+    return SystemSnapshot(
+        sequence_id=42,
+        captured_at=_NOW_UTC,
+        global_state=GlobalState.normal,
+        operating_mode=operating_mode,
+        active_strategy=EnergyStrategy.minimize_cost,
+        inverter=None,
+        battery=None,
+        ev_charger=ev_charger,
+        grid_meter=None,
+        component_states={
+            DeviceRole.inverter: ComponentState.unavailable,
+            DeviceRole.battery: ComponentState.unavailable,
+            DeviceRole.ev_charger: ComponentState.active,
+            DeviceRole.grid_meter: ComponentState.unavailable,
+        },
+        data_age_seconds=dict.fromkeys(DeviceRole),
+        system_clock_status="valid",
+        active_ev_override=override,
+    )
+
+
+def _active_constraints(
+    *,
+    ev_start: str | None = "22:30",
+    ev_end: str | None = "06:00",
+) -> ActiveConstraints:
+    return ActiveConstraints(
+        peak_limit_kw=5.0,
+        battery_reserve_floor_percent=20.0,
+        config_version=1,
+        activated_at=_NOW_UTC,
+        ev_charging_window_start=ev_start,
+        ev_charging_window_end=ev_end,
+    )
+
+
+def test_homeowner_serializer_includes_active_ev_override_when_present() -> None:
+    """Story 10.2 AC10: snapshot.active_ev_override flows into the homeowner SSE payload."""
+    override = _override()
+    snapshot = _snapshot_with(override=override)
+    payload = serialize_homeowner_snapshot(snapshot)
+    assert "active_ev_override" in payload
+    assert payload["active_ev_override"] is not None
+    assert isinstance(payload["active_ev_override"], dict)
+    assert payload["active_ev_override"]["correlation_id"] == str(override.correlation_id)
+    assert payload["active_ev_override"]["dispatch_status"] == "pending"
+
+
+def test_homeowner_serializer_includes_active_ev_override_as_none_when_absent() -> None:
+    """Story 10.2 AC10: absent override serializes as None (not omitted)."""
+    payload = serialize_homeowner_snapshot(_snapshot_with(override=None))
+    assert payload["active_ev_override"] is None
+
+
+def test_installer_serializer_includes_active_ev_override() -> None:
+    """Story 10.2 AC10: installer payload includes the same override shape."""
+    override = _override()
+    snapshot = _snapshot_with(override=override)
+    payload = serialize_installer_snapshot(snapshot)
+    assert payload["active_ev_override"] is not None
+    assert isinstance(payload["active_ev_override"], dict)
+    assert payload["active_ev_override"]["correlation_id"] == str(override.correlation_id)
+
+
+def test_build_homeowner_ev_card_context_idle_when_no_override() -> None:
+    """Story 10.2 AC11 — idle: no override + EV available."""
+    ctx = build_homeowner_ev_card_context(_snapshot_with(override=None), _active_constraints())
+    assert ctx["override_state"] == "idle"
+    assert ctx["button_label"] == "Charge EV now"
+    assert ctx["button_disabled"] is False
+    assert ctx["retry_visible"] is False
+    assert ctx["unavailable"] is False
+    assert "22:30" in str(ctx["next_session_summary"])
+
+
+def test_build_homeowner_ev_card_context_optimistic_when_pending_and_not_session_active() -> None:
+    """Story 10.2 AC11 — optimistic: pending override + session_active=False."""
+    snapshot = _snapshot_with(override=_override(), ev_charger=_idle_ev_charger())
+    ctx = build_homeowner_ev_card_context(snapshot, _active_constraints())
+    assert ctx["override_state"] == "optimistic"
+    assert ctx["button_label"] == "Starting charging…"
+    assert ctx["button_disabled"] is True
+    assert ctx["retry_visible"] is False
+
+
+def test_build_homeowner_ev_card_context_confirmed_when_pending_and_session_active() -> None:
+    """Story 10.2 AC11 — confirmed: pending override + session_active=True. Critical AC."""
+    ev_charging = EVChargerState(
+        device_id="ev-001",
+        status="charging",
+        session_active=True,
+        current_power_kw=7.0,
+        power_source="meter_values",
+        power_measured_at=_NOW_UTC,
+        read_at=_NOW_UTC,
+    )
+    snapshot = _snapshot_with(override=_override(), ev_charger=ev_charging)
+    ctx = build_homeowner_ev_card_context(snapshot, _active_constraints())
+    assert ctx["override_state"] == "confirmed"
+    assert ctx["button_label"] == "Charging now"
+    assert ctx["button_disabled"] is True
+    assert ctx["constraint_notice"]  # populated in confirmed state
+    assert "EV charging started." in str(ctx["aria_live_message"])
+
+
+def test_build_homeowner_ev_card_context_confirmed_omits_constraint_notice_in_fail_safe() -> None:
+    """Story 10.2 AC11: peak-limit notice suppressed when operating_mode is fail_safe."""
+    ev_charging = EVChargerState(
+        device_id="ev-001",
+        status="charging",
+        session_active=True,
+        current_power_kw=7.0,
+        power_source="meter_values",
+        power_measured_at=_NOW_UTC,
+        read_at=_NOW_UTC,
+    )
+    snapshot = _snapshot_with(
+        override=_override(),
+        ev_charger=ev_charging,
+        operating_mode=SystemOperatingMode.fail_safe,
+    )
+    ctx = build_homeowner_ev_card_context(snapshot, _active_constraints())
+    assert ctx["override_state"] == "confirmed"
+    assert ctx["constraint_notice"] == ""
+
+
+@pytest.mark.parametrize(
+    ("dispatch_status", "failure_reason", "expected_plain_substring"),
+    [
+        ("failed", "capability_check_failed", "did not respond"),
+        ("timeout", "command_timeout", "did not respond in time"),
+        ("rejected", "fail_safe_mode_active", "paused for safety"),
+        ("rejected", "capability_missing: set_charge_rate", "does not support remote charging"),
+    ],
+)
+def test_build_homeowner_ev_card_context_fallback_when_dispatch_status_terminal(
+    dispatch_status: str, failure_reason: str, expected_plain_substring: str
+) -> None:
+    """Story 10.2 AC11/AC12: fallback state surfaces plain-language reason."""
+    override = _override(dispatch_status=dispatch_status, failure_reason=failure_reason)
+    snapshot = _snapshot_with(override=override)
+    ctx = build_homeowner_ev_card_context(snapshot, _active_constraints())
+    assert ctx["override_state"] == "fallback"
+    assert ctx["button_label"] == "Could not start charging"
+    assert ctx["retry_visible"] is True
+    assert expected_plain_substring in str(ctx["failure_reason_plain"])
+
+
+def test_build_homeowner_ev_card_context_unavailable_when_ev_charger_is_none() -> None:
+    """Story 10.2 AC11 + UX spec line 1503."""
+    ctx = build_homeowner_ev_card_context(_snapshot_with(ev_charger=None), _active_constraints())
+    assert ctx["unavailable"] is True
+    assert ctx["button_disabled"] is True
+
+
+def test_build_homeowner_ev_card_context_unavailable_when_ev_charger_is_degraded() -> None:
+    """Story 10.2 AC11 — DegradedDeviceState also routes to unavailable."""
+    degraded = DegradedDeviceState(
+        device_id="ev-001",
+        role=DeviceRole.ev_charger,
+        reason="ocpp_charger_not_connected",
+        occurred_at=_NOW_UTC,
+    )
+    ctx = build_homeowner_ev_card_context(
+        _snapshot_with(ev_charger=degraded), _active_constraints()
+    )
+    assert ctx["unavailable"] is True
+    assert ctx["override_state"] == "idle"
+
+
+def test_build_homeowner_ev_card_context_does_not_read_device_state_other_than_ev_charger() -> None:
+    """Story 10.2 AC11 structural invariant: only ev_charger + active_ev_override drive state."""
+    inverter = InverterState(
+        device_id="inv-001",
+        pv_power_kw=3.0,
+        ac_power_kw=2.8,
+        operating_mode="normal",
+        read_at=_NOW_UTC,
+    )
+    battery = BatteryState(
+        device_id="bat-001",
+        soc_percent=80.0,
+        battery_power_kw=0.0,
+        capacity_kwh=10.0,
+        operating_mode="idle",
+        read_at=_NOW_UTC,
+    )
+    snap_a = _snapshot_with(override=_override())
+    snap_b = snap_a.model_copy(update={"inverter": inverter, "battery": battery})
+    ctx_a = build_homeowner_ev_card_context(snap_a, _active_constraints())
+    ctx_b = build_homeowner_ev_card_context(snap_b, _active_constraints())
+    assert ctx_a["override_state"] == ctx_b["override_state"]
+    assert ctx_a["button_label"] == ctx_b["button_label"]
+
+
+def test_resolve_failure_reason_plain_handles_direct_hit() -> None:
+    assert (
+        _resolve_failure_reason_plain("fail_safe_mode_active")
+        == _OVERRIDE_FAILURE_REASONS["fail_safe_mode_active"]
+    )
+
+
+def test_resolve_failure_reason_plain_handles_capability_missing_suffix() -> None:
+    """Story 10.2 AC12 prefix-rule for P4 structured-suffix."""
+    plain = _resolve_failure_reason_plain("capability_missing: set_charge_rate")
+    assert plain == _OVERRIDE_FAILURE_REASONS["capability_missing"]
+
+
+def test_resolve_failure_reason_plain_falls_back_for_unknown_reason() -> None:
+    """Story 10.2 AC12: unknown reason returns calm catch-all."""
+    plain = _resolve_failure_reason_plain("some_future_reason_string")
+    assert plain == _OVERRIDE_FAILURE_FALLBACK
+
+
+def test_resolve_failure_reason_plain_handles_none() -> None:
+    assert _resolve_failure_reason_plain(None) == ""
+
+
+def test_resolve_failure_reason_plain_covers_every_policy_guard_rejection_reason() -> None:
+    """Story 10.2 AC18 #25 — exhaustiveness scan over engine/policy_guard.py.
+
+    PolicyGuard's rejection-reason vocabulary is duplicated in
+    _OVERRIDE_FAILURE_REASONS for plain-language UX. This test catches drift
+    by scanning the source for every ``reason`` literal PolicyGuard can emit:
+    (a) ``self._reject(command, "<reason>")`` calls,
+    (b) inline ``CommandResult(..., reason="<reason>")`` constructions on
+        the dispatch-timeout / dispatch-failed paths,
+    (c) the ``capability_missing:<suffix>`` structured family (handled via
+        the prefix rule in ``_resolve_failure_reason_plain``).
+    """
+    # Resolve the source path from the module's ``__file__`` rather than a
+    # relative-to-cwd Path — pytest may be invoked from any working
+    # directory. A relative Path that the runner cannot resolve would
+    # silently extract an empty reason set and make this test vacuously pass.
+    from open_ems.engine import policy_guard as _policy_guard_module
+
+    policy_guard_path = Path(_policy_guard_module.__file__)
+    text = policy_guard_path.read_text(encoding="utf-8")
+    # (a) ``self._reject(command, "<reason>")`` literals.
+    direct_reasons = set(re.findall(r'self\._reject\(\s*command\s*,\s*"([^"]+)"', text))
+    # (b) ``reason="<reason>"`` literals on inline CommandResult constructions
+    #     (covers the dispatch-timeout / dispatch-failed paths that do NOT go
+    #     through ``self._reject``).
+    inline_reasons = set(re.findall(r'reason="([^"]+)"', text))
+    # (c) ``capability_missing:<suffix>`` structured family — prefix-matched
+    #     by the UX resolver; strip the suffix and match the bare prefix.
+    structured = {
+        reason.split(":")[0] for reason in re.findall(r'f"(capability_missing:[^"]*)"', text)
+    }
+    covered = set(_OVERRIDE_FAILURE_REASONS.keys())
+    # Defensive: assert the regex actually found something. A silent empty
+    # extraction (e.g., if policy_guard.py is moved or restructured) would
+    # otherwise make this test vacuously pass.
+    assert direct_reasons or inline_reasons, (
+        "Exhaustiveness scan found zero reason literals in policy_guard.py — "
+        "the regex or the source layout has drifted."
+    )
+    missing = (direct_reasons | inline_reasons | structured) - covered
+    assert not missing, f"PolicyGuard rejection reasons missing from UX map: {missing}"

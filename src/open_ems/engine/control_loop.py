@@ -207,7 +207,13 @@ class ControlLoop:
             ev_scheduling=EVSchedulingContext(
                 capability_profile=None,
                 charging_window=None,
-                homeowner_override_active=False,
+                # Story 10.2 AC9 — pending homeowner override permits charging
+                # outside the configured window; terminal-state overrides fall
+                # back to scheduled-only evaluation.
+                homeowner_override_active=(
+                    snapshot.active_ev_override is not None
+                    and snapshot.active_ev_override.dispatch_status == "pending"
+                ),
                 evaluated_at=now,
                 target_charge_rate_kw=None,
             ),

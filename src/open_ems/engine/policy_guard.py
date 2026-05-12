@@ -282,12 +282,16 @@ class PolicyGuard:
                 error=repr(exc),
                 component="engine",
             )
+            # Stable reason key (not ``repr(exc)``) so the UX failure-reason
+            # map (state_serialization._OVERRIDE_FAILURE_REASONS) can resolve
+            # this branch deterministically. The Python-level diagnostic
+            # detail is preserved in the structlog event above.
             return CommandResult(
                 correlation_id=command.correlation_id,
                 device_id=command.device_id,
                 status=CommandStatus.failed,
                 applied=False,
-                reason=repr(exc),
+                reason="command_dispatch_failed",
             )
 
         # P5 (post-dispatch): correlation_id round-trip enforcement. A buggy

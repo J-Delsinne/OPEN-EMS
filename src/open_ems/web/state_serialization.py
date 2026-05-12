@@ -12,12 +12,16 @@ from open_ems.core import (
     DeviceRole,
     EnergyStrategy,
     EVChargerState,
+    EVOverrideState,
     GridMeterState,
     InverterState,
     SystemOperatingMode,
     SystemSnapshot,
 )
+from open_ems.core.constraints import ActiveConstraints
 from open_ems.core.state import DeviceSlot
+
+OverrideRenderState = Literal["idle", "optimistic", "confirmed", "fallback"]
 
 HomeownerCard = Literal["battery", "solar", "grid", "ev"]
 
@@ -47,6 +51,84 @@ _DEGRADED_EXPLANATIONS: Mapping[SystemOperatingMode, str] = {
     SystemOperatingMode.fail_safe: "Active control is paused for safety.",
 }
 
+# Story 10.2 AC12 — plain-language failure-reason mapping. Each key is the EXACT
+# rejection-reason string emitted by ``engine/policy_guard.py`` (P0–P5 paths)
+# or the dispatch-timeout / correlation-broken synthetic results. The
+# ``capability_missing`` entry is matched via prefix because PolicyGuard P4
+# returns ``capability_missing: <WriteCapability value>`` with a dynamic suffix.
+# Any new PolicyGuard rejection reason MUST be added here; the exhaustiveness
+# test in test_state_serialization.py asserts coverage by scanning
+# engine/policy_guard.py source for literal reason strings.
+_OVERRIDE_FAILURE_REASONS: Mapping[str, str] = {
+    "fail_safe_mode_active": "The system is paused for safety right now.",
+    "adapter_not_registered": "The charger is not connected to the system.",
+    "capability_check_failed": "The charger did not respond. Try again or check the connection.",
+    "unknown_command_type": "The charger did not respond. Try again or check the connection.",
+    "capability_missing": "Your charger does not support remote charging.",
+    "battery_state_unavailable_for_safety_check": (
+        "The system is currently checking battery status. Try again shortly."
+    ),
+    "battery_soc_at_or_below_reserve_floor": (
+        "Battery is at the reserved level — charging will resume from grid only."
+    ),
+    "commanded_rate_exceeds_peak_limit": (
+        "Charging rate would exceed your peak limit. Lower the limit or wait."
+    ),
+    "conservative_mode_blocks_load_increase": (
+        "The system is in recovery mode. Try again shortly."
+    ),
+    "command_timeout": "The charger did not respond in time. Check that it is powered on.",
+    "command_dispatch_failed": "The charger did not respond. Try again or check the connection.",
+    "adapter_correlation_id_mismatch": "The charger response could not be verified. Try again.",
+}
+
+_OVERRIDE_FAILURE_FALLBACK = "Could not start charging. Try again."
+
+_EV_CARD_BUTTON_LABELS: Mapping[OverrideRenderState, str] = {
+    "idle": "Charge EV now",
+    "optimistic": "Starting charging…",
+    "confirmed": "Charging now",
+    "fallback": "Could not start charging",
+}
+
+_EV_CARD_ARIA_LIVE: Mapping[OverrideRenderState, str] = {
+    "idle": "",
+    "optimistic": "Starting EV charging.",
+    "confirmed": "EV charging started.",
+    "fallback": "Could not start charging.",  # extended with reason at call site
+}
+
+_EV_CARD_CONSTRAINT_NOTICE = (
+    "Peak limit still active — charge rate may be adjusted if household load is high."
+)
+
+
+def _resolve_failure_reason_plain(reason: str | None) -> str:
+    """Story 10.2 AC12: map PolicyGuard reason string → plain-language UX text."""
+    if reason is None:
+        return ""
+    direct = _OVERRIDE_FAILURE_REASONS.get(reason)
+    if direct is not None:
+        return direct
+    if reason.startswith("capability_missing:"):
+        return _OVERRIDE_FAILURE_REASONS["capability_missing"]
+    return _OVERRIDE_FAILURE_FALLBACK
+
+
+def _serialize_homeowner_ev_override_state(
+    override: EVOverrideState | None,
+) -> dict[str, object] | None:
+    if override is None:
+        return None
+    return {
+        "correlation_id": str(override.correlation_id),
+        "requested_at": _datetime_to_iso(override.requested_at),
+        "expires_at": _datetime_to_iso(override.expires_at),
+        "dispatch_status": override.dispatch_status,
+        "failure_reason": override.failure_reason,
+        "session_observed_active": override.session_observed_active,
+    }
+
 
 def serialize_homeowner_snapshot(snapshot: SystemSnapshot) -> dict[str, object]:
     """Serialize a SystemSnapshot using only homeowner-safe allowlisted fields."""
@@ -63,6 +145,7 @@ def serialize_homeowner_snapshot(snapshot: SystemSnapshot) -> dict[str, object]:
         "battery": _serialize_homeowner_battery(snapshot.battery),
         "ev_charger": _serialize_homeowner_ev_charger(snapshot.ev_charger),
         "grid_meter": _serialize_homeowner_grid_meter(snapshot.grid_meter),
+        "active_ev_override": _serialize_homeowner_ev_override_state(snapshot.active_ev_override),
     }
 
 
@@ -81,7 +164,115 @@ def serialize_installer_snapshot(snapshot: SystemSnapshot) -> dict[str, object]:
         "battery": _serialize_installer_device(snapshot.battery),
         "ev_charger": _serialize_installer_device(snapshot.ev_charger),
         "grid_meter": _serialize_installer_device(snapshot.grid_meter),
+        "active_ev_override": _serialize_homeowner_ev_override_state(snapshot.active_ev_override),
     }
+
+
+def build_homeowner_ev_card_context(
+    snapshot: SystemSnapshot,
+    active_constraints: ActiveConstraints | None,
+    *,
+    confirmation_timeout_seconds: int | None = None,
+) -> dict[str, object]:
+    """Build the homeowner EV-card fragment context (Story 10.2 AC11).
+
+    Reads ONLY ``snapshot.active_ev_override`` and ``snapshot.ev_charger`` for
+    ``override_state`` derivation. Does NOT consult ``operating_mode``,
+    ``component_states``, or ``data_age_seconds`` for the state machine. The
+    ``constraint_notice`` MAY consult ``operating_mode`` for content but does
+    not influence ``override_state``. A structural test enforces the
+    device-state independence invariant.
+
+    ``confirmation_timeout_seconds`` is the UI-side budget after which the
+    Alpine optimistic layer flips to Fallback if the next HTMX poll has not
+    yet observed ``session_active=True``. It surfaces as a ``data-*`` hint on
+    the EV section so the client factory can pick it up without a second
+    server round-trip. ``None`` disables the client-side timer.
+    """
+    ev = snapshot.ev_charger
+    override = snapshot.active_ev_override
+    unavailable = ev is None or isinstance(ev, DegradedDeviceState)
+
+    if unavailable:
+        return {
+            "card": "ev",
+            "title": "EV charger",
+            "override_state": "idle",
+            "button_label": _EV_CARD_BUTTON_LABELS["idle"],
+            "button_disabled": True,
+            "aria_live_message": "",
+            "constraint_notice": "",
+            "retry_visible": False,
+            "failure_reason_plain": "",
+            "next_session_summary": "",
+            "unavailable": True,
+            "active_ev_override": None,
+            "confirmation_timeout_seconds": confirmation_timeout_seconds,
+        }
+
+    override_state: OverrideRenderState
+    if override is None:
+        override_state = "idle"
+    elif override.dispatch_status in ("failed", "timeout", "rejected"):
+        override_state = "fallback"
+    elif isinstance(ev, EVChargerState) and ev.session_active:
+        override_state = "confirmed"
+    else:
+        override_state = "optimistic"
+
+    failure_reason_plain = (
+        _resolve_failure_reason_plain(override.failure_reason)
+        if (override is not None and override_state == "fallback")
+        else ""
+    )
+
+    aria_live = _EV_CARD_ARIA_LIVE[override_state]
+    if override_state == "fallback" and failure_reason_plain:
+        aria_live = f"Could not start charging — {failure_reason_plain}"
+
+    constraint_notice = (
+        _EV_CARD_CONSTRAINT_NOTICE
+        if override_state == "confirmed"
+        and snapshot.operating_mode is not SystemOperatingMode.fail_safe
+        else ""
+    )
+
+    next_session_summary = (
+        _format_next_session_summary(active_constraints) if override_state == "idle" else ""
+    )
+
+    return {
+        "card": "ev",
+        "title": "EV charger",
+        "override_state": override_state,
+        "button_label": _EV_CARD_BUTTON_LABELS[override_state],
+        "button_disabled": override_state != "idle",
+        "aria_live_message": aria_live,
+        "constraint_notice": constraint_notice,
+        "retry_visible": override_state == "fallback",
+        "failure_reason_plain": failure_reason_plain,
+        "next_session_summary": next_session_summary,
+        "unavailable": False,
+        "active_ev_override": _serialize_homeowner_ev_override_state(override),
+        "confirmation_timeout_seconds": confirmation_timeout_seconds,
+    }
+
+
+def _format_next_session_summary(constraints: ActiveConstraints | None) -> str:
+    """AC11 next_session_summary — derived from active EV charging window.
+
+    UX spec line 836 example: ``"Charging tonight at 22:30"``. When no window
+    is configured: ``"No charging session scheduled"``.
+    """
+    if constraints is None:
+        return "No charging session scheduled"
+    start = getattr(constraints, "ev_charging_window_start", None)
+    if start is None:
+        return "No charging session scheduled"
+    # ``start`` is stored as an HH:MM string per the constraints schema.
+    if isinstance(start, str) and ":" in start:
+        return f"Charging tonight at {start}"
+    return "Charging window active"
 
 
 def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, object]:

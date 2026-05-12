@@ -172,3 +172,120 @@ h1 {
 /* Layout stability: the card shell (border, background, header) does NOT
    change between fresh/stale states (UX spec line 1072). The caption slot
    is always rendered in the same DOM position; only its content changes. */
+
+/* ===========================================================================
+ * Story 10.2 — EV override card (UX spec §"EV Override Button", line 1080).
+ * 4-state model: Idle / Optimistic / Confirmed / Fallback.
+ * --color-accent-hover is mandatory for Confirmed (UX spec line 1097: pass-green
+ * is reserved exclusively for PASS validation states; the Confirmed state is
+ * an active operating state, NOT a PASS result).
+ * ===========================================================================*/
+
+.state-card--ev {
+  /* Reserve enough vertical room so retry-link presence (fallback) does not
+     reflow surrounding cards. */
+  min-height: 12rem;
+}
+
+.state-card__ev-next-session {
+  font-size: 1rem;
+  color: var(--color-text-primary);
+  margin: 0 0 0.75rem 0;
+}
+
+.state-card__ev-button {
+  display: block;
+  width: 100%;
+  height: 52px;                          /* UX spec line 562 */
+  border: 0;
+  border-radius: 0.5rem;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  color: #ffffff;
+  transition: background-color 120ms ease;
+}
+
+.state-card__ev-button--idle {
+  background: var(--color-accent);
+}
+
+.state-card__ev-button--optimistic {
+  background: var(--color-accent);
+  animation: ev-pulse 1.4s ease-in-out infinite;
+  cursor: not-allowed;
+}
+
+.state-card__ev-button--confirmed {
+  background: var(--color-accent-hover); /* UX spec line 1097 — NOT pass-green */
+  cursor: not-allowed;
+}
+
+.state-card__ev-button--fallback {
+  background: var(--color-degraded-bg);
+  color: var(--color-text-primary);
+  cursor: not-allowed;
+}
+
+.state-card__ev-button:disabled {
+  opacity: 0.9;
+}
+
+.state-card__ev-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.state-card__ev-constraint-notice {
+  font-size: 0.875rem;                   /* 14px */
+  color: var(--color-text-secondary);
+  margin: 0.5rem 0 0 0;
+}
+
+.state-card__ev-failure-reason {
+  font-size: 0.875rem;
+  color: var(--color-text-primary);
+  margin: 0.5rem 0 0 0;
+}
+
+.state-card__ev-retry-link {
+  display: inline-block;
+  margin: 0.25rem 0 0 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: 0.875rem;
+  color: var(--color-accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.state-card__ev-retry-link:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Visually-hidden helper for aria-live status text that doesn't show on screen
+   but is announced by assistive technology (UX spec line 1619). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes ev-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state-card__ev-button--optimistic {
+    animation: none;
+  }
+}

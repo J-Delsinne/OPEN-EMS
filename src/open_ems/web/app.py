@@ -55,6 +55,7 @@ from open_ems.storage.repositories.session_repo import SessionRepo
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
 from open_ems.storage.repositories.wizard_state_repo import WizardStateRepo
 from open_ems.web.csrf import CsrfMiddleware
+from open_ems.web.routes.actions import router as actions_router
 from open_ems.web.routes.auth import router as auth_router
 from open_ems.web.routes.fragments import router as fragments_router
 from open_ems.web.routes.health import router as health_router
@@ -647,6 +648,7 @@ def create_app() -> FastAPI:
     app.include_router(installer_router)
     app.include_router(setup_router)
     app.include_router(homeowner_router)
+    app.include_router(actions_router)
     app.include_router(stream_router)
     app.include_router(fragments_router)
     app.add_middleware(CsrfMiddleware)  # Runs first on every request

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import uuid
 from collections.abc import Mapping
 from datetime import datetime
 from types import MappingProxyType
@@ -143,6 +144,63 @@ def derive_data_age_seconds(state: DeviceSlot, captured_at: datetime) -> int | N
     return max(0, int((captured_at - measurement_at).total_seconds()))
 
 
+class EVOverrideState(BaseModel):
+    """Tracks an active homeowner-initiated EV charging override (Story 10.2).
+
+    Lifecycle is owned by ``StateStore`` (installed via ``set_ev_override``;
+    cleared at publish time on expiry or natural session completion). The UI
+    derives the 4-state model (Idle/Optimistic/Confirmed/Fallback) from this
+    field + ``EVChargerState.session_active`` at render time.
+
+    ``dispatch_status`` does NOT include ``"success"``: a successful dispatch
+    leaves ``dispatch_status="pending"`` until ``EVChargerState.session_active``
+    flips True (observed by ``StateStore.publish``), at which point the render
+    layer transitions to Confirmed.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    correlation_id: uuid.UUID
+    requested_at: datetime
+    expires_at: datetime
+    dispatch_status: Literal["pending", "failed", "timeout", "rejected"]
+    failure_reason: str | None = None
+    session_observed_active: bool = False
+
+    @field_validator("requested_at")
+    @classmethod
+    def _requested_at_must_be_utc(cls, value: datetime) -> datetime:
+        return _require_utc(value, "requested_at")
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expires_at_must_be_utc(cls, value: datetime) -> datetime:
+        return _require_utc(value, "expires_at")
+
+    @model_validator(mode="after")
+    def _failure_reason_iff_terminal(self) -> EVOverrideState:
+        is_terminal = self.dispatch_status in ("failed", "timeout", "rejected")
+        if is_terminal and self.failure_reason is None:
+            raise ValueError(
+                f"dispatch_status={self.dispatch_status!r} requires a non-None failure_reason"
+            )
+        if not is_terminal and self.failure_reason is not None:
+            raise ValueError(
+                f"dispatch_status={self.dispatch_status!r} requires failure_reason=None"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _expires_after_requested(self) -> EVOverrideState:
+        if self.expires_at <= self.requested_at:
+            raise ValueError(
+                "expires_at must be strictly greater than requested_at "
+                f"(got expires_at={self.expires_at.isoformat()}, "
+                f"requested_at={self.requested_at.isoformat()})"
+            )
+        return self
+
+
 class SystemSnapshot(BaseModel):
     """Immutable point-in-time system state view."""
 
@@ -160,6 +218,7 @@ class SystemSnapshot(BaseModel):
     component_states: Mapping[DeviceRole, ComponentState]
     data_age_seconds: Mapping[DeviceRole, int | None]
     system_clock_status: ClockStatus
+    active_ev_override: EVOverrideState | None = None
 
     @field_validator("captured_at")
     @classmethod

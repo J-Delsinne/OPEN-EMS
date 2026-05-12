@@ -1,1 +1,50 @@
-{% include "fragments/homeowner/_card.html" %}
+{# Story 10.2 AC14 — homeowner EV card with 4-state override model. #}
+{# Standalone template (not _card.html include): EV anatomy differs (button + retry + notice). #}
+<section
+  id="ev-card"
+  class="state-card state-card--ev state-card--ev-{{ override_state }}{% if unavailable %} state-card--unavailable{% endif %}"
+  data-override-state="{{ override_state }}"
+  {% if active_ev_override %}data-correlation-id="{{ active_ev_override.correlation_id }}"{% endif %}
+  {% if confirmation_timeout_seconds %}data-confirmation-timeout-seconds="{{ confirmation_timeout_seconds }}"{% endif %}
+  aria-label="{{ title }}"
+  x-data="evOverride({initialState: {{ override_state | tojson }}, confirmationTimeoutSeconds: {{ confirmation_timeout_seconds | tojson }}})"
+>
+  <header class="state-card__header">
+    <h2>{{ title }}</h2>
+  </header>
+  <div class="state-card__body">
+    {% if unavailable %}
+      <p class="state-card__unavailable">No EV charger connected</p>
+    {% else %}
+      {% if override_state == "idle" and next_session_summary %}
+        <p class="state-card__ev-next-session">{{ next_session_summary }}</p>
+      {% endif %}
+      <button
+        type="button"
+        class="state-card__ev-button state-card__ev-button--{{ override_state }}"
+        hx-post="/actions/ev-override"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-swap="none"
+        x-bind:disabled="state !== 'idle'"
+        aria-disabled="{% if button_disabled %}true{% else %}false{% endif %}"
+        x-bind:aria-disabled="state !== 'idle' ? 'true' : 'false'"
+        x-on:click="submit()"
+      >{{ button_label }}</button>
+      <span class="visually-hidden" role="status" aria-live="polite">{{ aria_live_message }}</span>
+      {% if constraint_notice %}
+        <p class="state-card__ev-constraint-notice">{{ constraint_notice }}</p>
+      {% endif %}
+      {% if retry_visible %}
+        <p class="state-card__ev-failure-reason">{{ failure_reason_plain }}</p>
+        <button
+          type="button"
+          class="state-card__ev-retry-link"
+          hx-post="/actions/ev-override"
+          hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-swap="none"
+          x-on:click="retry()"
+        >Try again</button>
+      {% endif %}
+    {% endif %}
+  </div>
+</section>

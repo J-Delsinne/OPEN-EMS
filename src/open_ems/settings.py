@@ -47,6 +47,21 @@ class Settings(BaseSettings):
     # fan-out in the validation context.
     deployment_validation_check_timeout_seconds: float = Field(default=15.0, gt=0.0, le=120.0)
     deployment_validation_device_probe_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
+    # Story 10.2 — EV homeowner override windows.
+    # Total active-override window. The override expires after this regardless
+    # of dispatch state; default 2 hours.
+    ev_override_window_seconds: int = Field(default=7200, gt=0)
+    # UI-side confirmation budget (rendered to the dashboard as a data-* hint /
+    # JS constant). Not enforced server-side — the Alpine.js client uses it to
+    # surface Fallback if EVChargerState.session_active=true is not observed
+    # before the timeout.
+    ev_override_confirmation_timeout_seconds: int = Field(default=30, ge=5, le=60)
+    # Default rate sent with SetEVChargingRateCommand on homeowner-triggered
+    # overrides. PolicyGuard P4 will reject if the EV charger profile lacks
+    # set_charge_rate capability — that is the correct path (Fallback with
+    # plain-language reason). Strictly positive: a 0 kW override would dispatch
+    # successfully but never start a session, stranding the UI in Optimistic.
+    ev_override_default_rate_kw: float = Field(default=11.0, gt=0.0)
 
 
 _settings: Settings | None = None

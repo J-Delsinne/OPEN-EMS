@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from open_ems.core import (
@@ -12,6 +13,7 @@ from open_ems.core import (
     DeviceRole,
     EnergyStrategy,
     EVChargerState,
+    EVOverrideState,
     GlobalState,
     GridMeterState,
     InverterState,
@@ -444,3 +446,220 @@ async def test_state_store_publish_preserves_active_strategy() -> None:
     )
     assert snap4.active_strategy == EnergyStrategy.prioritize_ev
     assert snap4.operating_mode == SystemOperatingMode.degraded
+
+
+# ---------------------------------------------------------------------------
+# Story 10.2 — active_ev_override mutator + publish-time evaluation (AC3/AC4)
+# ---------------------------------------------------------------------------
+
+
+def _override(
+    *,
+    requested_at: datetime = _NOW_UTC,
+    expires_in_seconds: float = 7200.0,
+    dispatch_status: str = "pending",
+    failure_reason: str | None = None,
+    session_observed_active: bool = False,
+) -> EVOverrideState:
+    return EVOverrideState(
+        correlation_id=uuid.uuid4(),
+        requested_at=requested_at,
+        expires_at=requested_at + timedelta(seconds=expires_in_seconds),
+        dispatch_status=dispatch_status,  # type: ignore[arg-type]
+        failure_reason=failure_reason,
+        session_observed_active=session_observed_active,
+    )
+
+
+def _ev_session_inactive(read_at: datetime = _NOW_UTC) -> EVChargerState:
+    return EVChargerState(
+        device_id="ev-001",
+        status="available",
+        session_active=False,
+        current_power_kw=0.0,
+        power_source="meter_values",
+        power_measured_at=read_at,
+        read_at=read_at,
+    )
+
+
+def test_state_store_initial_snapshot_carries_no_active_ev_override() -> None:
+    store = StateStore(system_clock_status="valid")
+    assert store.get_snapshot().active_ev_override is None
+
+
+async def test_state_store_set_ev_override_installs_override_under_writer_lock() -> None:
+    store = StateStore(system_clock_status="valid")
+    override = _override(requested_at=datetime.now(UTC))
+    await store.set_ev_override(override)
+    snapshot = await store.publish({DeviceRole.inverter: _inverter()})
+    assert snapshot.active_ev_override is not None
+    assert snapshot.active_ev_override.correlation_id == override.correlation_id
+    assert snapshot.active_ev_override.dispatch_status == "pending"
+
+
+async def test_state_store_set_ev_override_to_none_clears_override() -> None:
+    store = StateStore(system_clock_status="valid")
+    await store.set_ev_override(_override(requested_at=datetime.now(UTC)))
+    await store.set_ev_override(None)
+    snapshot = await store.publish({DeviceRole.inverter: _inverter()})
+    assert snapshot.active_ev_override is None
+
+
+async def test_state_store_publish_clears_expired_override() -> None:
+    store = StateStore(system_clock_status="valid")
+    # Expires in the past relative to publish-time captured_at = now(UTC).
+    far_past = datetime.now(UTC) - timedelta(hours=3)
+    expired = EVOverrideState(
+        correlation_id=uuid.uuid4(),
+        requested_at=far_past,
+        expires_at=far_past + timedelta(seconds=60),
+        dispatch_status="pending",
+    )
+    await store.set_ev_override(expired)
+    snapshot = await store.publish({DeviceRole.inverter: _inverter()})
+    assert snapshot.active_ev_override is None
+
+
+async def test_state_store_publish_flips_session_observed_active_when_session_active_observed() -> (
+    None
+):
+    store = StateStore(system_clock_status="valid")
+    await store.set_ev_override(_override(requested_at=datetime.now(UTC)))
+    # First publish: session_active=True.
+    snapshot = await store.publish({DeviceRole.ev_charger: _ev_charger()})
+    assert snapshot.active_ev_override is not None
+    assert snapshot.active_ev_override.session_observed_active is True
+    assert snapshot.active_ev_override.dispatch_status == "pending"
+
+
+async def test_state_store_publish_clears_override_on_natural_session_completion() -> None:
+    store = StateStore(system_clock_status="valid")
+    await store.set_ev_override(_override(requested_at=datetime.now(UTC)))
+    # Tick 1: session_active=True → observed.
+    snap1 = await store.publish({DeviceRole.ev_charger: _ev_charger()})
+    assert snap1.active_ev_override is not None
+    assert snap1.active_ev_override.session_observed_active is True
+    # Tick 2: session_active=False → cleared.
+    snap2 = await store.publish({DeviceRole.ev_charger: _ev_session_inactive()})
+    assert snap2.active_ev_override is None
+
+
+async def test_state_store_publish_does_not_clear_override_when_session_never_observed_active() -> (
+    None
+):
+    store = StateStore(system_clock_status="valid")
+    await store.set_ev_override(_override(requested_at=datetime.now(UTC)))
+    # session_active=False on first tick → Optimistic; override must NOT be cleared.
+    snapshot = await store.publish({DeviceRole.ev_charger: _ev_session_inactive()})
+    assert snapshot.active_ev_override is not None
+    assert snapshot.active_ev_override.session_observed_active is False
+    assert snapshot.active_ev_override.dispatch_status == "pending"
+
+
+async def test_state_store_clears_expired_override_before_session_flip_detection() -> None:
+    """AC4 load-bearing ordering: expiry clears before session-flip eval runs."""
+    store = StateStore(system_clock_status="valid")
+    far_past = datetime.now(UTC) - timedelta(hours=3)
+    expired = EVOverrideState(
+        correlation_id=uuid.uuid4(),
+        requested_at=far_past,
+        expires_at=far_past + timedelta(seconds=60),
+        dispatch_status="pending",
+    )
+    await store.set_ev_override(expired)
+    # session_active=True at publish time — if ordering were wrong, the flip
+    # would mutate the expired override before clearing it.
+    snapshot = await store.publish({DeviceRole.ev_charger: _ev_charger()})
+    assert snapshot.active_ev_override is None
+
+
+async def test_state_store_publish_carries_terminal_override_until_expiry() -> None:
+    """A failed override stays in the snapshot until expires_at."""
+    store = StateStore(system_clock_status="valid")
+    failed = EVOverrideState(
+        correlation_id=uuid.uuid4(),
+        requested_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=2),
+        dispatch_status="failed",
+        failure_reason="capability_check_failed",
+    )
+    await store.set_ev_override(failed)
+    snapshot = await store.publish({DeviceRole.ev_charger: _ev_session_inactive()})
+    assert snapshot.active_ev_override is not None
+    assert snapshot.active_ev_override.dispatch_status == "failed"
+    assert snapshot.active_ev_override.failure_reason == "capability_check_failed"
+
+
+async def test_state_store_set_ev_override_does_not_advance_sequence_id() -> None:
+    """Review patch: ``set_ev_override`` is a single-field patch, not a publish cycle.
+
+    Bumping ``sequence_id`` while ``captured_at`` / ``data_age_seconds`` stay
+    frozen from the previous publish would emit a torn snapshot to SSE/age
+    consumers. The next ``publish()`` advances the sequence normally.
+    """
+    store = StateStore(system_clock_status="valid")
+    snap_before = await store.publish({DeviceRole.inverter: _inverter()})
+    seq_before = snap_before.sequence_id
+    await store.set_ev_override(_override(requested_at=datetime.now(UTC)))
+    snap_after_mutate = store.get_snapshot()
+    # The override is immediately visible (visibility contract preserved)…
+    assert snap_after_mutate.active_ev_override is not None
+    # …but the snapshot is NOT a fresh publish — sequence_id and captured_at
+    # are the same as the last real publish.
+    assert snap_after_mutate.sequence_id == seq_before
+    assert snap_after_mutate.captured_at == snap_before.captured_at
+    # Next real publish advances sequence_id as normal.
+    snap_after_publish = await store.publish({DeviceRole.inverter: _inverter()})
+    assert snap_after_publish.sequence_id == seq_before + 1
+
+
+async def test_state_store_compare_and_set_ev_override_swaps_when_correlation_id_matches() -> None:
+    """Review patch: atomic CAS used by the dispatch-task settle path."""
+    store = StateStore(system_clock_status="valid")
+    pending = _override(requested_at=datetime.now(UTC))
+    await store.set_ev_override(pending)
+    updated = pending.model_copy(
+        update={"dispatch_status": "failed", "failure_reason": "capability_check_failed"}
+    )
+    swapped = await store.compare_and_set_ev_override(pending.correlation_id, updated)
+    assert swapped is True
+    snap = store.get_snapshot()
+    assert snap.active_ev_override is not None
+    assert snap.active_ev_override.dispatch_status == "failed"
+    assert snap.active_ev_override.failure_reason == "capability_check_failed"
+
+
+async def test_state_store_compare_and_set_ev_override_noop_when_correlation_id_differs() -> None:
+    """Review patch: CAS must reject when a newer override has taken over."""
+    store = StateStore(system_clock_status="valid")
+    original = _override(requested_at=datetime.now(UTC))
+    await store.set_ev_override(original)
+    # A newer override replaces the original.
+    newer = _override(requested_at=datetime.now(UTC))
+    await store.set_ev_override(newer)
+    # Dispatch task tries to settle the (now-stale) original.
+    stale_terminal = original.model_copy(
+        update={"dispatch_status": "failed", "failure_reason": "capability_check_failed"}
+    )
+    swapped = await store.compare_and_set_ev_override(original.correlation_id, stale_terminal)
+    assert swapped is False
+    # The newer override is preserved untouched.
+    snap = store.get_snapshot()
+    assert snap.active_ev_override is not None
+    assert snap.active_ev_override.correlation_id == newer.correlation_id
+    assert snap.active_ev_override.dispatch_status == "pending"
+
+
+async def test_state_store_compare_and_set_ev_override_noop_when_cleared_to_none() -> None:
+    """Review patch: CAS must reject when override is None (e.g., publish-time expiry-clear)."""
+    store = StateStore(system_clock_status="valid")
+    original = _override(requested_at=datetime.now(UTC))
+    await store.set_ev_override(original)
+    await store.set_ev_override(None)  # publish-time expiry-clear simulation
+    stale_terminal = original.model_copy(
+        update={"dispatch_status": "failed", "failure_reason": "capability_check_failed"}
+    )
+    swapped = await store.compare_and_set_ev_override(original.correlation_id, stale_terminal)
+    assert swapped is False
+    assert store.get_snapshot().active_ev_override is None

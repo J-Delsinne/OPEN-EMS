@@ -338,7 +338,14 @@ async def test_peak_limit_bounds_check_rejects_excessive_rate() -> None:
 
 
 async def test_adapter_exception_is_wrapped_as_failed_command_result() -> None:
-    """Raw adapter exception MUST NOT propagate — wrapped as CommandResult(failed)."""
+    """Raw adapter exception MUST NOT propagate — wrapped as CommandResult(failed).
+
+    Story 10.2 review patch: ``reason`` is the stable key
+    ``command_dispatch_failed`` so the UX failure-reason map can resolve this
+    branch deterministically. The Python-level diagnostic (exception class +
+    message) is preserved in structlog's ``command_dispatch_failed`` warning
+    event, not in the reason string itself.
+    """
     store = _state_store()
     await _publish_battery(store, soc_percent=80.0)
     adapter = _adapter()
@@ -357,7 +364,7 @@ async def test_adapter_exception_is_wrapped_as_failed_command_result() -> None:
 
     assert result.status is CommandStatus.failed
     assert result.applied is False
-    assert "modbus_explode" in result.reason
+    assert result.reason == "command_dispatch_failed"
 
 
 async def test_adapter_timeout_is_wrapped_as_timeout_command_result() -> None:

@@ -9,7 +9,10 @@ from fastapi import Request, Response
 from fastapi.exceptions import HTTPException
 
 from open_ems.core import StateStore
-from open_ems.settings import get_settings
+from open_ems.core.constraints import ActiveConstraints
+from open_ems.engine.policy_guard import PolicyGuard
+from open_ems.services.active_constraints import ActiveConstraintsProvider
+from open_ems.settings import Settings, get_settings
 from open_ems.storage.repositories.session_repo import SessionRepo, hash_token
 from open_ems.storage.repositories.user_repo import UserRepo
 
@@ -85,6 +88,47 @@ def get_state_store(request: Request) -> StateStore:
     if not isinstance(state_store, StateStore):
         raise HTTPException(status_code=503, detail="State store unavailable")
     return state_store
+
+
+def get_policy_guard(request: Request) -> PolicyGuard:
+    """Story 10.2 AC5: PolicyGuard dependency for homeowner-originated commands."""
+    policy_guard = getattr(request.app.state, "policy_guard", None)
+    if not isinstance(policy_guard, PolicyGuard):
+        raise HTTPException(status_code=503, detail="PolicyGuard unavailable")
+    return policy_guard
+
+
+def get_active_constraints(request: Request) -> ActiveConstraints:
+    """Story 10.2 AC13: active site constraints (peak limit, EV window, etc.)."""
+    provider = getattr(request.app.state, "active_constraints_provider", None)
+    if not isinstance(provider, ActiveConstraintsProvider):
+        raise HTTPException(status_code=503, detail="Active constraints unavailable")
+    try:
+        return provider.get()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Active constraints unavailable") from exc
+
+
+def get_active_constraints_optional(request: Request) -> ActiveConstraints | None:
+    """Tolerant variant: returns None when constraints are unavailable.
+
+    Used by homeowner-facing fragment routes that should still render in a
+    pre-installer-wizard-complete state (next_session_summary degrades to
+    "No charging session scheduled" — UX spec line 1503).
+    """
+    provider = getattr(request.app.state, "active_constraints_provider", None)
+    if not isinstance(provider, ActiveConstraintsProvider):
+        return None
+    try:
+        return provider.get()
+    except RuntimeError:
+        return None
+
+
+def get_settings_dep(request: Request) -> Settings:
+    """Story 10.2: FastAPI dependency wrapper around the module-level get_settings()."""
+    del request  # request not needed; settings is process-wide
+    return get_settings()
 
 
 def _next_url(request: Request) -> str:

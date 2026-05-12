@@ -26,6 +26,7 @@ from open_ems.core.devices import (
 from open_ems.core.state import (
     ComponentState,
     EnergyStrategy,
+    EVOverrideState,
     GlobalState,
     SystemOperatingMode,
     SystemSnapshot,
@@ -47,6 +48,7 @@ __all__ = [
     "DeviceRole",
     "DeviceState",
     "EVChargerState",
+    "EVOverrideState",
     "EnergyStrategy",
     "GlobalState",
     "GridMeterState",

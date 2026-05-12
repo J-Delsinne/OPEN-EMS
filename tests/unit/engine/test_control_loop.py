@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -873,6 +873,87 @@ async def test_evaluation_input_strategy_reads_from_snapshot_active_strategy(
     )
 
     assert evaluation_input.strategy is strategy
+
+
+async def _populate_required_slots(store: StateStore) -> None:
+    """Publish a snapshot satisfying ``EvaluationInput.from_snapshot`` required slots."""
+    await store.publish(
+        {
+            DeviceRole.inverter: _inverter_state(),
+            DeviceRole.grid_meter: _grid_meter_state(),
+        }
+    )
+
+
+async def test_eval_input_homeowner_override_active_is_true_when_pending() -> None:
+    """Story 10.2 AC9: pending homeowner override flips the EV scheduling flag."""
+    import uuid
+
+    from open_ems.core import EVOverrideState
+
+    store = StateStore(system_clock_status="valid")
+    await store.set_ev_override(
+        EVOverrideState(
+            correlation_id=uuid.uuid4(),
+            requested_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=2),
+            dispatch_status="pending",
+        )
+    )
+    loop = _control_loop(state_store=store, adapters={})
+    await _populate_required_slots(store)
+    snapshot = store.get_snapshot()
+    eval_input = loop._build_evaluation_input(  # noqa: SLF001
+        snapshot, datetime.now(UTC)
+    )
+    assert eval_input.ev_scheduling.homeowner_override_active is True
+
+
+@pytest.mark.parametrize(
+    ("dispatch_status", "failure_reason"),
+    [
+        ("failed", "capability_check_failed"),
+        ("timeout", "command_timeout"),
+        ("rejected", "fail_safe_mode_active"),
+    ],
+)
+async def test_eval_input_homeowner_override_active_is_false_when_terminal(
+    dispatch_status: str, failure_reason: str
+) -> None:
+    """Story 10.2 AC9: terminal override states fall back to scheduled-only path."""
+    import uuid
+
+    from open_ems.core import EVOverrideState
+
+    store = StateStore(system_clock_status="valid")
+    await store.set_ev_override(
+        EVOverrideState(
+            correlation_id=uuid.uuid4(),
+            requested_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=2),
+            dispatch_status=dispatch_status,  # type: ignore[arg-type]
+            failure_reason=failure_reason,
+        )
+    )
+    loop = _control_loop(state_store=store, adapters={})
+    await _populate_required_slots(store)
+    snapshot = store.get_snapshot()
+    eval_input = loop._build_evaluation_input(  # noqa: SLF001
+        snapshot, datetime.now(UTC)
+    )
+    assert eval_input.ev_scheduling.homeowner_override_active is False
+
+
+async def test_eval_input_homeowner_override_active_is_false_when_no_override() -> None:
+    """Story 10.2 AC9: absent override defaults the flag to False."""
+    store = StateStore(system_clock_status="valid")
+    loop = _control_loop(state_store=store, adapters={})
+    await _populate_required_slots(store)
+    snapshot = store.get_snapshot()
+    eval_input = loop._build_evaluation_input(  # noqa: SLF001
+        snapshot, datetime.now(UTC)
+    )
+    assert eval_input.ev_scheduling.homeowner_override_active is False
 
 
 def _control_loop_with_seed(seed: float) -> ControlLoop:

@@ -27,6 +27,11 @@
   -->
   <script src="https://unpkg.com/htmx.org@1.9.12" crossorigin="anonymous"></script>
 
+  <!-- Story 10.2 — Alpine.js for the homeowner EV override optimistic-layer factory.
+       Pinned, locally-hosted (see static/README.md). `defer` so the alpine:init
+       listener registered in dashboard.html runs after the script parses. -->
+  <script src="/static/alpine.min.js" defer></script>
+
   <!-- CSRF-AC2: Inject the per-session CSRF token into every HTMX state-changing request. -->
   <script>
     document.addEventListener("htmx:configRequest", function (event) {

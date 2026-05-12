@@ -31,9 +31,67 @@
       hx-trigger="load, every 10s"
       hx-swap="outerHTML"
     >Loading grid state...</section>
+    <section
+      id="ev-card"
+      hx-get="/fragments/homeowner/ev-card"
+      hx-trigger="load, every 10s"
+      hx-swap="outerHTML"
+    >Loading EV charger...</section>
   </section>
   {% else %}
   <p>Full dashboard UI implemented in Epic 11.</p>
   {% endif %}
 </main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Story 10.2 AC15 — Alpine.js optimistic-layer factory for the EV override button.
+  // The server is authoritative for Optimistic → Confirmed / Optimistic → Fallback;
+  // Alpine only manages the Idle → Optimistic transition triggered by tap. HTMX
+  // outerHTML swap on every 10s poll re-instantiates this x-data from the
+  // server-authored initialState, overwriting any stale client state.
+  //
+  // confirmationTimeoutSeconds (from settings.ev_override_confirmation_timeout_seconds)
+  // bounds the optimistic state client-side: if the next HTMX poll has not
+  // observed session_active=True within the budget, the button flips to
+  // 'fallback' so the user can retry without waiting for the full 2h
+  // server-side expiry. The setTimeout is cleared on outerHTML swap because
+  // Alpine destroys the x-data instance and re-creates it from the new DOM.
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('evOverride', (config) => ({
+      state: (config && config.initialState) ? config.initialState : 'idle',
+      _fallbackTimer: null,
+      _budgetSeconds: (config && Number.isFinite(config.confirmationTimeoutSeconds))
+        ? config.confirmationTimeoutSeconds
+        : null,
+      submit() {
+        if (this.state !== 'idle') {
+          return;
+        }
+        // The HTMX request fires via the bound hx-post attribute. We only
+        // mutate the optimistic client layer so the button transitions
+        // immediately on tap, without waiting for the network round-trip.
+        this.state = 'optimistic';
+        if (this._budgetSeconds && this._budgetSeconds > 0) {
+          this._fallbackTimer = setTimeout(() => {
+            if (this.state === 'optimistic') {
+              this.state = 'fallback';
+            }
+          }, this._budgetSeconds * 1000);
+        }
+      },
+      retry() {
+        // Transition fallback → idle so the next tap re-dispatches via HTMX.
+        this.state = 'idle';
+      },
+      destroy() {
+        if (this._fallbackTimer !== null) {
+          clearTimeout(this._fallbackTimer);
+          this._fallbackTimer = null;
+        }
+      }
+    }));
+  });
+</script>
 {% endblock %}

@@ -67,12 +67,12 @@ async def test_homeowner_dashboard_redirects_unauthenticated_to_login(
     assert response.headers["location"].startswith("/login")
 
 
-async def test_homeowner_dashboard_shell_renders_four_htmx_bound_sections(
+async def test_homeowner_dashboard_shell_renders_five_htmx_bound_sections(
     session_repo: SessionRepo,
 ) -> None:
-    """AC10: shell template contains exactly headline + battery + solar + grid
-    HTMX-bound sections. The EV card is removed from the primary render path
-    (Story 10.2 will re-add it with the override button)."""
+    """Story 10.2 AC15: shell template contains headline + battery + solar + grid
+    + EV HTMX-bound sections (10.1 had 4; 10.2 re-adds EV with the Alpine.js
+    override factory)."""
     store = StateStore(system_clock_status="valid")
     raw_token = await _create_session("homeowner")
     client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
@@ -81,17 +81,19 @@ async def test_homeowner_dashboard_shell_renders_four_htmx_bound_sections(
 
     assert response.status_code == 200
     body = response.text
-    # Each of the four primary slots is HTMX-bound with the expected URL.
+    # Each of the five primary slots is HTMX-bound with the expected URL.
     assert 'hx-get="/fragments/homeowner/status-headline"' in body
     assert 'hx-get="/fragments/homeowner/battery-card"' in body
     assert 'hx-get="/fragments/homeowner/solar-card"' in body
     assert 'hx-get="/fragments/homeowner/grid-card"' in body
+    assert 'hx-get="/fragments/homeowner/ev-card"' in body
     # Each slot polls every 10s.
-    assert body.count('hx-trigger="load, every 10s"') == 4
-    # EV card is NOT in the primary homeowner dashboard render path in 10.1.
-    assert 'hx-get="/fragments/homeowner/ev-card"' not in body
-    # CSS link is wired through base.html (AC19 Path B).
+    assert body.count('hx-trigger="load, every 10s"') == 5
+    # CSS link is wired through base.html (AC19 Path B / Story 10.1).
     assert "/static/open-ems.css" in body
+    # Story 10.2 AC15 — Alpine.js bundle linked and evOverride factory registered.
+    assert "/static/alpine.min.js" in body
+    assert "Alpine.data('evOverride'" in body or 'Alpine.data("evOverride"' in body
 
 
 async def test_homeowner_dashboard_route_responds_quickly(session_repo: SessionRepo) -> None:
