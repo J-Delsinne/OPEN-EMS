@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
-from open_ems.storage.database import get_connection
+from open_ems.storage.database import get_connection, get_write_lock
 
 SESSION_TOKEN_BYTES = 32  # 256 bits; architecture requires >= 128 bits
 
@@ -33,16 +33,20 @@ class SessionRepo:
         expires_at: datetime,
         csrf_token: str,
     ) -> str:
-        """Create a session. Returns the new session ID (UUID4 string)."""
+        """Create a session. Returns the new session ID (UUID4 string).
+
+        Story 11.3 AC6 — serialized through the database-module write lock.
+        """
         session_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
-        await self._conn.execute(
-            "INSERT INTO sessions"
-            " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, user_id, token_hash, now, now, expires_at.isoformat(), csrf_token),
-        )
-        await self._conn.commit()
+        async with get_write_lock():
+            await self._conn.execute(
+                "INSERT INTO sessions"
+                " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, user_id, token_hash, now, now, expires_at.isoformat(), csrf_token),
+            )
+            await self._conn.commit()
         return session_id
 
     async def get_by_token_hash(self, token_hash: str) -> aiosqlite.Row | None:
@@ -55,65 +59,88 @@ class SessionRepo:
             return await cursor.fetchone()
 
     async def delete_by_id(self, session_id: str) -> None:
-        """Delete a session by ID."""
-        await self._conn.execute(
-            "DELETE FROM sessions WHERE id = ?",
-            (session_id,),
-        )
-        await self._conn.commit()
+        """Delete a session by ID.
+
+        Story 11.3 AC6 — serialized through the database-module write lock.
+        """
+        async with get_write_lock():
+            await self._conn.execute(
+                "DELETE FROM sessions WHERE id = ?",
+                (session_id,),
+            )
+            await self._conn.commit()
 
     async def delete_all_for_user(self, user_id: str) -> None:
-        """Delete all sessions for a given user (session fixation prevention on re-login)."""
-        await self._conn.execute(
-            "DELETE FROM sessions WHERE user_id = ?",
-            (user_id,),
-        )
-        await self._conn.commit()
+        """Delete all sessions for a given user (session fixation prevention on re-login).
+
+        Story 11.3 AC6 — serialized through the database-module write lock.
+        """
+        async with get_write_lock():
+            await self._conn.execute(
+                "DELETE FROM sessions WHERE user_id = ?",
+                (user_id,),
+            )
+            await self._conn.commit()
 
     async def update_last_active(self, session_id: str) -> None:
         """Update last_active_at to now.
 
         Raises ValueError if session_id does not exist.
         Caller is responsible for passing a valid session ID (see get_by_token_hash()).
+
+        Story 11.3 AC6 — serialized through the database-module write lock.
         """
         now = datetime.now(UTC).isoformat()
-        async with self._conn.execute(
-            "UPDATE sessions SET last_active_at = ? WHERE id = ?",
-            (now, session_id),
-        ) as cursor:
-            if cursor.rowcount == 0:
-                raise ValueError(f"No session found with id={session_id!r}")
-        await self._conn.commit()
+        async with get_write_lock():
+            async with self._conn.execute(
+                "UPDATE sessions SET last_active_at = ? WHERE id = ?",
+                (now, session_id),
+            ) as cursor:
+                if cursor.rowcount == 0:
+                    raise ValueError(f"No session found with id={session_id!r}")
+            await self._conn.commit()
 
     async def touch(self, session_id: str, new_expires_at: datetime) -> None:
-        """Update last_active_at=now and expires_at=new_expires_at to roll the inactivity window."""
+        """Update last_active_at=now and expires_at=new_expires_at to roll the inactivity window.
+
+        Story 11.3 AC6 — serialized through the database-module write lock.
+        """
         now = datetime.now(UTC).isoformat()
-        async with self._conn.execute(
-            "UPDATE sessions SET last_active_at = ?, expires_at = ? WHERE id = ?",
-            (now, new_expires_at.isoformat(), session_id),
-        ) as cursor:
-            if cursor.rowcount == 0:
-                raise ValueError(f"No session found with id={session_id!r}")
-        await self._conn.commit()
+        async with get_write_lock():
+            async with self._conn.execute(
+                "UPDATE sessions SET last_active_at = ?, expires_at = ? WHERE id = ?",
+                (now, new_expires_at.isoformat(), session_id),
+            ) as cursor:
+                if cursor.rowcount == 0:
+                    raise ValueError(f"No session found with id={session_id!r}")
+            await self._conn.commit()
 
     async def delete_expired_for_user(self, user_id: str) -> int:
-        """Delete all expired sessions for a single user. Returns count deleted."""
+        """Delete all expired sessions for a single user. Returns count deleted.
+
+        Story 11.3 AC6 — serialized through the database-module write lock.
+        """
         now = datetime.now(UTC).isoformat()
-        async with self._conn.execute(
-            "DELETE FROM sessions WHERE user_id = ? AND expires_at < ?",
-            (user_id, now),
-        ) as cursor:
-            count = cursor.rowcount
-        await self._conn.commit()
+        async with get_write_lock():
+            async with self._conn.execute(
+                "DELETE FROM sessions WHERE user_id = ? AND expires_at < ?",
+                (user_id, now),
+            ) as cursor:
+                count = cursor.rowcount
+            await self._conn.commit()
         return count
 
     async def delete_all_expired(self) -> int:
-        """Delete all expired sessions across all users. Returns count deleted."""
+        """Delete all expired sessions across all users. Returns count deleted.
+
+        Story 11.3 AC6 — serialized through the database-module write lock.
+        """
         now = datetime.now(UTC).isoformat()
-        async with self._conn.execute(
-            "DELETE FROM sessions WHERE expires_at < ?",
-            (now,),
-        ) as cursor:
-            count = cursor.rowcount
-        await self._conn.commit()
+        async with get_write_lock():
+            async with self._conn.execute(
+                "DELETE FROM sessions WHERE expires_at < ?",
+                (now,),
+            ) as cursor:
+                count = cursor.rowcount
+            await self._conn.commit()
         return count

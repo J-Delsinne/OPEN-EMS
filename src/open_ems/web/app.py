@@ -55,6 +55,7 @@ from open_ems.storage.repositories.session_repo import SessionRepo
 from open_ems.storage.repositories.user_repo import UserRepo, hash_password
 from open_ems.storage.repositories.wizard_state_repo import WizardStateRepo
 from open_ems.web.csrf import CsrfMiddleware
+from open_ems.web.must_change_password_middleware import MustChangePasswordMiddleware
 from open_ems.web.routes.actions import router as actions_router
 from open_ems.web.routes.auth import router as auth_router
 from open_ems.web.routes.fragments import router as fragments_router
@@ -693,5 +694,11 @@ def create_app() -> FastAPI:
     app.include_router(actions_router)
     app.include_router(stream_router)
     app.include_router(fragments_router)
-    app.add_middleware(CsrfMiddleware)  # Runs first on every request
+    # Starlette wraps middleware in REVERSE registration order on inbound, so
+    # the LAST-added middleware runs FIRST on each request. Story 11.3 AC12 —
+    # MustChangePasswordMiddleware runs FIRST inbound so users with
+    # ``must_change_password=1`` are redirected before CSRF spends work
+    # validating a request that will never reach a route handler.
+    app.add_middleware(CsrfMiddleware)
+    app.add_middleware(MustChangePasswordMiddleware)
     return app

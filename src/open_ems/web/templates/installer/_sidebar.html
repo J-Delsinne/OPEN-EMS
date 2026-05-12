@@ -39,7 +39,11 @@
       href="/installer/event-log"
       {% if active == 'event-log' %}aria-current="page"{% endif %}
     >Event Log</a></li>
-    <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Settings</a></li>
+    <li><a
+      class="installer-sidebar__item{% if active == 'settings' %} installer-sidebar__item--active{% endif %}"
+      href="/installer/settings"
+      {% if active == 'settings' %}aria-current="page"{% endif %}
+    >Settings</a></li>
     <li><a class="installer-sidebar__item" href="/installer/setup/discovery">Setup</a></li>
   </ul>
 </nav>

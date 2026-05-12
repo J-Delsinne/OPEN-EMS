@@ -38,6 +38,7 @@ from open_ems.web.state_serialization import (
     build_installer_event_log_list_context,
     build_installer_event_log_preview_context,
     build_installer_health_indicator_context,
+    build_installer_homeowner_reset_form_context,
     build_installer_peak_tracker_context,
 )
 
@@ -323,4 +324,38 @@ async def homeowner_weekly_summary(
         request,
         "fragments/homeowner/weekly-summary.html",
         context,
+    )
+
+
+# ── Story 11.3 AC5 — GET /fragments/installer/homeowner-reset-form ────────────
+
+
+@router.get("/fragments/installer/homeowner-reset-form", response_class=HTMLResponse)
+async def installer_homeowner_reset_form(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    cancel: int = 0,
+) -> HTMLResponse:
+    """Story 11.3 AC5 — inline reset-password form fragment.
+
+    ``cancel=1`` collapses the slot back to the trigger button (HTMX target is
+    the outer ``#homeowner-reset-slot`` element; the trigger button replaces
+    the entire form on cancellation).
+    """
+    if cancel:
+        # Review-P16: render the trigger via the shared partial so the markup
+        # never drifts from the credentials section's collapsed state.
+        return _templates.TemplateResponse(
+            request,
+            "installer/_homeowner_reset_trigger.html",
+            {},
+        )
+
+    reset_form = build_installer_homeowner_reset_form_context(
+        csrf_token=user.csrf_token,
+    )
+    return _templates.TemplateResponse(
+        request,
+        "installer/_homeowner_reset_form.html",
+        {"reset_form": reset_form},
     )

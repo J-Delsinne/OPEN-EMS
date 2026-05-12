@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
+import aiosqlite
 import structlog
 from fastapi import Request, Response
 from fastapi.exceptions import HTTPException
@@ -168,6 +169,56 @@ def get_observability_service(request: Request) -> ObservabilityService:
     """
     del request
     return ObservabilityService()
+
+
+def get_user_repo(request: Request) -> UserRepo:
+    """Story 11.3 AC17: UserRepo dependency for the installer settings and
+    change-password routes. Construction mirrors ``get_event_log_repo`` —
+    fresh instance per request, shared aiosqlite connection from the
+    module-level pool.
+    """
+    del request
+    return UserRepo()
+
+
+def get_session_repo(request: Request) -> SessionRepo:
+    """Story 11.3 AC17: SessionRepo dependency for explicit session
+    invalidation on credential reset. Mirrors ``get_user_repo``.
+    """
+    del request
+    return SessionRepo()
+
+
+async def _get_session_user_if_any(
+    request: Request,
+) -> tuple[aiosqlite.Row, aiosqlite.Row] | None:
+    """Story 11.3 AC11 — read-only session resolver for ``MustChangePasswordMiddleware``.
+
+    Returns ``(user_row, session_row)`` if a valid (non-expired) session exists,
+    otherwise ``None``. Unlike :func:`_resolve_session`, this helper does NOT
+    touch ``last_active_at`` / sliding-window-renew / cleanup — those happen
+    later in the request via :func:`require_installer` /
+    :func:`require_homeowner`. The middleware is purely a guard; double-firing
+    the touch+cleanup side-effects would do extra DB writes and risk
+    interleaving with the route-level dependency's own touch.
+    """
+    raw_token = request.cookies.get(_COOKIE_NAME)
+    if not raw_token:
+        return None
+
+    session_row = await SessionRepo().get_by_token_hash(hash_token(raw_token))
+    if session_row is None:
+        return None
+
+    expires_at = _parse_expires_at(str(session_row["expires_at"]))
+    if expires_at is None or datetime.now(UTC) >= expires_at:
+        return None
+
+    user_row = await UserRepo().get_by_id(str(session_row["user_id"]))
+    if user_row is None:
+        return None
+
+    return user_row, session_row
 
 
 def _next_url(request: Request) -> str:

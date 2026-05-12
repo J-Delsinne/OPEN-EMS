@@ -5,19 +5,34 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Form, Request, Response
+from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from open_ems.services import rate_limiter
+from open_ems.services.audit_log import ObservabilityService
 from open_ems.settings import get_settings
 from open_ems.storage.repositories.session_repo import (
     SessionRepo,
     generate_session_token,
     hash_token,
 )
-from open_ems.storage.repositories.user_repo import UserRepo, verify_password
+from open_ems.storage.repositories.user_repo import (
+    PasswordTooLongError,
+    UserRepo,
+    hash_password,
+    validate_password_complexity,
+    verify_password,
+)
 from open_ems.web.csrf import generate_csrf_token
+from open_ems.web.dependencies import (
+    _is_htmx_or_api,
+    _resolve_session,
+    get_observability_service,
+    get_session_repo,
+    get_user_repo,
+)
+from open_ems.web.state_serialization import build_change_password_page_context
 
 logger = structlog.get_logger(__name__)
 
@@ -165,6 +180,176 @@ async def login_submit(
         samesite="strict",
         path="/",
         max_age=max_age,
+    )
+    return response
+
+
+def _unauth_change_password_response(request: Request, *, post: bool) -> Response:
+    """Story 11.3 review-P5/P11 — branch on HTMX vs browser for unauth requests.
+
+    HTMX/API clients get a 401 per AC15 step 1; browsers get a redirect to the
+    login page. POST handlers use 303 so the next request is a GET (avoids the
+    browser re-POSTing form data); GET handlers stay on 302.
+    """
+    if _is_htmx_or_api(request):
+        return Response(status_code=401)
+    status = 303 if post else 302
+    return RedirectResponse(url="/login?next=/change-password", status_code=status)
+
+
+@router.get("/change-password", response_class=HTMLResponse)
+async def change_password_page(
+    request: Request,
+    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
+) -> Response:
+    """Story 11.3 AC14 — GET /change-password.
+
+    Renders the change-password form for the authenticated session (any role).
+    Unauthenticated requests redirect to ``/login?next=/change-password`` (or
+    401 for HTMX). Story 2.1's forced-change UX has been latent since
+    2026-05-02; this is the first surface that enforces it.
+    """
+    user = await _resolve_session(request)
+    if user is None:
+        return _unauth_change_password_response(request, post=False)
+    user_row = await user_repo.get_by_id(user.user_id)
+    if user_row is None:
+        return _unauth_change_password_response(request, post=False)
+    is_forced = bool(user_row["must_change_password"])
+    context = build_change_password_page_context(
+        username=user.username,
+        csrf_token=user.csrf_token,
+        is_forced=is_forced,
+        error_message=None,
+    )
+    return _templates.TemplateResponse(request, "change_password.html", context)
+
+
+def _render_change_password_error(
+    request: Request,
+    *,
+    username: str,
+    csrf_token: str,
+    is_forced: bool,
+    error_message: str,
+) -> HTMLResponse:
+    context = build_change_password_page_context(
+        username=username,
+        csrf_token=csrf_token,
+        is_forced=is_forced,
+        error_message=error_message,
+    )
+    return _templates.TemplateResponse(request, "change_password.html", context, status_code=200)
+
+
+@router.post("/change-password")
+async def change_password_submit(
+    request: Request,
+    current_password: Annotated[str, Form()] = "",
+    new_password: Annotated[str, Form()] = "",
+    confirm_new_password: Annotated[str, Form()] = "",
+    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
+    session_repo: SessionRepo = Depends(get_session_repo),  # noqa: B008
+    observability: ObservabilityService = Depends(get_observability_service),  # noqa: B008
+) -> Response:
+    """Story 11.3 AC15 — POST /change-password.
+
+    Validates current_password, new-password complexity, confirm-match, and
+    differs-from-current; on success updates the hash + clears the flag,
+    invalidates all sessions for the user, clears the cookie, and redirects
+    to ``/login`` so the user re-authenticates with the new credentials.
+    """
+    user = await _resolve_session(request)
+    if user is None:
+        return _unauth_change_password_response(request, post=True)
+
+    user_row = await user_repo.get_by_id(user.user_id)
+    if user_row is None:
+        return _unauth_change_password_response(request, post=True)
+    is_forced = bool(user_row["must_change_password"])
+
+    # Step 2 — current_password verifies
+    if not verify_password(current_password, str(user_row["hashed_password"])):
+        return _render_change_password_error(
+            request,
+            username=user.username,
+            csrf_token=user.csrf_token,
+            is_forced=is_forced,
+            error_message="Current password is incorrect.",
+        )
+
+    # Step 3 — complexity
+    complexity_error = validate_password_complexity(new_password)
+    if complexity_error is not None:
+        return _render_change_password_error(
+            request,
+            username=user.username,
+            csrf_token=user.csrf_token,
+            is_forced=is_forced,
+            error_message=complexity_error,
+        )
+
+    # Step 4 — confirm matches
+    if new_password != confirm_new_password:
+        return _render_change_password_error(
+            request,
+            username=user.username,
+            csrf_token=user.csrf_token,
+            is_forced=is_forced,
+            error_message="Passwords do not match.",
+        )
+
+    # Step 5 — new must differ from current
+    if verify_password(new_password, str(user_row["hashed_password"])):
+        return _render_change_password_error(
+            request,
+            username=user.username,
+            csrf_token=user.csrf_token,
+            is_forced=is_forced,
+            error_message="New password must differ from the current password.",
+        )
+
+    # Step 6 — bcrypt 72-byte ceiling (PasswordTooLongError narrows the catch)
+    try:
+        new_hash = hash_password(new_password)
+    except PasswordTooLongError:
+        return _render_change_password_error(
+            request,
+            username=user.username,
+            csrf_token=user.csrf_token,
+            is_forced=is_forced,
+            error_message="Password is too long. Use 12–72 bytes.",
+        )
+
+    # Step 7 — persist + clear flag
+    await user_repo.update_password(user.user_id, new_hash, must_change_password=False)
+
+    # Step 8 — invalidate all sessions for this user (Story 2.2 contract)
+    await session_repo.delete_all_for_user(user.user_id)
+
+    # Step 9 — audit + structured log. Role is constrained to installer|homeowner
+    # by the users-table CHECK constraint; pass it through directly per
+    # AC15 step 9 + Resolved decision #7.
+    await observability.audit(
+        actor=user.role,
+        event_type="SYSTEM",
+        summary="Password changed",
+    )
+    logger.info(
+        "password_changed",
+        user_id=user.user_id,
+        role=user.role,
+        component="auth",
+    )
+
+    # Step 10 — clear cookie + redirect to /login
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(
+        key=_COOKIE_NAME,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
     )
     return response
 

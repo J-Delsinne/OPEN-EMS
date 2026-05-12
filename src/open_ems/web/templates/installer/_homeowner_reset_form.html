@@ -1,0 +1,50 @@
+{#
+  Story 11.3 AC5 — inline reset-password form.
+
+  Expects ``reset_form`` context with: csrf_token, error_message.
+
+  HTMX target: the parent section's outerHTML on success; this form's
+  outerHTML (with the inline error rendered) on validation failure.
+#}
+<form
+  class="installer-credentials-form installer-credentials-form--reset"
+  method="POST"
+  action="/actions/reset-homeowner-password"
+  hx-post="/actions/reset-homeowner-password"
+  hx-target="#homeowner-credentials-section"
+  hx-swap="outerHTML"
+  autocomplete="off"
+>
+  <input type="hidden" name="csrf_token" value="{{ reset_form.csrf_token }}">
+
+  <details open>
+    <summary>Reset homeowner password</summary>
+    <p>This will end all active homeowner sessions. They will need to log in with the new password.</p>
+  </details>
+
+  {% if reset_form.error_message %}
+  <p class="installer-credentials-form__error" role="alert">{{ reset_form.error_message }}</p>
+  {% endif %}
+
+  <label>
+    <span>New homeowner password</span>
+    <input
+      type="password"
+      name="new_password"
+      required
+      minlength="12"
+      autocomplete="new-password"
+    >
+  </label>
+  <small class="password-hint">At least 12 characters. The server enforces this rule; this hint is informational.</small>
+  <div class="installer-credentials-form__actions">
+    <button type="submit">Reset password</button>
+    <button
+      type="button"
+      class="installer-credentials-form__cancel"
+      hx-get="/fragments/installer/homeowner-reset-form?cancel=1"
+      hx-target="#homeowner-reset-slot"
+      hx-swap="outerHTML"
+    >Cancel</button>
+  </div>
+</form>

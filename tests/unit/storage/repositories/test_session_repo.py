@@ -279,3 +279,139 @@ async def test_delete_all_expired_leaves_valid_sessions_intact(
     assert count == 1
     assert await session_repo.get_by_token_hash(th_expired) is None
     assert await session_repo.get_by_token_hash(th_valid) is not None
+
+
+# ── Story 11.3 AC6 — write-lock discipline retrofit (AC22 #11-16) ─────────────
+
+
+import asyncio as _asyncio  # noqa: E402
+
+
+class _CountingLock:
+    """Wraps :class:`asyncio.Lock` so tests can assert acquire/release counts."""
+
+    def __init__(self) -> None:
+        self._inner = _asyncio.Lock()
+        self.acquire_count = 0
+        self.release_count = 0
+
+    async def __aenter__(self) -> _CountingLock:
+        await self._inner.acquire()
+        self.acquire_count += 1
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._inner.release()
+        self.release_count += 1
+
+
+async def _assert_method_acquires_write_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    action_callable: object,
+) -> None:
+    """Helper: monkeypatch ``get_write_lock`` in the session_repo module and
+    assert that the action acquires and releases the lock exactly once.
+    """
+    from open_ems.storage.repositories import session_repo as session_repo_module
+
+    counter = _CountingLock()
+    monkeypatch.setattr(session_repo_module, "get_write_lock", lambda: counter)
+
+    await action_callable()  # type: ignore[misc]
+
+    assert counter.acquire_count == 1
+    assert counter.release_count == 1
+
+
+async def test_create_session_acquires_write_lock(
+    session_repo: SessionRepo,
+    user_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6: ``SessionRepo.create`` serialises through ``get_write_lock()``."""
+
+    async def _action() -> None:
+        await session_repo.create(
+            user_id=user_id,
+            token_hash=hash_token(generate_session_token()),
+            expires_at=_expires(),
+            csrf_token="c",
+        )
+
+    await _assert_method_acquires_write_lock(monkeypatch, _action)
+
+
+async def test_delete_by_id_acquires_write_lock(
+    session_repo: SessionRepo,
+    user_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6: ``SessionRepo.delete_by_id`` serialises through ``get_write_lock()``."""
+    sid = await session_repo.create(
+        user_id=user_id,
+        token_hash=hash_token(generate_session_token()),
+        expires_at=_expires(),
+        csrf_token="c",
+    )
+
+    async def _action() -> None:
+        await session_repo.delete_by_id(sid)
+
+    await _assert_method_acquires_write_lock(monkeypatch, _action)
+
+
+async def test_delete_all_for_user_acquires_write_lock(
+    session_repo: SessionRepo,
+    user_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6: ``SessionRepo.delete_all_for_user`` serialises through ``get_write_lock()``."""
+
+    async def _action() -> None:
+        await session_repo.delete_all_for_user(user_id)
+
+    await _assert_method_acquires_write_lock(monkeypatch, _action)
+
+
+async def test_touch_acquires_write_lock(
+    session_repo: SessionRepo,
+    user_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6: ``SessionRepo.touch`` serialises through ``get_write_lock()``."""
+    sid = await session_repo.create(
+        user_id=user_id,
+        token_hash=hash_token(generate_session_token()),
+        expires_at=_expires(),
+        csrf_token="c",
+    )
+
+    async def _action() -> None:
+        await session_repo.touch(sid, _expires())
+
+    await _assert_method_acquires_write_lock(monkeypatch, _action)
+
+
+async def test_delete_expired_for_user_acquires_write_lock(
+    session_repo: SessionRepo,
+    user_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6: ``SessionRepo.delete_expired_for_user`` serialises through ``get_write_lock()``."""
+
+    async def _action() -> None:
+        await session_repo.delete_expired_for_user(user_id)
+
+    await _assert_method_acquires_write_lock(monkeypatch, _action)
+
+
+async def test_delete_all_expired_acquires_write_lock(
+    session_repo: SessionRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6: ``SessionRepo.delete_all_expired`` serialises through ``get_write_lock()``."""
+
+    async def _action() -> None:
+        await session_repo.delete_all_expired()
+
+    await _assert_method_acquires_write_lock(monkeypatch, _action)

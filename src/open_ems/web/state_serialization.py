@@ -1178,3 +1178,102 @@ def _build_event_log_query_string(
     if not params:
         return ""
     return "?" + "&".join(f"{k}={quote(v, safe=',')}" for k, v in params)
+
+
+# ─── Story 11.3 — Homeowner credentials section / change-password page ────────
+
+
+def build_installer_homeowner_create_form_context(
+    *,
+    csrf_token: str,
+    username_value: str = "",
+    error_message: str | None = None,
+) -> dict[str, object]:
+    """Story 11.3 AC3 — create-form context.
+
+    ``username_value`` is preserved across validation failures (the password
+    field is single-use and never echoed back).
+    """
+    return {
+        "csrf_token": csrf_token,
+        "username_value": username_value,
+        "error_message": error_message,
+    }
+
+
+def build_installer_homeowner_reset_form_context(
+    *,
+    csrf_token: str,
+    error_message: str | None = None,
+) -> dict[str, object]:
+    """Story 11.3 AC4-5 — reset-form context.
+
+    The new-password input is single-use; only the error message is preserved
+    across failure responses.
+    """
+    return {
+        "csrf_token": csrf_token,
+        "error_message": error_message,
+    }
+
+
+def build_installer_homeowner_credentials_section_context(
+    *,
+    homeowner_row: object | None,
+    csrf_token: str,
+    banner_message: str | None = None,
+    banner_kind: str | None = None,
+    form_state: dict[str, object] | None = None,
+    reset_form_open: bool = False,
+) -> dict[str, object]:
+    """Story 11.3 AC1 — credentials section context (outer wrapper).
+
+    Renders the "no homeowner" or "homeowner exists" variant depending on
+    ``homeowner_row``. ``form_state`` carries inline form errors and preserved
+    inputs across HTMX swaps on validation failure.
+    """
+    homeowner_payload: dict[str, object] | None = None
+    if homeowner_row is not None:
+        homeowner_payload = {
+            "id": str(homeowner_row["id"]),  # type: ignore[index]
+            "username": str(homeowner_row["username"]),  # type: ignore[index]
+            "created_at": str(homeowner_row["created_at"]),  # type: ignore[index]
+        }
+
+    form_state = form_state or {}
+    return {
+        "csrf_token": csrf_token,
+        "homeowner": homeowner_payload,
+        "banner_message": banner_message,
+        "banner_kind": banner_kind,
+        "create_form": build_installer_homeowner_create_form_context(
+            csrf_token=csrf_token,
+            username_value=str(form_state.get("username_value", "") or ""),
+            error_message=(str(form_state.get("create_error", "") or "") or None),
+        ),
+        "reset_form": build_installer_homeowner_reset_form_context(
+            csrf_token=csrf_token,
+            error_message=(str(form_state.get("reset_error", "") or "") or None),
+        ),
+        "reset_form_open": reset_form_open,
+    }
+
+
+def build_change_password_page_context(
+    *,
+    username: str,
+    csrf_token: str,
+    is_forced: bool,
+    error_message: str | None = None,
+) -> dict[str, object]:
+    """Story 11.3 AC14 — change-password page context.
+
+    ``is_forced`` controls page copy (must-change vs voluntary change) and
+    whether the route allows access from a homeowner with the flag set.
+    """
+    return {
+        "username": username,
+        "csrf_token": csrf_token,
+        "is_forced": is_forced,
+        "error_message": error_message,
+    }

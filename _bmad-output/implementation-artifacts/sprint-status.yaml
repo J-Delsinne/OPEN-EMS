@@ -1,5 +1,5 @@
 # generated: 2026-05-01
-# last_updated: 2026-05-01
+# last_updated: 2026-05-12 (Story 11.3 set to done by bmad-code-review)
 # project: OPEN-EMS
 # project_key: NOKEY
 # tracking_system: file-system
@@ -148,7 +148,7 @@ development_status:
   epic-11: in-progress
   11-1-implement-installer-dashboard-with-health-indicator-per-device-rows-peak-tracker-and-deterministic-anomaly-notice: done
   11-2-implement-event-log-ui-with-pagination-scoped-filtered-search-timezone-correct-display-and-resilient-note-entry: done
-  11-3-implement-homeowner-credential-management-with-complexity-enforcement-and-middleware-level-password-change: backlog
+  11-3-implement-homeowner-credential-management-with-complexity-enforcement-and-middleware-level-password-change: done
   epic-11-retrospective: optional
 
   # ─── Epic 12: Platform Reliability and Configuration Management ─────────────

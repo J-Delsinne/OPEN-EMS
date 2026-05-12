@@ -1,0 +1,23 @@
+{#
+  Story 11.3 AC1 — installer settings page.
+
+  v1 scope: homeowner credential management only (FR23). Future Epic 12
+  surfaces (platform updates, backup/restore) will land as additional
+  sections in their own stories.
+#}
+{% extends "base.html" %}
+
+{% block title %}{{ title }} — OPEN-EMS{% endblock %}
+
+{% block content %}
+<main>
+  <h1>{{ title }}</h1>
+  {% set active = "settings" %}
+  <section class="installer-settings-page">
+    {% include "installer/_sidebar.html" %}
+    <section class="installer-settings-page__main" aria-label="Settings">
+      {% include "installer/_homeowner_credentials_section.html" %}
+    </section>
+  </section>
+</main>
+{% endblock %}

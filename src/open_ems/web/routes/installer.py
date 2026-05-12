@@ -8,16 +8,21 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
+from open_ems.storage.repositories.user_repo import UserRepo
 from open_ems.web.dependencies import (
     InstallerUser,
     get_event_log_repo,
+    get_user_repo,
     require_installer,
 )
 from open_ems.web.event_log_filters import (
     EVENT_LOG_PAGE_SIZE,
     _parse_event_log_filters,
 )
-from open_ems.web.state_serialization import build_installer_event_log_page_context
+from open_ems.web.state_serialization import (
+    build_installer_event_log_page_context,
+    build_installer_homeowner_credentials_section_context,
+)
 
 router = APIRouter()
 
@@ -111,4 +116,32 @@ async def installer_event_log(
         request,
         "installer/event_log.html",
         context,
+    )
+
+
+@router.get("/installer/settings", response_class=HTMLResponse)
+async def installer_settings(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
+) -> HTMLResponse:
+    """Story 11.3 AC1 — installer settings page (homeowner credential management).
+
+    Renders one of two variants based on whether a homeowner account already
+    exists: the create-credentials form, or the read-only homeowner display
+    with a reset-password trigger.
+    """
+    homeowner_row = await user_repo.get_homeowner()
+    section_context = build_installer_homeowner_credentials_section_context(
+        homeowner_row=homeowner_row,
+        csrf_token=user.csrf_token,
+    )
+    return _templates.TemplateResponse(
+        request,
+        "installer/settings.html",
+        {
+            "csrf_token": user.csrf_token,
+            "title": "Settings",
+            "section": section_context,
+        },
     )

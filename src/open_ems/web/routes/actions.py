@@ -41,14 +41,24 @@ from open_ems.services.installer_anomaly import (
 )
 from open_ems.settings import Settings
 from open_ems.storage.repositories.event_log_repo import EventLogRepo
+from open_ems.storage.repositories.session_repo import SessionRepo
+from open_ems.storage.repositories.user_repo import (
+    PasswordTooLongError,
+    RoleAlreadyExistsError,
+    UserRepo,
+    hash_password,
+    validate_password_complexity,
+)
 from open_ems.web.dependencies import (
     HomeownerUser,
     InstallerUser,
     get_event_log_repo,
     get_observability_service,
     get_policy_guard,
+    get_session_repo,
     get_settings_dep,
     get_state_store,
+    get_user_repo,
     require_homeowner,
     require_installer,
 )
@@ -56,6 +66,7 @@ from open_ems.web.state_serialization import (
     build_homeowner_headline_context,
     build_installer_anomaly_notice_context,
     build_installer_event_log_row_context,
+    build_installer_homeowner_credentials_section_context,
     build_installer_note_form_context,
 )
 
@@ -662,3 +673,255 @@ async def post_installer_note(
             "fragments/installer/event-log-note-form.html",
             {"note_form": form_ctx},
         )
+
+
+# ── Story 11.3 — POST /actions/create-homeowner + reset-homeowner-password ────
+
+
+_USERNAME_MAX_LENGTH = 64
+_CREATE_BANNER_SUCCESS = "Homeowner account created."
+_RESET_BANNER_SUCCESS = "Homeowner password reset. All homeowner sessions ended."
+_USERNAME_ERROR_LENGTH = "Username must be 1–64 characters."
+_USERNAME_ERROR_DUPLICATE = "This username is already in use."
+_USERNAME_ERROR_HOMEOWNER_EXISTS = "A homeowner account already exists. Reset its password instead."
+_PASSWORD_ERROR_TOO_LONG_BYTES = "Password is too long. Use 12–72 bytes."
+_RESET_ERROR_NO_HOMEOWNER = "No homeowner account exists. Create one first."
+
+
+def _render_credentials_section(
+    request: Request,
+    *,
+    homeowner_row: object | None,
+    csrf_token: str,
+    banner_message: str | None = None,
+    banner_kind: str | None = None,
+    form_state: dict[str, object] | None = None,
+    reset_form_open: bool = False,
+) -> HTMLResponse:
+    """Render the homeowner-credentials section partial standalone (HTMX target).
+
+    Used by both the create and reset POST routes for success and validation-
+    failure responses.
+    """
+    section = build_installer_homeowner_credentials_section_context(
+        homeowner_row=homeowner_row,
+        csrf_token=csrf_token,
+        banner_message=banner_message,
+        banner_kind=banner_kind,
+        form_state=form_state,
+        reset_form_open=reset_form_open,
+    )
+    return _templates.TemplateResponse(
+        request,
+        "installer/_homeowner_credentials_section.html",
+        {"section": section},
+    )
+
+
+@router.post("/actions/create-homeowner", response_class=HTMLResponse)
+async def post_create_homeowner(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
+    observability: ObservabilityService = Depends(get_observability_service),  # noqa: B008
+    username: str = Form(""),
+    password: str = Form(""),
+) -> HTMLResponse:
+    """Story 11.3 AC3 — create a homeowner credential.
+
+    Validation in strict order: username length, uniqueness, password
+    complexity, no-homeowner precondition, bcrypt byte ceiling, then persist
+    + audit.
+    """
+    stripped_username = username.strip()
+
+    # Step 1 — username length. Review-P12: pre-precondition errors render in
+    # the create-form variant (homeowner_row=None) so the section doesn't flip
+    # to the reset-form variant when an unrelated error fires.
+    if not stripped_username or len(stripped_username) > _USERNAME_MAX_LENGTH:
+        return _render_credentials_section(
+            request,
+            homeowner_row=None,
+            csrf_token=user.csrf_token,
+            form_state={
+                "username_value": username,
+                "create_error": _USERNAME_ERROR_LENGTH,
+            },
+        )
+
+    # Step 2 — username uniqueness (across all roles; case-insensitive per
+    # review-P2's COLLATE NOCASE).
+    existing = await user_repo.get_by_username(stripped_username)
+    if existing is not None:
+        return _render_credentials_section(
+            request,
+            homeowner_row=None,
+            csrf_token=user.csrf_token,
+            form_state={
+                "username_value": username,
+                "create_error": _USERNAME_ERROR_DUPLICATE,
+            },
+        )
+
+    # Step 3 — password complexity
+    complexity_error = validate_password_complexity(password)
+    if complexity_error is not None:
+        return _render_credentials_section(
+            request,
+            homeowner_row=None,
+            csrf_token=user.csrf_token,
+            form_state={
+                "username_value": username,
+                "create_error": complexity_error,
+            },
+        )
+
+    # Step 4 — no-homeowner pre-check (defensive fast-path; the authoritative
+    # gate is enforce_role_uniqueness inside the write-lock at Step 5). The
+    # pre-check renders the homeowner-exists variant for stale-form replay; the
+    # lock-held re-check catches the concurrent-create TOCTOU window.
+    existing_homeowner = await user_repo.get_homeowner()
+    if existing_homeowner is not None:
+        return _render_credentials_section(
+            request,
+            homeowner_row=existing_homeowner,
+            csrf_token=user.csrf_token,
+            banner_message=_USERNAME_ERROR_HOMEOWNER_EXISTS,
+            banner_kind="error",
+        )
+
+    # Step 5 — hash + persist (bcrypt byte ceiling raises PasswordTooLongError,
+    # a ValueError subclass so legacy code keeps catching it; review-P14
+    # narrows this route to the specific exception).
+    try:
+        hashed = hash_password(password)
+    except PasswordTooLongError:
+        return _render_credentials_section(
+            request,
+            homeowner_row=None,
+            csrf_token=user.csrf_token,
+            form_state={
+                "username_value": username,
+                "create_error": _PASSWORD_ERROR_TOO_LONG_BYTES,
+            },
+        )
+
+    try:
+        homeowner_id = await user_repo.create(
+            username=stripped_username,
+            hashed_password=hashed,
+            role="homeowner",
+            must_change_password=True,
+            enforce_role_uniqueness="homeowner",
+        )
+    except RoleAlreadyExistsError:
+        # Review-D1: TOCTOU concurrent-create lost the race. Re-fetch and show
+        # the homeowner-exists variant exactly like Step 4 would have.
+        return _render_credentials_section(
+            request,
+            homeowner_row=await user_repo.get_homeowner(),
+            csrf_token=user.csrf_token,
+            banner_message=_USERNAME_ERROR_HOMEOWNER_EXISTS,
+            banner_kind="error",
+        )
+
+    # Step 6 — audit (exact summary string is contractual per AC3)
+    await observability.audit(
+        actor="installer",
+        event_type="SYSTEM",
+        summary="Homeowner credentials created",
+    )
+    logger.info(
+        "homeowner_created",
+        actor_user_id=user.user_id,
+        homeowner_user_id=homeowner_id,
+        component="installer_settings",
+    )
+
+    # Step 7 — render section in homeowner-exists variant with success banner
+    homeowner_row = await user_repo.get_homeowner()
+    return _render_credentials_section(
+        request,
+        homeowner_row=homeowner_row,
+        csrf_token=user.csrf_token,
+        banner_message=_CREATE_BANNER_SUCCESS,
+        banner_kind="success",
+    )
+
+
+@router.post("/actions/reset-homeowner-password", response_class=HTMLResponse)
+async def post_reset_homeowner_password(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
+    session_repo: SessionRepo = Depends(get_session_repo),  # noqa: B008
+    observability: ObservabilityService = Depends(get_observability_service),  # noqa: B008
+    new_password: str = Form(""),
+) -> HTMLResponse:
+    """Story 11.3 AC4 — reset the homeowner password and invalidate all sessions."""
+    homeowner = await user_repo.get_homeowner()
+
+    # Step 1 — homeowner exists
+    if homeowner is None:
+        return _render_credentials_section(
+            request,
+            homeowner_row=None,
+            csrf_token=user.csrf_token,
+            form_state={"reset_error": _RESET_ERROR_NO_HOMEOWNER},
+        )
+
+    # Step 2 — password complexity
+    complexity_error = validate_password_complexity(new_password)
+    if complexity_error is not None:
+        return _render_credentials_section(
+            request,
+            homeowner_row=homeowner,
+            csrf_token=user.csrf_token,
+            form_state={"reset_error": complexity_error},
+            reset_form_open=True,
+        )
+
+    # Step 3 — bcrypt byte ceiling (review-P14 narrows the catch).
+    try:
+        hashed = hash_password(new_password)
+    except PasswordTooLongError:
+        return _render_credentials_section(
+            request,
+            homeowner_row=homeowner,
+            csrf_token=user.csrf_token,
+            form_state={"reset_error": _PASSWORD_ERROR_TOO_LONG_BYTES},
+            reset_form_open=True,
+        )
+
+    # Step 4 — atomic reset: password update + session invalidation under the
+    # write lock (each call acquires the lock independently; the asyncio.Lock
+    # is non-re-entrant so they execute back-to-back, not nested).
+    homeowner_id = str(homeowner["id"])
+    await user_repo.update_password(
+        homeowner_id,
+        hashed_password=hashed,
+        must_change_password=True,
+    )
+    await session_repo.delete_all_for_user(homeowner_id)
+
+    # Step 5 — audit + structured log (after lock release; asyncio.Lock is
+    # non-re-entrant so the audit emission must run outside the lock window).
+    await observability.audit(
+        actor="installer",
+        event_type="SYSTEM",
+        summary="Homeowner credentials reset",
+    )
+    logger.info(
+        "homeowner_password_reset",
+        actor_user_id=user.user_id,
+        homeowner_user_id=homeowner_id,
+        component="installer_settings",
+    )
+
+    return _render_credentials_section(
+        request,
+        homeowner_row=await user_repo.get_homeowner(),
+        csrf_token=user.csrf_token,
+        banner_message=_RESET_BANNER_SUCCESS,
+        banner_kind="success",
+    )

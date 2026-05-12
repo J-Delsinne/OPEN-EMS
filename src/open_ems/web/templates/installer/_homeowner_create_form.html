@@ -1,0 +1,48 @@
+{#
+  Story 11.3 AC3 — homeowner credential creation form.
+
+  Expects ``create_form`` context (the inner section context's
+  ``create_form`` key) with: csrf_token, username_value, error_message.
+
+  HTMX target: this form's parent section. The POST renders the section
+  outerHTML with the appropriate post-mutation state (homeowner exists + banner).
+#}
+<form
+  class="installer-credentials-form installer-credentials-form--create"
+  method="POST"
+  action="/actions/create-homeowner"
+  hx-post="/actions/create-homeowner"
+  hx-target="#homeowner-credentials-section"
+  hx-swap="outerHTML"
+  autocomplete="off"
+>
+  <input type="hidden" name="csrf_token" value="{{ create_form.csrf_token }}">
+
+  {% if create_form.error_message %}
+  <p class="installer-credentials-form__error" role="alert">{{ create_form.error_message }}</p>
+  {% endif %}
+
+  <label>
+    <span>Homeowner username</span>
+    <input
+      type="text"
+      name="username"
+      value="{{ create_form.username_value }}"
+      required
+      maxlength="64"
+      autocomplete="username"
+    >
+  </label>
+  <label>
+    <span>Homeowner password</span>
+    <input
+      type="password"
+      name="password"
+      required
+      minlength="12"
+      autocomplete="new-password"
+    >
+  </label>
+  <small class="password-hint">At least 12 characters. The server enforces this rule; this hint is informational.</small>
+  <button type="submit">Create homeowner</button>
+</form>

@@ -1,0 +1,17 @@
+{#
+  Story 11.3 review-P16 — homeowner reset-trigger button partial.
+
+  Single source of truth for the markup of the "Reset password" trigger button
+  inside the ``#homeowner-reset-slot`` element. Used by:
+    - the credentials section template (collapsed state)
+    - the cancel branch of GET /fragments/installer/homeowner-reset-form
+#}
+<div id="homeowner-reset-slot">
+  <button
+    type="button"
+    class="installer-settings-reset-trigger"
+    hx-get="/fragments/installer/homeowner-reset-form"
+    hx-target="#homeowner-reset-slot"
+    hx-swap="outerHTML"
+  >Reset password</button>
+</div>

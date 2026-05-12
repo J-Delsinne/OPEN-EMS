@@ -1,0 +1,3833 @@
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index 5b62c99..c136581 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -1,5 +1,5 @@
+ # generated: 2026-05-01
+-# last_updated: 2026-05-01
++# last_updated: 2026-05-12
+ # project: OPEN-EMS
+ # project_key: NOKEY
+ # tracking_system: file-system
+@@ -148,7 +148,7 @@ development_status:
+   epic-11: in-progress
+   11-1-implement-installer-dashboard-with-health-indicator-per-device-rows-peak-tracker-and-deterministic-anomaly-notice: done
+   11-2-implement-event-log-ui-with-pagination-scoped-filtered-search-timezone-correct-display-and-resilient-note-entry: done
+-  11-3-implement-homeowner-credential-management-with-complexity-enforcement-and-middleware-level-password-change: backlog
++  11-3-implement-homeowner-credential-management-with-complexity-enforcement-and-middleware-level-password-change: review
+   epic-11-retrospective: optional
+ 
+   # ─── Epic 12: Platform Reliability and Configuration Management ─────────────
+diff --git a/src/open_ems/storage/database.py b/src/open_ems/storage/database.py
+index dcdd353..c42acd9 100644
+--- a/src/open_ems/storage/database.py
++++ b/src/open_ems/storage/database.py
+@@ -66,6 +66,10 @@ def get_write_lock() -> asyncio.Lock:
+     "cannot start a transaction within a transaction" race that was empirically
+     reproduced by ``tests/integration/storage/test_config_repo_concurrent_writers``.
+ 
++    Story 11.3 (2026-05-12) extended the discipline to ``UserRepo`` and
++    ``SessionRepo`` — closing the explicit 9.0b deferred-finding that gated
++    the retrofit to "when Epic 11 wires real homeowner credential flows".
++
+     Lazy initialization: unit tests that bypass ``init_database`` and pass
+     their own ``aiosqlite.Connection`` to a repo still call into the writers
+     and so still hit ``get_write_lock``. We lazy-create a process-local lock
+diff --git a/src/open_ems/storage/repositories/session_repo.py b/src/open_ems/storage/repositories/session_repo.py
+index af9c160..36763df 100644
+--- a/src/open_ems/storage/repositories/session_repo.py
++++ b/src/open_ems/storage/repositories/session_repo.py
+@@ -7,7 +7,7 @@ from datetime import UTC, datetime
+ 
+ import aiosqlite
+ 
+-from open_ems.storage.database import get_connection
++from open_ems.storage.database import get_connection, get_write_lock
+ 
+ SESSION_TOKEN_BYTES = 32  # 256 bits; architecture requires >= 128 bits
+ 
+@@ -33,16 +33,20 @@ class SessionRepo:
+         expires_at: datetime,
+         csrf_token: str,
+     ) -> str:
+-        """Create a session. Returns the new session ID (UUID4 string)."""
++        """Create a session. Returns the new session ID (UUID4 string).
++
++        Story 11.3 AC6 — serialized through the database-module write lock.
++        """
+         session_id = str(uuid.uuid4())
+         now = datetime.now(UTC).isoformat()
+-        await self._conn.execute(
+-            "INSERT INTO sessions"
+-            " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
+-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+-            (session_id, user_id, token_hash, now, now, expires_at.isoformat(), csrf_token),
+-        )
+-        await self._conn.commit()
++        async with get_write_lock():
++            await self._conn.execute(
++                "INSERT INTO sessions"
++                " (id, user_id, token_hash, created_at, last_active_at, expires_at, csrf_token)"
++                " VALUES (?, ?, ?, ?, ?, ?, ?)",
++                (session_id, user_id, token_hash, now, now, expires_at.isoformat(), csrf_token),
++            )
++            await self._conn.commit()
+         return session_id
+ 
+     async def get_by_token_hash(self, token_hash: str) -> aiosqlite.Row | None:
+@@ -55,65 +59,88 @@ class SessionRepo:
+             return await cursor.fetchone()
+ 
+     async def delete_by_id(self, session_id: str) -> None:
+-        """Delete a session by ID."""
+-        await self._conn.execute(
+-            "DELETE FROM sessions WHERE id = ?",
+-            (session_id,),
+-        )
+-        await self._conn.commit()
++        """Delete a session by ID.
++
++        Story 11.3 AC6 — serialized through the database-module write lock.
++        """
++        async with get_write_lock():
++            await self._conn.execute(
++                "DELETE FROM sessions WHERE id = ?",
++                (session_id,),
++            )
++            await self._conn.commit()
+ 
+     async def delete_all_for_user(self, user_id: str) -> None:
+-        """Delete all sessions for a given user (session fixation prevention on re-login)."""
+-        await self._conn.execute(
+-            "DELETE FROM sessions WHERE user_id = ?",
+-            (user_id,),
+-        )
+-        await self._conn.commit()
++        """Delete all sessions for a given user (session fixation prevention on re-login).
++
++        Story 11.3 AC6 — serialized through the database-module write lock.
++        """
++        async with get_write_lock():
++            await self._conn.execute(
++                "DELETE FROM sessions WHERE user_id = ?",
++                (user_id,),
++            )
++            await self._conn.commit()
+ 
+     async def update_last_active(self, session_id: str) -> None:
+         """Update last_active_at to now.
+ 
+         Raises ValueError if session_id does not exist.
+         Caller is responsible for passing a valid session ID (see get_by_token_hash()).
++
++        Story 11.3 AC6 — serialized through the database-module write lock.
+         """
+         now = datetime.now(UTC).isoformat()
+-        async with self._conn.execute(
+-            "UPDATE sessions SET last_active_at = ? WHERE id = ?",
+-            (now, session_id),
+-        ) as cursor:
+-            if cursor.rowcount == 0:
+-                raise ValueError(f"No session found with id={session_id!r}")
+-        await self._conn.commit()
++        async with get_write_lock():
++            async with self._conn.execute(
++                "UPDATE sessions SET last_active_at = ? WHERE id = ?",
++                (now, session_id),
++            ) as cursor:
++                if cursor.rowcount == 0:
++                    raise ValueError(f"No session found with id={session_id!r}")
++            await self._conn.commit()
+ 
+     async def touch(self, session_id: str, new_expires_at: datetime) -> None:
+-        """Update last_active_at=now and expires_at=new_expires_at to roll the inactivity window."""
++        """Update last_active_at=now and expires_at=new_expires_at to roll the inactivity window.
++
++        Story 11.3 AC6 — serialized through the database-module write lock.
++        """
+         now = datetime.now(UTC).isoformat()
+-        async with self._conn.execute(
+-            "UPDATE sessions SET last_active_at = ?, expires_at = ? WHERE id = ?",
+-            (now, new_expires_at.isoformat(), session_id),
+-        ) as cursor:
+-            if cursor.rowcount == 0:
+-                raise ValueError(f"No session found with id={session_id!r}")
+-        await self._conn.commit()
++        async with get_write_lock():
++            async with self._conn.execute(
++                "UPDATE sessions SET last_active_at = ?, expires_at = ? WHERE id = ?",
++                (now, new_expires_at.isoformat(), session_id),
++            ) as cursor:
++                if cursor.rowcount == 0:
++                    raise ValueError(f"No session found with id={session_id!r}")
++            await self._conn.commit()
+ 
+     async def delete_expired_for_user(self, user_id: str) -> int:
+-        """Delete all expired sessions for a single user. Returns count deleted."""
++        """Delete all expired sessions for a single user. Returns count deleted.
++
++        Story 11.3 AC6 — serialized through the database-module write lock.
++        """
+         now = datetime.now(UTC).isoformat()
+-        async with self._conn.execute(
+-            "DELETE FROM sessions WHERE user_id = ? AND expires_at < ?",
+-            (user_id, now),
+-        ) as cursor:
+-            count = cursor.rowcount
+-        await self._conn.commit()
++        async with get_write_lock():
++            async with self._conn.execute(
++                "DELETE FROM sessions WHERE user_id = ? AND expires_at < ?",
++                (user_id, now),
++            ) as cursor:
++                count = cursor.rowcount
++            await self._conn.commit()
+         return count
+ 
+     async def delete_all_expired(self) -> int:
+-        """Delete all expired sessions across all users. Returns count deleted."""
++        """Delete all expired sessions across all users. Returns count deleted.
++
++        Story 11.3 AC6 — serialized through the database-module write lock.
++        """
+         now = datetime.now(UTC).isoformat()
+-        async with self._conn.execute(
+-            "DELETE FROM sessions WHERE expires_at < ?",
+-            (now,),
+-        ) as cursor:
+-            count = cursor.rowcount
+-        await self._conn.commit()
++        async with get_write_lock():
++            async with self._conn.execute(
++                "DELETE FROM sessions WHERE expires_at < ?",
++                (now,),
++            ) as cursor:
++                count = cursor.rowcount
++            await self._conn.commit()
+         return count
+diff --git a/src/open_ems/storage/repositories/user_repo.py b/src/open_ems/storage/repositories/user_repo.py
+index 8638f6f..005fd9b 100644
+--- a/src/open_ems/storage/repositories/user_repo.py
++++ b/src/open_ems/storage/repositories/user_repo.py
+@@ -3,16 +3,43 @@ from __future__ import annotations
+ import uuid
+ from collections.abc import Callable
+ from datetime import UTC, datetime
++from typing import Final
+ 
+ import aiosqlite
+ import bcrypt as _bcrypt
+ 
+-from open_ems.storage.database import get_connection
++from open_ems.storage.database import get_connection, get_write_lock
+ 
+ _BCRYPT_MAX_BYTES = 72
+ 
+ _VALID_ROLES: frozenset[str] = frozenset({"installer", "homeowner"})
+ 
++# Story 11.3 AC7 — server-authoritative password complexity rule.
++# Length-only, NIST SP 800-63B §5.1.1.2-aligned (no character-class composition).
++MIN_PASSWORD_LENGTH: Final[int] = 12
++
++_PASSWORD_TOO_SHORT_MESSAGE: Final[str] = (
++    f"Password must be at least {MIN_PASSWORD_LENGTH} characters."
++)
++
++
++def validate_password_complexity(password: str) -> str | None:
++    """Story 11.3 AC7 — server-authoritative password complexity check.
++
++    Returns ``None`` if the password passes; otherwise returns a user-facing
++    error message. The v1 rule is length-only ≥ 12 characters; bcrypt's
++    72-byte UTF-8 ceiling is checked at hash time (raises ``ValueError`` from
++    :func:`hash_password`) and surfaced separately by the route layer.
++
++    All three credential-mutation routes (create-homeowner,
++    reset-homeowner-password, change-password) reference this single function
++    so the rule has one source of truth.
++    """
++    if len(password) < MIN_PASSWORD_LENGTH:
++        return _PASSWORD_TOO_SHORT_MESSAGE
++    return None
++
++
+ # PHC-prefix → verifier callable. To add a new algorithm, append an entry here.
+ # Each callable receives (plain_password: str, hashed_password: str) → bool.
+ _HASHERS: dict[str, Callable[[str, str], bool]] = {
+@@ -68,18 +95,24 @@ class UserRepo:
+         role: str,
+         must_change_password: bool = True,
+     ) -> str:
+-        """Create a user. Returns the new user ID (UUID4 string)."""
++        """Create a user. Returns the new user ID (UUID4 string).
++
++        Story 11.3 AC6 — write is serialized through the database-module write
++        lock to honor the 9.0b "cannot start a transaction within a transaction"
++        invariant under concurrent writers.
++        """
+         if role not in _VALID_ROLES:
+             raise ValueError(f"Invalid role {role!r}. Must be one of {sorted(_VALID_ROLES)}")
+         user_id = str(uuid.uuid4())
+         created_at = datetime.now(UTC).isoformat()
+-        await self._conn.execute(
+-            "INSERT INTO users"
+-            " (id, username, role, hashed_password, must_change_password, created_at)"
+-            " VALUES (?, ?, ?, ?, ?, ?)",
+-            (user_id, username, role, hashed_password, int(must_change_password), created_at),
+-        )
+-        await self._conn.commit()
++        async with get_write_lock():
++            await self._conn.execute(
++                "INSERT INTO users"
++                " (id, username, role, hashed_password, must_change_password, created_at)"
++                " VALUES (?, ?, ?, ?, ?, ?)",
++                (user_id, username, role, hashed_password, int(must_change_password), created_at),
++            )
++            await self._conn.commit()
+         return user_id
+ 
+     async def get_by_username(self, username: str) -> aiosqlite.Row | None:
+@@ -100,16 +133,49 @@ class UserRepo:
+         ) as cursor:
+             return await cursor.fetchone()
+ 
+-    async def update_password(self, user_id: str, hashed_password: str) -> None:
+-        """Replace hashed_password and clear must_change_password flag.
++    async def get_homeowner(self) -> aiosqlite.Row | None:
++        """Story 11.3 AC10 — fetch the single homeowner user row, or None.
+ 
+-        Caller is responsible for passing a pre-hashed value (see hash_password()).
+-        Raises ValueError if no user with the given user_id exists.
++        v1 invariant: ``users`` table contains at most one row with
++        ``role='homeowner'``. Multi-homeowner scenarios are out of scope for v1
++        and would require an explicit migration + UX update — not a silent
++        expansion of this method. ``ORDER BY created_at ASC LIMIT 1`` keeps
++        the read deterministic if the invariant is violated via direct DB
++        manipulation (the route layer rejects creation when one exists).
+         """
+         async with self._conn.execute(
+-            "UPDATE users SET hashed_password = ?, must_change_password = 0 WHERE id = ?",
+-            (hashed_password, user_id),
++            "SELECT id, username, role, hashed_password, must_change_password, created_at"
++            " FROM users WHERE role = ? ORDER BY created_at ASC LIMIT 1",
++            ("homeowner",),
+         ) as cursor:
+-            if cursor.rowcount == 0:
+-                raise ValueError(f"No user found with id={user_id!r}")
+-        await self._conn.commit()
++            return await cursor.fetchone()
++
++    async def update_password(
++        self,
++        user_id: str,
++        hashed_password: str,
++        *,
++        must_change_password: bool = False,
++    ) -> None:
++        """Replace hashed_password and set the must_change_password flag.
++
++        Caller is responsible for passing a pre-hashed value (see
++        :func:`hash_password`). The flag defaults to ``False`` — the historic
++        self-change path (Story 11.3's ``/change-password`` route) clears it
++        on successful update. Pass ``must_change_password=True`` for
++        installer-initiated resets so the homeowner is forced through the
++        change-password flow on next login.
++
++        Raises ``ValueError`` if no user with the given user_id exists.
++
++        Story 11.3 AC6 — write is serialized through the database-module write
++        lock to honor the 9.0b transaction-isolation invariant.
++        """
++        async with get_write_lock():
++            async with self._conn.execute(
++                "UPDATE users SET hashed_password = ?, must_change_password = ? WHERE id = ?",
++                (hashed_password, int(must_change_password), user_id),
++            ) as cursor:
++                if cursor.rowcount == 0:
++                    raise ValueError(f"No user found with id={user_id!r}")
++            await self._conn.commit()
+diff --git a/src/open_ems/web/app.py b/src/open_ems/web/app.py
+index e09e324..5bcec56 100644
+--- a/src/open_ems/web/app.py
++++ b/src/open_ems/web/app.py
+@@ -55,6 +55,7 @@ from open_ems.storage.repositories.session_repo import SessionRepo
+ from open_ems.storage.repositories.user_repo import UserRepo, hash_password
+ from open_ems.storage.repositories.wizard_state_repo import WizardStateRepo
+ from open_ems.web.csrf import CsrfMiddleware
++from open_ems.web.must_change_password_middleware import MustChangePasswordMiddleware
+ from open_ems.web.routes.actions import router as actions_router
+ from open_ems.web.routes.auth import router as auth_router
+ from open_ems.web.routes.fragments import router as fragments_router
+@@ -693,5 +694,11 @@ def create_app() -> FastAPI:
+     app.include_router(actions_router)
+     app.include_router(stream_router)
+     app.include_router(fragments_router)
+-    app.add_middleware(CsrfMiddleware)  # Runs first on every request
++    # Starlette wraps middleware in REVERSE registration order on inbound, so
++    # the LAST-added middleware runs FIRST on each request. Story 11.3 AC12 —
++    # MustChangePasswordMiddleware runs FIRST inbound so users with
++    # ``must_change_password=1`` are redirected before CSRF spends work
++    # validating a request that will never reach a route handler.
++    app.add_middleware(CsrfMiddleware)
++    app.add_middleware(MustChangePasswordMiddleware)
+     return app
+diff --git a/src/open_ems/web/dependencies.py b/src/open_ems/web/dependencies.py
+index 9ea8f78..91d664b 100644
+--- a/src/open_ems/web/dependencies.py
++++ b/src/open_ems/web/dependencies.py
+@@ -4,6 +4,7 @@ from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
+ from urllib.parse import quote
+ 
++import aiosqlite
+ import structlog
+ from fastapi import Request, Response
+ from fastapi.exceptions import HTTPException
+@@ -170,6 +171,56 @@ def get_observability_service(request: Request) -> ObservabilityService:
+     return ObservabilityService()
+ 
+ 
++def get_user_repo(request: Request) -> UserRepo:
++    """Story 11.3 AC17: UserRepo dependency for the installer settings and
++    change-password routes. Construction mirrors ``get_event_log_repo`` —
++    fresh instance per request, shared aiosqlite connection from the
++    module-level pool.
++    """
++    del request
++    return UserRepo()
++
++
++def get_session_repo(request: Request) -> SessionRepo:
++    """Story 11.3 AC17: SessionRepo dependency for explicit session
++    invalidation on credential reset. Mirrors ``get_user_repo``.
++    """
++    del request
++    return SessionRepo()
++
++
++async def _get_session_user_if_any_readonly(
++    request: Request,
++) -> tuple[aiosqlite.Row, aiosqlite.Row] | None:
++    """Story 11.3 AC11 — read-only session resolver for ``MustChangePasswordMiddleware``.
++
++    Returns ``(user_row, session_row)`` if a valid (non-expired) session exists,
++    otherwise ``None``. Unlike :func:`_resolve_session`, this helper does NOT
++    touch ``last_active_at`` / sliding-window-renew / cleanup — those happen
++    later in the request via :func:`require_installer` /
++    :func:`require_homeowner`. The middleware is purely a guard; double-firing
++    the touch+cleanup side-effects would do extra DB writes and risk
++    interleaving with the route-level dependency's own touch.
++    """
++    raw_token = request.cookies.get(_COOKIE_NAME)
++    if not raw_token:
++        return None
++
++    session_row = await SessionRepo().get_by_token_hash(hash_token(raw_token))
++    if session_row is None:
++        return None
++
++    expires_at = _parse_expires_at(str(session_row["expires_at"]))
++    if expires_at is None or datetime.now(UTC) >= expires_at:
++        return None
++
++    user_row = await UserRepo().get_by_id(str(session_row["user_id"]))
++    if user_row is None:
++        return None
++
++    return user_row, session_row
++
++
+ def _next_url(request: Request) -> str:
+     """Build the `next` redirect value: path + query string, URL-encoded."""
+     path = request.url.path
+diff --git a/src/open_ems/web/routes/actions.py b/src/open_ems/web/routes/actions.py
+index b68628b..152508d 100644
+--- a/src/open_ems/web/routes/actions.py
++++ b/src/open_ems/web/routes/actions.py
+@@ -41,14 +41,22 @@ from open_ems.services.installer_anomaly import (
+ )
+ from open_ems.settings import Settings
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from open_ems.storage.repositories.session_repo import SessionRepo
++from open_ems.storage.repositories.user_repo import (
++    UserRepo,
++    hash_password,
++    validate_password_complexity,
++)
+ from open_ems.web.dependencies import (
+     HomeownerUser,
+     InstallerUser,
+     get_event_log_repo,
+     get_observability_service,
+     get_policy_guard,
++    get_session_repo,
+     get_settings_dep,
+     get_state_store,
++    get_user_repo,
+     require_homeowner,
+     require_installer,
+ )
+@@ -56,6 +64,7 @@ from open_ems.web.state_serialization import (
+     build_homeowner_headline_context,
+     build_installer_anomaly_notice_context,
+     build_installer_event_log_row_context,
++    build_installer_homeowner_credentials_section_context,
+     build_installer_note_form_context,
+ )
+ 
+@@ -662,3 +671,238 @@ async def post_installer_note(
+             "fragments/installer/event-log-note-form.html",
+             {"note_form": form_ctx},
+         )
++
++
++# ── Story 11.3 — POST /actions/create-homeowner + reset-homeowner-password ────
++
++
++_USERNAME_MAX_LENGTH = 64
++_CREATE_BANNER_SUCCESS = "Homeowner account created."
++_RESET_BANNER_SUCCESS = "Homeowner password reset. All homeowner sessions ended."
++_USERNAME_ERROR_LENGTH = "Username must be 1–64 characters."
++_USERNAME_ERROR_DUPLICATE = "This username is already in use."
++_USERNAME_ERROR_HOMEOWNER_EXISTS = "A homeowner account already exists. Reset its password instead."
++_PASSWORD_ERROR_TOO_LONG_BYTES = "Password is too long. Use 12–72 bytes."
++_RESET_ERROR_NO_HOMEOWNER = "No homeowner account exists. Create one first."
++
++
++def _render_credentials_section(
++    request: Request,
++    *,
++    homeowner_row: object | None,
++    csrf_token: str,
++    banner_message: str | None = None,
++    banner_kind: str | None = None,
++    form_state: dict[str, object] | None = None,
++    reset_form_open: bool = False,
++) -> HTMLResponse:
++    """Render the homeowner-credentials section partial standalone (HTMX target).
++
++    Used by both the create and reset POST routes for success and validation-
++    failure responses.
++    """
++    section = build_installer_homeowner_credentials_section_context(
++        homeowner_row=homeowner_row,
++        csrf_token=csrf_token,
++        banner_message=banner_message,
++        banner_kind=banner_kind,
++        form_state=form_state,
++        reset_form_open=reset_form_open,
++    )
++    return _templates.TemplateResponse(
++        request,
++        "installer/_homeowner_credentials_section.html",
++        {"section": section},
++    )
++
++
++@router.post("/actions/create-homeowner", response_class=HTMLResponse)
++async def post_create_homeowner(
++    request: Request,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
++    observability: ObservabilityService = Depends(get_observability_service),  # noqa: B008
++    username: str = Form(""),
++    password: str = Form(""),
++) -> HTMLResponse:
++    """Story 11.3 AC3 — create a homeowner credential.
++
++    Validation in strict order: username length, uniqueness, password
++    complexity, no-homeowner precondition, bcrypt byte ceiling, then persist
++    + audit.
++    """
++    stripped_username = username.strip()
++
++    # Step 1 — username length
++    if not stripped_username or len(stripped_username) > _USERNAME_MAX_LENGTH:
++        return _render_credentials_section(
++            request,
++            homeowner_row=await user_repo.get_homeowner(),
++            csrf_token=user.csrf_token,
++            form_state={
++                "username_value": username,
++                "create_error": _USERNAME_ERROR_LENGTH,
++            },
++        )
++
++    # Step 2 — username uniqueness (across all roles)
++    existing = await user_repo.get_by_username(stripped_username)
++    if existing is not None:
++        return _render_credentials_section(
++            request,
++            homeowner_row=await user_repo.get_homeowner(),
++            csrf_token=user.csrf_token,
++            form_state={
++                "username_value": username,
++                "create_error": _USERNAME_ERROR_DUPLICATE,
++            },
++        )
++
++    # Step 3 — password complexity
++    complexity_error = validate_password_complexity(password)
++    if complexity_error is not None:
++        return _render_credentials_section(
++            request,
++            homeowner_row=await user_repo.get_homeowner(),
++            csrf_token=user.csrf_token,
++            form_state={
++                "username_value": username,
++                "create_error": complexity_error,
++            },
++        )
++
++    # Step 4 — no-homeowner precondition. Defensive against stale form submit
++    # OR URL tampering: when a homeowner already exists the section flips to
++    # the homeowner-exists variant; we surface the rejection via a banner
++    # because the create form is not rendered in that variant.
++    existing_homeowner = await user_repo.get_homeowner()
++    if existing_homeowner is not None:
++        return _render_credentials_section(
++            request,
++            homeowner_row=existing_homeowner,
++            csrf_token=user.csrf_token,
++            banner_message=_USERNAME_ERROR_HOMEOWNER_EXISTS,
++            banner_kind="error",
++        )
++
++    # Step 5 — hash + persist
++    try:
++        hashed = hash_password(password)
++    except ValueError:
++        return _render_credentials_section(
++            request,
++            homeowner_row=None,
++            csrf_token=user.csrf_token,
++            form_state={
++                "username_value": username,
++                "create_error": _PASSWORD_ERROR_TOO_LONG_BYTES,
++            },
++        )
++
++    homeowner_id = await user_repo.create(
++        username=stripped_username,
++        hashed_password=hashed,
++        role="homeowner",
++        must_change_password=True,
++    )
++
++    # Step 6 — audit (exact summary string is contractual per AC3)
++    await observability.audit(
++        actor="installer",
++        event_type="SYSTEM",
++        summary="Homeowner credentials created",
++    )
++    logger.info(
++        "homeowner_created",
++        actor_user_id=user.user_id,
++        homeowner_user_id=homeowner_id,
++        component="installer_settings",
++    )
++
++    # Step 7 — render section in homeowner-exists variant with success banner
++    homeowner_row = await user_repo.get_homeowner()
++    return _render_credentials_section(
++        request,
++        homeowner_row=homeowner_row,
++        csrf_token=user.csrf_token,
++        banner_message=_CREATE_BANNER_SUCCESS,
++        banner_kind="success",
++    )
++
++
++@router.post("/actions/reset-homeowner-password", response_class=HTMLResponse)
++async def post_reset_homeowner_password(
++    request: Request,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
++    session_repo: SessionRepo = Depends(get_session_repo),  # noqa: B008
++    observability: ObservabilityService = Depends(get_observability_service),  # noqa: B008
++    new_password: str = Form(""),
++) -> HTMLResponse:
++    """Story 11.3 AC4 — reset the homeowner password and invalidate all sessions."""
++    homeowner = await user_repo.get_homeowner()
++
++    # Step 1 — homeowner exists
++    if homeowner is None:
++        return _render_credentials_section(
++            request,
++            homeowner_row=None,
++            csrf_token=user.csrf_token,
++            form_state={"reset_error": _RESET_ERROR_NO_HOMEOWNER},
++        )
++
++    # Step 2 — password complexity
++    complexity_error = validate_password_complexity(new_password)
++    if complexity_error is not None:
++        return _render_credentials_section(
++            request,
++            homeowner_row=homeowner,
++            csrf_token=user.csrf_token,
++            form_state={"reset_error": complexity_error},
++            reset_form_open=True,
++        )
++
++    # Step 3 — bcrypt byte ceiling
++    try:
++        hashed = hash_password(new_password)
++    except ValueError:
++        return _render_credentials_section(
++            request,
++            homeowner_row=homeowner,
++            csrf_token=user.csrf_token,
++            form_state={"reset_error": _PASSWORD_ERROR_TOO_LONG_BYTES},
++            reset_form_open=True,
++        )
++
++    # Step 4 — atomic reset: password update + session invalidation under the
++    # write lock (each call acquires the lock independently; the asyncio.Lock
++    # is non-re-entrant so they execute back-to-back, not nested).
++    homeowner_id = str(homeowner["id"])
++    await user_repo.update_password(
++        homeowner_id,
++        hashed_password=hashed,
++        must_change_password=True,
++    )
++    await session_repo.delete_all_for_user(homeowner_id)
++
++    # Step 5 — audit + structured log (after lock release; asyncio.Lock is
++    # non-re-entrant so the audit emission must run outside the lock window).
++    await observability.audit(
++        actor="installer",
++        event_type="SYSTEM",
++        summary="Homeowner credentials reset",
++    )
++    logger.info(
++        "homeowner_password_reset",
++        actor_user_id=user.user_id,
++        homeowner_user_id=homeowner_id,
++        component="installer_settings",
++    )
++
++    return _render_credentials_section(
++        request,
++        homeowner_row=await user_repo.get_homeowner(),
++        csrf_token=user.csrf_token,
++        banner_message=_RESET_BANNER_SUCCESS,
++        banner_kind="success",
++    )
+diff --git a/src/open_ems/web/routes/auth.py b/src/open_ems/web/routes/auth.py
+index 4a5449f..11b820f 100644
+--- a/src/open_ems/web/routes/auth.py
++++ b/src/open_ems/web/routes/auth.py
+@@ -10,14 +10,21 @@ from fastapi.responses import HTMLResponse, RedirectResponse
+ from fastapi.templating import Jinja2Templates
+ 
+ from open_ems.services import rate_limiter
++from open_ems.services.audit_log import ObservabilityService
+ from open_ems.settings import get_settings
+ from open_ems.storage.repositories.session_repo import (
+     SessionRepo,
+     generate_session_token,
+     hash_token,
+ )
+-from open_ems.storage.repositories.user_repo import UserRepo, verify_password
++from open_ems.storage.repositories.user_repo import (
++    UserRepo,
++    hash_password,
++    validate_password_complexity,
++    verify_password,
++)
+ from open_ems.web.csrf import generate_csrf_token
++from open_ems.web.state_serialization import build_change_password_page_context
+ 
+ logger = structlog.get_logger(__name__)
+ 
+@@ -169,6 +176,199 @@ async def login_submit(
+     return response
+ 
+ 
++async def _resolve_change_password_session(
++    request: Request,
++) -> tuple[str, str, str, str] | None:
++    """Return ``(user_id, username, role, csrf_token)`` for the current session.
++
++    Used by GET/POST ``/change-password`` to authenticate ANY role (forced AND
++    voluntary path). Returns None when no valid session exists.
++    """
++    raw_token = request.cookies.get(_COOKIE_NAME)
++    if not raw_token:
++        return None
++    session_row = await SessionRepo().get_by_token_hash(hash_token(raw_token))
++    if session_row is None:
++        return None
++    expires_at_raw = str(session_row["expires_at"])
++    try:
++        expires_at = datetime.fromisoformat(expires_at_raw)
++    except ValueError:
++        return None
++    if expires_at.tzinfo is None:
++        expires_at = expires_at.replace(tzinfo=UTC)
++    if datetime.now(UTC) >= expires_at:
++        return None
++    user_row = await UserRepo().get_by_id(str(session_row["user_id"]))
++    if user_row is None:
++        return None
++    return (
++        str(user_row["id"]),
++        str(user_row["username"]),
++        str(user_row["role"]),
++        str(session_row["csrf_token"]),
++    )
++
++
++@router.get("/change-password", response_class=HTMLResponse)
++async def change_password_page(request: Request) -> Response:
++    """Story 11.3 AC14 — GET /change-password.
++
++    Renders the change-password form for the authenticated session (any role).
++    Unauthenticated requests redirect to ``/login?next=/change-password``.
++    """
++    resolved = await _resolve_change_password_session(request)
++    if resolved is None:
++        return RedirectResponse(url="/login?next=/change-password", status_code=302)
++    user_id, username, _role, csrf_tok = resolved
++    user_row = await UserRepo().get_by_id(user_id)
++    if user_row is None:
++        return RedirectResponse(url="/login?next=/change-password", status_code=302)
++    is_forced = bool(user_row["must_change_password"])
++    context = build_change_password_page_context(
++        username=username,
++        csrf_token=csrf_tok,
++        is_forced=is_forced,
++        error_message=None,
++    )
++    return _templates.TemplateResponse(request, "change_password.html", context)
++
++
++def _render_change_password_error(
++    request: Request,
++    *,
++    username: str,
++    csrf_token: str,
++    is_forced: bool,
++    error_message: str,
++) -> HTMLResponse:
++    context = build_change_password_page_context(
++        username=username,
++        csrf_token=csrf_token,
++        is_forced=is_forced,
++        error_message=error_message,
++    )
++    return _templates.TemplateResponse(request, "change_password.html", context, status_code=200)
++
++
++@router.post("/change-password")
++async def change_password_submit(
++    request: Request,
++    current_password: Annotated[str, Form()] = "",
++    new_password: Annotated[str, Form()] = "",
++    confirm_new_password: Annotated[str, Form()] = "",
++) -> Response:
++    """Story 11.3 AC15 — POST /change-password.
++
++    Validates current_password, new-password complexity, confirm-match, and
++    differs-from-current; on success updates the hash + clears the flag,
++    invalidates all sessions for the user, clears the cookie, and redirects
++    to ``/login`` so the user re-authenticates with the new credentials.
++    """
++    resolved = await _resolve_change_password_session(request)
++    if resolved is None:
++        return RedirectResponse(url="/login?next=/change-password", status_code=302)
++    user_id, username, role, csrf_tok = resolved
++
++    user_row = await UserRepo().get_by_id(user_id)
++    if user_row is None:
++        return RedirectResponse(url="/login?next=/change-password", status_code=302)
++    is_forced = bool(user_row["must_change_password"])
++
++    # Step 2 — current_password verifies
++    if not verify_password(current_password, str(user_row["hashed_password"])):
++        return _render_change_password_error(
++            request,
++            username=username,
++            csrf_token=csrf_tok,
++            is_forced=is_forced,
++            error_message="Current password is incorrect.",
++        )
++
++    # Step 3 — complexity
++    complexity_error = validate_password_complexity(new_password)
++    if complexity_error is not None:
++        return _render_change_password_error(
++            request,
++            username=username,
++            csrf_token=csrf_tok,
++            is_forced=is_forced,
++            error_message=complexity_error,
++        )
++
++    # Step 4 — confirm matches
++    if new_password != confirm_new_password:
++        return _render_change_password_error(
++            request,
++            username=username,
++            csrf_token=csrf_tok,
++            is_forced=is_forced,
++            error_message="Passwords do not match.",
++        )
++
++    # Step 5 — new must differ from current
++    if verify_password(new_password, str(user_row["hashed_password"])):
++        return _render_change_password_error(
++            request,
++            username=username,
++            csrf_token=csrf_tok,
++            is_forced=is_forced,
++            error_message="New password must differ from the current password.",
++        )
++
++    # Step 6 — bcrypt 72-byte ceiling
++    try:
++        new_hash = hash_password(new_password)
++    except ValueError:
++        return _render_change_password_error(
++            request,
++            username=username,
++            csrf_token=csrf_tok,
++            is_forced=is_forced,
++            error_message="Password is too long. Use 12–72 bytes.",
++        )
++
++    # Step 7 — persist + clear flag
++    await UserRepo().update_password(user_id, new_hash, must_change_password=False)
++
++    # Step 8 — invalidate all sessions for this user (Story 2.2 contract)
++    await SessionRepo().delete_all_for_user(user_id)
++
++    # Step 9 — audit + structured log
++    actor = role if role in ("installer", "homeowner") else "system"
++    try:
++        await ObservabilityService().audit(
++            actor=actor,
++            event_type="SYSTEM",
++            summary="Password changed",
++        )
++    except Exception:  # noqa: BLE001 — audit must not block the rotation
++        logger.warning(
++            "password_changed_audit_failed",
++            user_id=user_id,
++            role=role,
++            component="auth",
++            exc_info=True,
++        )
++    logger.info(
++        "password_changed",
++        user_id=user_id,
++        role=role,
++        component="auth",
++    )
++
++    # Step 10 — clear cookie + redirect to /login
++    response = RedirectResponse(url="/login", status_code=303)
++    response.delete_cookie(
++        key=_COOKIE_NAME,
++        httponly=True,
++        secure=True,
++        samesite="strict",
++        path="/",
++    )
++    return response
++
++
+ @router.post("/logout")
+ async def logout(request: Request) -> Response:
+     raw_token = request.cookies.get(_COOKIE_NAME)
+diff --git a/src/open_ems/web/routes/fragments.py b/src/open_ems/web/routes/fragments.py
+index 55cc87b..cb4619c 100644
+--- a/src/open_ems/web/routes/fragments.py
++++ b/src/open_ems/web/routes/fragments.py
+@@ -38,6 +38,7 @@ from open_ems.web.state_serialization import (
+     build_installer_event_log_list_context,
+     build_installer_event_log_preview_context,
+     build_installer_health_indicator_context,
++    build_installer_homeowner_reset_form_context,
+     build_installer_peak_tracker_context,
+ )
+ 
+@@ -324,3 +325,42 @@ async def homeowner_weekly_summary(
+         "fragments/homeowner/weekly-summary.html",
+         context,
+     )
++
++
++# ── Story 11.3 AC5 — GET /fragments/installer/homeowner-reset-form ────────────
++
++
++@router.get("/fragments/installer/homeowner-reset-form", response_class=HTMLResponse)
++async def installer_homeowner_reset_form(
++    request: Request,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++    cancel: int = 0,
++) -> HTMLResponse:
++    """Story 11.3 AC5 — inline reset-password form fragment.
++
++    ``cancel=1`` collapses the slot back to the trigger button (HTMX target is
++    the outer ``#homeowner-reset-slot`` element; the trigger button replaces
++    the entire form on cancellation).
++    """
++    if cancel:
++        # Return only the trigger button so the slot collapses to its initial state.
++        return HTMLResponse(
++            content=(
++                '<div id="homeowner-reset-slot">'
++                '<button type="button" class="installer-settings-reset-trigger"'
++                ' hx-get="/fragments/installer/homeowner-reset-form"'
++                ' hx-target="#homeowner-reset-slot" hx-swap="outerHTML">'
++                "Reset password</button>"
++                "</div>"
++            ),
++            status_code=200,
++        )
++
++    reset_form = build_installer_homeowner_reset_form_context(
++        csrf_token=user.csrf_token,
++    )
++    return _templates.TemplateResponse(
++        request,
++        "installer/_homeowner_reset_form.html",
++        {"reset_form": reset_form},
++    )
+diff --git a/src/open_ems/web/routes/installer.py b/src/open_ems/web/routes/installer.py
+index cfaf550..59315d2 100644
+--- a/src/open_ems/web/routes/installer.py
++++ b/src/open_ems/web/routes/installer.py
+@@ -8,16 +8,21 @@ from fastapi.responses import HTMLResponse
+ from fastapi.templating import Jinja2Templates
+ 
+ from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from open_ems.storage.repositories.user_repo import UserRepo
+ from open_ems.web.dependencies import (
+     InstallerUser,
+     get_event_log_repo,
++    get_user_repo,
+     require_installer,
+ )
+ from open_ems.web.event_log_filters import (
+     EVENT_LOG_PAGE_SIZE,
+     _parse_event_log_filters,
+ )
+-from open_ems.web.state_serialization import build_installer_event_log_page_context
++from open_ems.web.state_serialization import (
++    build_installer_event_log_page_context,
++    build_installer_homeowner_credentials_section_context,
++)
+ 
+ router = APIRouter()
+ 
+@@ -112,3 +117,31 @@ async def installer_event_log(
+         "installer/event_log.html",
+         context,
+     )
++
++
++@router.get("/installer/settings", response_class=HTMLResponse)
++async def installer_settings(
++    request: Request,
++    user: InstallerUser = Depends(require_installer),  # noqa: B008
++    user_repo: UserRepo = Depends(get_user_repo),  # noqa: B008
++) -> HTMLResponse:
++    """Story 11.3 AC1 — installer settings page (homeowner credential management).
++
++    Renders one of two variants based on whether a homeowner account already
++    exists: the create-credentials form, or the read-only homeowner display
++    with a reset-password trigger.
++    """
++    homeowner_row = await user_repo.get_homeowner()
++    section_context = build_installer_homeowner_credentials_section_context(
++        homeowner_row=homeowner_row,
++        csrf_token=user.csrf_token,
++    )
++    return _templates.TemplateResponse(
++        request,
++        "installer/settings.html",
++        {
++            "csrf_token": user.csrf_token,
++            "title": "Settings",
++            "section": section_context,
++        },
++    )
+diff --git a/src/open_ems/web/state_serialization.py b/src/open_ems/web/state_serialization.py
+index c4d9251..0e8df38 100644
+--- a/src/open_ems/web/state_serialization.py
++++ b/src/open_ems/web/state_serialization.py
+@@ -1178,3 +1178,102 @@ def _build_event_log_query_string(
+     if not params:
+         return ""
+     return "?" + "&".join(f"{k}={quote(v, safe=',')}" for k, v in params)
++
++
++# ─── Story 11.3 — Homeowner credentials section / change-password page ────────
++
++
++def build_installer_homeowner_create_form_context(
++    *,
++    csrf_token: str,
++    username_value: str = "",
++    error_message: str | None = None,
++) -> dict[str, object]:
++    """Story 11.3 AC3 — create-form context.
++
++    ``username_value`` is preserved across validation failures (the password
++    field is single-use and never echoed back).
++    """
++    return {
++        "csrf_token": csrf_token,
++        "username_value": username_value,
++        "error_message": error_message,
++    }
++
++
++def build_installer_homeowner_reset_form_context(
++    *,
++    csrf_token: str,
++    error_message: str | None = None,
++) -> dict[str, object]:
++    """Story 11.3 AC4-5 — reset-form context.
++
++    The new-password input is single-use; only the error message is preserved
++    across failure responses.
++    """
++    return {
++        "csrf_token": csrf_token,
++        "error_message": error_message,
++    }
++
++
++def build_installer_homeowner_credentials_section_context(
++    *,
++    homeowner_row: object | None,
++    csrf_token: str,
++    banner_message: str | None = None,
++    banner_kind: str | None = None,
++    form_state: dict[str, object] | None = None,
++    reset_form_open: bool = False,
++) -> dict[str, object]:
++    """Story 11.3 AC1 — credentials section context (outer wrapper).
++
++    Renders the "no homeowner" or "homeowner exists" variant depending on
++    ``homeowner_row``. ``form_state`` carries inline form errors and preserved
++    inputs across HTMX swaps on validation failure.
++    """
++    homeowner_payload: dict[str, object] | None = None
++    if homeowner_row is not None:
++        homeowner_payload = {
++            "id": str(homeowner_row["id"]),  # type: ignore[index]
++            "username": str(homeowner_row["username"]),  # type: ignore[index]
++            "created_at": str(homeowner_row["created_at"]),  # type: ignore[index]
++        }
++
++    form_state = form_state or {}
++    return {
++        "csrf_token": csrf_token,
++        "homeowner": homeowner_payload,
++        "banner_message": banner_message,
++        "banner_kind": banner_kind,
++        "create_form": build_installer_homeowner_create_form_context(
++            csrf_token=csrf_token,
++            username_value=str(form_state.get("username_value", "") or ""),
++            error_message=(str(form_state.get("create_error", "") or "") or None),
++        ),
++        "reset_form": build_installer_homeowner_reset_form_context(
++            csrf_token=csrf_token,
++            error_message=(str(form_state.get("reset_error", "") or "") or None),
++        ),
++        "reset_form_open": reset_form_open,
++    }
++
++
++def build_change_password_page_context(
++    *,
++    username: str,
++    csrf_token: str,
++    is_forced: bool,
++    error_message: str | None = None,
++) -> dict[str, object]:
++    """Story 11.3 AC14 — change-password page context.
++
++    ``is_forced`` controls page copy (must-change vs voluntary change) and
++    whether the route allows access from a homeowner with the flag set.
++    """
++    return {
++        "username": username,
++        "csrf_token": csrf_token,
++        "is_forced": is_forced,
++        "error_message": error_message,
++    }
+diff --git a/src/open_ems/web/templates/installer/_sidebar.html b/src/open_ems/web/templates/installer/_sidebar.html
+index 5578f81..094e8ab 100644
+--- a/src/open_ems/web/templates/installer/_sidebar.html
++++ b/src/open_ems/web/templates/installer/_sidebar.html
+@@ -39,7 +39,11 @@
+       href="/installer/event-log"
+       {% if active == 'event-log' %}aria-current="page"{% endif %}
+     >Event Log</a></li>
+-    <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Settings</a></li>
++    <li><a
++      class="installer-sidebar__item{% if active == 'settings' %} installer-sidebar__item--active{% endif %}"
++      href="/installer/settings"
++      {% if active == 'settings' %}aria-current="page"{% endif %}
++    >Settings</a></li>
+     <li><a class="installer-sidebar__item" href="/installer/setup/discovery">Setup</a></li>
+   </ul>
+ </nav>
+diff --git a/tests/unit/storage/repositories/test_session_repo.py b/tests/unit/storage/repositories/test_session_repo.py
+index 15a9dfa..036d6d8 100644
+--- a/tests/unit/storage/repositories/test_session_repo.py
++++ b/tests/unit/storage/repositories/test_session_repo.py
+@@ -279,3 +279,139 @@ async def test_delete_all_expired_leaves_valid_sessions_intact(
+     assert count == 1
+     assert await session_repo.get_by_token_hash(th_expired) is None
+     assert await session_repo.get_by_token_hash(th_valid) is not None
++
++
++# ── Story 11.3 AC6 — write-lock discipline retrofit (AC22 #11-16) ─────────────
++
++
++import asyncio as _asyncio  # noqa: E402
++
++
++class _CountingLock:
++    """Wraps :class:`asyncio.Lock` so tests can assert acquire/release counts."""
++
++    def __init__(self) -> None:
++        self._inner = _asyncio.Lock()
++        self.acquire_count = 0
++        self.release_count = 0
++
++    async def __aenter__(self) -> _CountingLock:
++        await self._inner.acquire()
++        self.acquire_count += 1
++        return self
++
++    async def __aexit__(self, *exc: object) -> None:
++        self._inner.release()
++        self.release_count += 1
++
++
++async def _assert_method_acquires_write_lock(
++    monkeypatch: pytest.MonkeyPatch,
++    action_callable: object,
++) -> None:
++    """Helper: monkeypatch ``get_write_lock`` in the session_repo module and
++    assert that the action acquires and releases the lock exactly once.
++    """
++    from open_ems.storage.repositories import session_repo as session_repo_module
++
++    counter = _CountingLock()
++    monkeypatch.setattr(session_repo_module, "get_write_lock", lambda: counter)
++
++    await action_callable()  # type: ignore[misc]
++
++    assert counter.acquire_count == 1
++    assert counter.release_count == 1
++
++
++async def test_create_session_acquires_write_lock(
++    session_repo: SessionRepo,
++    user_id: str,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC6: ``SessionRepo.create`` serialises through ``get_write_lock()``."""
++
++    async def _action() -> None:
++        await session_repo.create(
++            user_id=user_id,
++            token_hash=hash_token(generate_session_token()),
++            expires_at=_expires(),
++            csrf_token="c",
++        )
++
++    await _assert_method_acquires_write_lock(monkeypatch, _action)
++
++
++async def test_delete_by_id_acquires_write_lock(
++    session_repo: SessionRepo,
++    user_id: str,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC6: ``SessionRepo.delete_by_id`` serialises through ``get_write_lock()``."""
++    sid = await session_repo.create(
++        user_id=user_id,
++        token_hash=hash_token(generate_session_token()),
++        expires_at=_expires(),
++        csrf_token="c",
++    )
++
++    async def _action() -> None:
++        await session_repo.delete_by_id(sid)
++
++    await _assert_method_acquires_write_lock(monkeypatch, _action)
++
++
++async def test_delete_all_for_user_acquires_write_lock(
++    session_repo: SessionRepo,
++    user_id: str,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC6: ``SessionRepo.delete_all_for_user`` serialises through ``get_write_lock()``."""
++
++    async def _action() -> None:
++        await session_repo.delete_all_for_user(user_id)
++
++    await _assert_method_acquires_write_lock(monkeypatch, _action)
++
++
++async def test_touch_acquires_write_lock(
++    session_repo: SessionRepo,
++    user_id: str,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC6: ``SessionRepo.touch`` serialises through ``get_write_lock()``."""
++    sid = await session_repo.create(
++        user_id=user_id,
++        token_hash=hash_token(generate_session_token()),
++        expires_at=_expires(),
++        csrf_token="c",
++    )
++
++    async def _action() -> None:
++        await session_repo.touch(sid, _expires())
++
++    await _assert_method_acquires_write_lock(monkeypatch, _action)
++
++
++async def test_delete_expired_for_user_acquires_write_lock(
++    session_repo: SessionRepo,
++    user_id: str,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC6: ``SessionRepo.delete_expired_for_user`` serialises through ``get_write_lock()``."""
++
++    async def _action() -> None:
++        await session_repo.delete_expired_for_user(user_id)
++
++    await _assert_method_acquires_write_lock(monkeypatch, _action)
++
++
++async def test_delete_all_expired_acquires_write_lock(
++    session_repo: SessionRepo,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """AC6: ``SessionRepo.delete_all_expired`` serialises through ``get_write_lock()``."""
++
++    async def _action() -> None:
++        await session_repo.delete_all_expired()
++
++    await _assert_method_acquires_write_lock(monkeypatch, _action)
+diff --git a/tests/unit/storage/repositories/test_user_repo.py b/tests/unit/storage/repositories/test_user_repo.py
+index de82238..31c8201 100644
+--- a/tests/unit/storage/repositories/test_user_repo.py
++++ b/tests/unit/storage/repositories/test_user_repo.py
+@@ -1,9 +1,51 @@
+ from __future__ import annotations
+ 
++import asyncio
++import contextlib
++
+ import aiosqlite
+ import pytest
+ 
+-from open_ems.storage.repositories.user_repo import UserRepo, hash_password, verify_password
++from open_ems.storage.repositories.user_repo import (
++    MIN_PASSWORD_LENGTH,
++    UserRepo,
++    hash_password,
++    validate_password_complexity,
++    verify_password,
++)
++
++
++class _CountingLock:
++    """Async-context-manager lock proxy that counts acquire/release pairs.
++
++    Wraps the real :class:`asyncio.Lock` so behavior is unchanged (locking still
++    serializes); tests inspect ``acquire_count`` after the action.
++    """
++
++    def __init__(self) -> None:
++        self._inner = asyncio.Lock()
++        self.acquire_count = 0
++        self.release_count = 0
++
++    async def __aenter__(self) -> _CountingLock:
++        await self._inner.acquire()
++        self.acquire_count += 1
++        return self
++
++    async def __aexit__(self, *exc: object) -> None:
++        self._inner.release()
++        self.release_count += 1
++
++
++@contextlib.contextmanager
++def _patched_write_lock(monkeypatch: pytest.MonkeyPatch, module: object) -> object:
++    """Monkeypatch the module's ``get_write_lock`` to return a counting lock.
++
++    Yields the counting lock so the test can assert acquire/release counts.
++    """
++    counter = _CountingLock()
++    monkeypatch.setattr(module, "get_write_lock", lambda: counter)
++    yield counter
+ 
+ 
+ async def test_count_empty(user_repo: UserRepo) -> None:
+@@ -120,3 +162,139 @@ async def test_update_password_clears_flag(user_repo: UserRepo) -> None:
+ async def test_update_password_nonexistent_user(user_repo: UserRepo) -> None:
+     with pytest.raises(ValueError, match="No user found"):
+         await user_repo.update_password("nonexistent-id", hash_password("new"))
++
++
++# ─── Story 11.3 — password complexity helper (AC7, AC22 #1-3) ─────────────────
++
++
++def test_validate_password_complexity_accepts_exactly_12_chars() -> None:
++    """AC7: a 12-character password passes the v1 complexity rule."""
++    assert validate_password_complexity("a" * MIN_PASSWORD_LENGTH) is None
++
++
++def test_validate_password_complexity_rejects_11_chars_with_clear_message() -> None:
++    """AC7: an 11-character password fails with a user-facing error message."""
++    result = validate_password_complexity("a" * (MIN_PASSWORD_LENGTH - 1))
++    assert result is not None
++    assert "12 characters" in result
++
++
++def test_validate_password_complexity_accepts_long_unicode() -> None:
++    """AC7: a 12+ codepoint Unicode password passes — character count, not byte count.
++
++    The bcrypt 72-byte ceiling is a separate check at hash time. The complexity
++    helper counts ``len(password)`` (Python ``str`` = codepoints).
++    """
++    assert validate_password_complexity("héllo-wörld!" + "x" * 5) is None
++
++
++# ─── Story 11.3 — get_homeowner (AC10, AC22 #4-6) ─────────────────────────────
++
++
++async def test_get_homeowner_returns_none_when_no_homeowner_exists(
++    user_repo: UserRepo,
++) -> None:
++    """AC10: empty users table → ``get_homeowner()`` is None."""
++    await user_repo.create("admin", hash_password("password1234"), "installer")
++    assert await user_repo.get_homeowner() is None
++
++
++async def test_get_homeowner_returns_row_when_one_exists(user_repo: UserRepo) -> None:
++    """AC10: a single homeowner row is returned with the expected username."""
++    await user_repo.create("admin", hash_password("password1234"), "installer")
++    await user_repo.create("home", hash_password("password1234"), "homeowner")
++    row = await user_repo.get_homeowner()
++    assert row is not None
++    assert row["username"] == "home"
++    assert row["role"] == "homeowner"
++
++
++async def test_get_homeowner_returns_first_by_created_at_when_multiple_exist(
++    user_repo: UserRepo,
++) -> None:
++    """AC10: defensive — when the v1 single-homeowner invariant is violated via
++    direct DB manipulation, ``get_homeowner()`` returns the earliest row
++    deterministically (``ORDER BY created_at ASC LIMIT 1``).
++    """
++    # First homeowner — created_at = '2026-01-01T00:00:00+00:00' via fixture timing
++    conn = user_repo._conn  # noqa: SLF001 — direct INSERT bypasses the route guard
++    await conn.execute(
++        "INSERT INTO users"
++        " (id, username, role, hashed_password, must_change_password, created_at)"
++        " VALUES (?, ?, ?, ?, ?, ?)",
++        ("h1", "first", "homeowner", "$2b$x", 0, "2026-01-01T00:00:00+00:00"),
++    )
++    await conn.execute(
++        "INSERT INTO users"
++        " (id, username, role, hashed_password, must_change_password, created_at)"
++        " VALUES (?, ?, ?, ?, ?, ?)",
++        ("h2", "second", "homeowner", "$2b$y", 0, "2026-02-01T00:00:00+00:00"),
++    )
++    await conn.commit()
++
++    row = await user_repo.get_homeowner()
++    assert row is not None
++    assert row["username"] == "first"
++
++
++# ─── Story 11.3 — update_password kwarg (AC9, AC22 #7-8) ──────────────────────
++
++
++async def test_update_password_clears_must_change_password_by_default(
++    user_repo: UserRepo,
++) -> None:
++    """AC9: ``update_password()`` without the kwarg clears the flag (self-change path)."""
++    uid = await user_repo.create("user", hash_password("password1234"), "homeowner")
++    await user_repo.update_password(uid, hash_password("newpassword12"))
++    row = await user_repo.get_by_id(uid)
++    assert row is not None
++    assert row["must_change_password"] == 0
++
++
++async def test_update_password_sets_must_change_password_when_kwarg_true(
++    user_repo: UserRepo,
++) -> None:
++    """AC9: passing ``must_change_password=True`` re-applies the flag (reset path)."""
++    uid = await user_repo.create("user", hash_password("password1234"), "homeowner")
++    # Simulate prior self-change clearing the flag
++    await user_repo.update_password(uid, hash_password("midpassword12"))
++    row_after_self_change = await user_repo.get_by_id(uid)
++    assert row_after_self_change is not None
++    assert row_after_self_change["must_change_password"] == 0
++
++    # Installer reset re-applies the flag
++    await user_repo.update_password(
++        uid, hash_password("resetpassword12"), must_change_password=True
++    )
++    row_after_reset = await user_repo.get_by_id(uid)
++    assert row_after_reset is not None
++    assert row_after_reset["must_change_password"] == 1
++
++
++# ─── Story 11.3 — write-lock discipline (AC6, AC22 #9-10) ─────────────────────
++
++
++async def test_create_user_acquires_write_lock(
++    user_repo: UserRepo, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """AC6: ``UserRepo.create`` serialises through ``get_write_lock()``."""
++    from open_ems.storage.repositories import user_repo as user_repo_module
++
++    with _patched_write_lock(monkeypatch, user_repo_module) as counter:
++        await user_repo.create("a", hash_password("password1234"), "installer")
++    assert counter.acquire_count == 1
++    assert counter.release_count == 1
++
++
++async def test_update_password_acquires_write_lock(
++    user_repo: UserRepo, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """AC6: ``UserRepo.update_password`` serialises through ``get_write_lock()``."""
++    from open_ems.storage.repositories import user_repo as user_repo_module
++
++    uid = await user_repo.create("a", hash_password("password1234"), "installer")
++
++    with _patched_write_lock(monkeypatch, user_repo_module) as counter:
++        await user_repo.update_password(uid, hash_password("newpassword12"))
++    assert counter.acquire_count == 1
++    assert counter.release_count == 1
+diff --git a/src/open_ems/web/must_change_password_middleware.py b/src/open_ems/web/must_change_password_middleware.py
+new file mode 100644
+index 0000000..6b9f3aa
+--- /dev/null
++++ b/src/open_ems/web/must_change_password_middleware.py
+@@ -0,0 +1,105 @@
++"""Story 11.3 — middleware-level enforcement of ``must_change_password``.
++
++A user with ``must_change_password=1`` is redirected to ``/change-password``
++on every request except a finite allow-list (the change-password form itself,
++login/logout, static assets, health probes). Runs before the route handler
++so direct navigation to dashboard routes cannot bypass the gate.
++
++Registered AFTER :class:`CsrfMiddleware` in ``create_app()`` — Starlette
++wraps in reverse on inbound, so the last-added middleware runs FIRST on each
++request. That ordering is deliberate (AC12): a user who must change their
++password gets redirected before CSRF checks waste work on a request that
++will never reach the route handler.
++"""
++
++from __future__ import annotations
++
++from collections.abc import Awaitable, Callable
++from typing import Final
++
++import structlog
++from starlette.middleware.base import BaseHTTPMiddleware
++from starlette.requests import Request
++from starlette.responses import RedirectResponse, Response
++from starlette.types import ASGIApp
++
++from open_ems.web.dependencies import _get_session_user_if_any_readonly
++
++logger = structlog.get_logger(__name__)
++
++# Story 11.3 AC13 — finite, exhaustive allow-list. Exact-match URL paths that
++# bypass the redirect even when ``must_change_password=1``.
++_MIDDLEWARE_ALLOW_LIST: Final[frozenset[str]] = frozenset(
++    {
++        "/change-password",
++        "/login",
++        "/logout",
++        "/health/live",
++        "/health/ready",
++    }
++)
++
++# Story 11.3 AC13 — prefix-match for static assets (htmx.min.js, alpine.min.js,
++# open-ems.css are all served from /static/...).
++_MIDDLEWARE_ALLOW_PREFIX: Final[str] = "/static/"
++
++_CHANGE_PASSWORD_URL: Final[str] = "/change-password"
++
++
++_CallNext = Callable[[Request], Awaitable[Response]]
++
++
++def _path_is_allow_listed(path: str) -> bool:
++    """Return True if ``path`` is in the exact-match allow-list OR is a static asset."""
++    if path in _MIDDLEWARE_ALLOW_LIST:
++        return True
++    return path.startswith(_MIDDLEWARE_ALLOW_PREFIX)
++
++
++class MustChangePasswordMiddleware(BaseHTTPMiddleware):
++    """Redirects users with ``must_change_password=1`` to ``/change-password``.
++
++    The middleware is a pure guard — it does NOT touch ``last_active_at`` or
++    renew the session cookie. Those side-effects happen in the route-level
++    dependency (:func:`require_installer` / :func:`require_homeowner`) once
++    the request reaches a handler.
++    """
++
++    def __init__(self, app: ASGIApp) -> None:
++        super().__init__(app)
++
++    async def dispatch(self, request: Request, call_next: _CallNext) -> Response:
++        path = request.url.path
++
++        if _path_is_allow_listed(path):
++            return await call_next(request)
++
++        resolved = await _get_session_user_if_any_readonly(request)
++        if resolved is None:
++            # No (valid) session — route-level dependency handles auth.
++            return await call_next(request)
++
++        user_row, _session_row = resolved
++        if not bool(user_row["must_change_password"]):
++            return await call_next(request)
++
++        is_htmx = bool(request.headers.get("hx-request"))
++        logger.debug(
++            "must_change_password_redirect",
++            component="must_change_password_middleware",
++            user_id=str(user_row["id"]),
++            role=str(user_row["role"]),
++            requested_path=path,
++            is_htmx=is_htmx,
++        )
++
++        if is_htmx:
++            # HTMX redirect contract: 200 + HX-Redirect header → browser does
++            # a full-page navigation. A 303 alone would be followed for the
++            # partial swap, which is the wrong UX here.
++            return Response(
++                status_code=200,
++                headers={"HX-Redirect": _CHANGE_PASSWORD_URL},
++            )
++
++        return RedirectResponse(url=_CHANGE_PASSWORD_URL, status_code=303)
+diff --git a/src/open_ems/web/templates/change_password.html b/src/open_ems/web/templates/change_password.html
+new file mode 100644
+index 0000000..a1b8ae2
+--- /dev/null
++++ b/src/open_ems/web/templates/change_password.html
+@@ -0,0 +1,130 @@
++{#
++  Story 11.3 AC14 — change-password page.
++
++  Standalone card layout (same shell pattern as login.html), used for both:
++    - forced first-login path (is_forced=true; user has must_change_password=1)
++    - voluntary self-change path (is_forced=false; any authenticated user)
++
++  Expects context: username, csrf_token, is_forced, error_message.
++#}
++<!DOCTYPE html>
++<html lang="en">
++<head>
++  <meta charset="UTF-8">
++  <meta name="viewport" content="width=device-width, initial-scale=1.0">
++  <title>Change password — OPEN-EMS</title>
++  <style>
++    :root {
++      --color-surface: #f8fafc;
++      --color-card: #ffffff;
++      --color-border: #e2e8f0;
++      --color-text-primary: #1e293b;
++      --color-text-secondary: #64748b;
++      --color-error: #dc2626;
++      --font-sans: system-ui, -apple-system, sans-serif;
++    }
++    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
++    body {
++      background: var(--color-surface);
++      color: var(--color-text-primary);
++      font-family: var(--font-sans);
++      min-height: 100vh;
++      display: flex;
++      align-items: center;
++      justify-content: center;
++    }
++    .card {
++      background: var(--color-card);
++      border: 1px solid var(--color-border);
++      border-radius: 8px;
++      padding: 2rem;
++      width: 100%;
++      max-width: 420px;
++    }
++    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
++    .forced-banner {
++      color: var(--color-text-secondary);
++      font-size: 0.95rem;
++      margin-bottom: 1.25rem;
++    }
++    label { display: block; margin-bottom: 1rem; }
++    label span {
++      display: block;
++      font-size: 0.875rem;
++      color: var(--color-text-secondary);
++      margin-bottom: 0.375rem;
++    }
++    input[type="text"],
++    input[type="password"] {
++      width: 100%;
++      padding: 0.5rem 0.75rem;
++      border: 1px solid var(--color-border);
++      border-radius: 4px;
++      font-size: 1rem;
++      font-family: inherit;
++    }
++    input:focus { outline: 2px solid #3b82f6; outline-offset: 1px; }
++    .error {
++      color: var(--color-error);
++      font-size: 0.875rem;
++      margin-bottom: 1rem;
++      padding: 0.5rem 0.75rem;
++      background: #fef2f2;
++      border: 1px solid #fecaca;
++      border-radius: 4px;
++    }
++    .password-hint {
++      display: block;
++      font-size: 0.8rem;
++      color: var(--color-text-secondary);
++      margin-top: -0.5rem;
++      margin-bottom: 1rem;
++    }
++    button[type="submit"] {
++      width: 100%;
++      padding: 0.625rem;
++      background: #1e293b;
++      color: #fff;
++      border: none;
++      border-radius: 4px;
++      font-size: 1rem;
++      font-family: inherit;
++      cursor: pointer;
++      margin-top: 0.5rem;
++    }
++    button[type="submit"]:hover { background: #334155; }
++  </style>
++</head>
++<body>
++  <div class="card">
++    <h1>Change password</h1>
++    {% if is_forced %}
++    <p class="forced-banner" role="status">You must change your password before continuing.</p>
++    {% endif %}
++    <form method="POST" action="/change-password">
++      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
++      {% if error_message %}
++      <div class="error" role="alert">{{ error_message }}</div>
++      {% endif %}
++      <label>
++        <span>Username</span>
++        <input type="text" value="{{ username }}" disabled autocomplete="username">
++      </label>
++      <label>
++        <span>Current password</span>
++        <input type="password" name="current_password" required autocomplete="current-password" autofocus>
++      </label>
++      <label>
++        <span>New password</span>
++        <input type="password" name="new_password" required minlength="12" autocomplete="new-password">
++      </label>
++      <small class="password-hint">At least 12 characters. The server enforces this rule; this hint is informational.</small>
++      <label>
++        <span>Confirm new password</span>
++        <input type="password" name="confirm_new_password" required minlength="12" autocomplete="new-password">
++      </label>
++      <button type="submit">Update password</button>
++    </form>
++  </div>
++</body>
++</html>
+diff --git a/src/open_ems/web/templates/installer/_homeowner_create_form.html b/src/open_ems/web/templates/installer/_homeowner_create_form.html
+new file mode 100644
+index 0000000..77a8c59
+--- /dev/null
++++ b/src/open_ems/web/templates/installer/_homeowner_create_form.html
+@@ -0,0 +1,48 @@
++{#
++  Story 11.3 AC3 — homeowner credential creation form.
++
++  Expects ``create_form`` context (the inner section context's
++  ``create_form`` key) with: csrf_token, username_value, error_message.
++
++  HTMX target: this form's parent section. The POST renders the section
++  outerHTML with the appropriate post-mutation state (homeowner exists + banner).
++#}
++<form
++  class="installer-credentials-form installer-credentials-form--create"
++  method="POST"
++  action="/actions/create-homeowner"
++  hx-post="/actions/create-homeowner"
++  hx-target="#homeowner-credentials-section"
++  hx-swap="outerHTML"
++  autocomplete="off"
++>
++  <input type="hidden" name="csrf_token" value="{{ create_form.csrf_token }}">
++
++  {% if create_form.error_message %}
++  <p class="installer-credentials-form__error" role="alert">{{ create_form.error_message }}</p>
++  {% endif %}
++
++  <label>
++    <span>Homeowner username</span>
++    <input
++      type="text"
++      name="username"
++      value="{{ create_form.username_value }}"
++      required
++      maxlength="64"
++      autocomplete="username"
++    >
++  </label>
++  <label>
++    <span>Homeowner password</span>
++    <input
++      type="password"
++      name="password"
++      required
++      minlength="12"
++      autocomplete="new-password"
++    >
++  </label>
++  <small class="password-hint">At least 12 characters. The server enforces this rule; this hint is informational.</small>
++  <button type="submit">Create homeowner</button>
++</form>
+diff --git a/src/open_ems/web/templates/installer/_homeowner_credentials_section.html b/src/open_ems/web/templates/installer/_homeowner_credentials_section.html
+new file mode 100644
+index 0000000..f89da08
+--- /dev/null
++++ b/src/open_ems/web/templates/installer/_homeowner_credentials_section.html
+@@ -0,0 +1,61 @@
++{#
++  Story 11.3 — Homeowner Credentials section partial.
++
++  Renders one of two variants based on ``section.homeowner``:
++    - homeowner is None → create form
++    - homeowner is set  → read-only display + reset trigger (inline form
++                          loads into #homeowner-reset-slot on click)
++
++  HTMX targets:
++    - POST /actions/create-homeowner → outerHTML swap of this entire section
++    - POST /actions/reset-homeowner-password → outerHTML swap of this section
++    - GET /fragments/installer/homeowner-reset-form → outerHTML swap of
++      the #homeowner-reset-slot element only
++#}
++<section
++  id="homeowner-credentials-section"
++  class="installer-settings-section"
++  aria-label="Homeowner credentials"
++>
++  <h2>Homeowner credentials</h2>
++
++  {% if section.banner_message %}
++  <p
++    class="installer-settings-banner installer-settings-banner--{{ section.banner_kind or 'info' }}"
++    role="status"
++  >{{ section.banner_message }}
++    <a href="/installer/event-log?type=SYSTEM&window=24h">View in event log →</a>
++  </p>
++  {% endif %}
++
++  {% if section.homeowner is none %}
++  {# ── No homeowner exists — create form ────────────────────────────────── #}
++  <p>No homeowner account exists yet. Create one below.</p>
++  {% with create_form = section.create_form %}
++    {% include "installer/_homeowner_create_form.html" %}
++  {% endwith %}
++  {% else %}
++  {# ── Homeowner exists — read-only display + reset trigger ─────────────── #}
++  <dl class="installer-settings-homeowner-summary">
++    <dt>Username</dt>
++    <dd>{{ section.homeowner.username }}</dd>
++    <dt>Created</dt>
++    <dd><time datetime="{{ section.homeowner.created_at }}">{{ section.homeowner.created_at }}</time></dd>
++  </dl>
++  <div id="homeowner-reset-slot">
++    {% if section.reset_form_open %}
++      {% with reset_form = section.reset_form %}
++        {% include "installer/_homeowner_reset_form.html" %}
++      {% endwith %}
++    {% else %}
++    <button
++      type="button"
++      class="installer-settings-reset-trigger"
++      hx-get="/fragments/installer/homeowner-reset-form"
++      hx-target="#homeowner-reset-slot"
++      hx-swap="outerHTML"
++    >Reset password</button>
++    {% endif %}
++  </div>
++  {% endif %}
++</section>
+diff --git a/src/open_ems/web/templates/installer/_homeowner_reset_form.html b/src/open_ems/web/templates/installer/_homeowner_reset_form.html
+new file mode 100644
+index 0000000..0d0b51d
+--- /dev/null
++++ b/src/open_ems/web/templates/installer/_homeowner_reset_form.html
+@@ -0,0 +1,50 @@
++{#
++  Story 11.3 AC5 — inline reset-password form.
++
++  Expects ``reset_form`` context with: csrf_token, error_message.
++
++  HTMX target: the parent section's outerHTML on success; this form's
++  outerHTML (with the inline error rendered) on validation failure.
++#}
++<form
++  class="installer-credentials-form installer-credentials-form--reset"
++  method="POST"
++  action="/actions/reset-homeowner-password"
++  hx-post="/actions/reset-homeowner-password"
++  hx-target="#homeowner-credentials-section"
++  hx-swap="outerHTML"
++  autocomplete="off"
++>
++  <input type="hidden" name="csrf_token" value="{{ reset_form.csrf_token }}">
++
++  <details open>
++    <summary>Reset homeowner password</summary>
++    <p>This will end all active homeowner sessions. They will need to log in with the new password.</p>
++  </details>
++
++  {% if reset_form.error_message %}
++  <p class="installer-credentials-form__error" role="alert">{{ reset_form.error_message }}</p>
++  {% endif %}
++
++  <label>
++    <span>New homeowner password</span>
++    <input
++      type="password"
++      name="new_password"
++      required
++      minlength="12"
++      autocomplete="new-password"
++    >
++  </label>
++  <small class="password-hint">At least 12 characters. The server enforces this rule; this hint is informational.</small>
++  <div class="installer-credentials-form__actions">
++    <button type="submit">Reset password</button>
++    <button
++      type="button"
++      class="installer-credentials-form__cancel"
++      hx-get="/fragments/installer/homeowner-reset-form?cancel=1"
++      hx-target="#homeowner-reset-slot"
++      hx-swap="outerHTML"
++    >Cancel</button>
++  </div>
++</form>
+diff --git a/src/open_ems/web/templates/installer/settings.html b/src/open_ems/web/templates/installer/settings.html
+new file mode 100644
+index 0000000..1e3d851
+--- /dev/null
++++ b/src/open_ems/web/templates/installer/settings.html
+@@ -0,0 +1,23 @@
++{#
++  Story 11.3 AC1 — installer settings page.
++
++  v1 scope: homeowner credential management only (FR23). Future Epic 12
++  surfaces (platform updates, backup/restore) will land as additional
++  sections in their own stories.
++#}
++{% extends "base.html" %}
++
++{% block title %}{{ title }} — OPEN-EMS{% endblock %}
++
++{% block content %}
++<main>
++  <h1>{{ title }}</h1>
++  {% set active = "settings" %}
++  <section class="installer-settings-page" x-data="installerSidebar()">
++    {% include "installer/_sidebar.html" %}
++    <section class="installer-settings-page__main" aria-label="Settings">
++      {% include "installer/_homeowner_credentials_section.html" %}
++    </section>
++  </section>
++</main>
++{% endblock %}
+diff --git a/tests/integration/storage/test_session_repo_concurrent_writers.py b/tests/integration/storage/test_session_repo_concurrent_writers.py
+new file mode 100644
+index 0000000..12c61e4
+--- /dev/null
++++ b/tests/integration/storage/test_session_repo_concurrent_writers.py
+@@ -0,0 +1,116 @@
++"""Story 11.3 AC6 — concurrent-writer stress test on ``SessionRepo``.
++
++Closes the Story 9.0b deferred-finding for the SessionRepo half of the
++deferral (UserRepo half is exercised by
++``test_user_repo_concurrent_writers``).
++"""
++
++from __future__ import annotations
++
++import asyncio
++import pathlib
++from collections.abc import AsyncGenerator
++from datetime import UTC, datetime, timedelta
++
++import pytest
++import pytest_asyncio
++from alembic import command as alembic_command
++from alembic.config import Config
++
++from open_ems.storage.database import close_database, get_connection, init_database
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import UserRepo, hash_password
++
++
++def _project_root() -> pathlib.Path:
++    here = pathlib.Path(__file__).resolve()
++    for parent in here.parents:
++        if (parent / "alembic.ini").exists():
++            return parent
++    raise RuntimeError("alembic.ini not found")
++
++
++@pytest_asyncio.fixture
++async def migrated_db(tmp_path: pathlib.Path) -> AsyncGenerator[None, None]:
++    db_path = str(tmp_path / "session_concurrent.db")
++    cfg = Config(str(_project_root() / "alembic.ini"))
++    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
++    await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
++    await init_database(db_path)
++    yield
++    await close_database()
++
++
++@pytest.mark.asyncio
++async def test_concurrent_session_creates_no_transaction_within_transaction_error(
++    migrated_db: None,
++) -> None:
++    """AC6 — N parallel ``SessionRepo.create()`` calls all succeed."""
++    user_id = await UserRepo().create(
++        username="u", hashed_password=hash_password("password1234"), role="installer"
++    )
++    repo = SessionRepo()
++    expires = datetime.now(UTC) + timedelta(hours=4)
++
++    async def create_one(i: int) -> str:
++        return await repo.create(
++            user_id=user_id,
++            token_hash=hash_token(generate_session_token()),
++            expires_at=expires,
++            csrf_token=f"c{i}",
++        )
++
++    n = 20
++    sids = await asyncio.gather(*(create_one(i) for i in range(n)))
++    assert len(set(sids)) == n
++
++
++@pytest.mark.asyncio
++async def test_concurrent_password_update_and_session_create_serialize_cleanly(
++    migrated_db: None,
++) -> None:
++    """AC6 — mixed-writer scenario: password updates and session inserts
++    serialize through the same write lock; no transaction-within-transaction
++    error; final DB state is coherent.
++    """
++    user_repo = UserRepo()
++    session_repo = SessionRepo()
++    user_id = await user_repo.create(
++        username="u", hashed_password=hash_password("password1234"), role="installer"
++    )
++    expires = datetime.now(UTC) + timedelta(hours=4)
++
++    async def updates() -> int:
++        for i in range(10):
++            await user_repo.update_password(
++                user_id, hashed_password=hash_password(f"newpass{i:04d}aaa")
++            )
++        return 10
++
++    async def creates() -> int:
++        for i in range(10):
++            await session_repo.create(
++                user_id=user_id,
++                token_hash=hash_token(generate_session_token()),
++                expires_at=expires,
++                csrf_token=f"c{i}",
++            )
++            await asyncio.sleep(0)
++        return 10
++
++    update_count, create_count = await asyncio.gather(updates(), creates())
++    assert update_count == 10
++    assert create_count == 10
++
++    # Final state — 10 sessions for the user; password hash starts with $2b$.
++    conn = get_connection()
++    async with conn.execute(
++        "SELECT COUNT(*) FROM sessions WHERE user_id = ?", (user_id,)
++    ) as cursor:
++        row = await cursor.fetchone()
++        assert row is not None
++        assert int(row[0]) == 10
+diff --git a/tests/integration/storage/test_user_repo_concurrent_writers.py b/tests/integration/storage/test_user_repo_concurrent_writers.py
+new file mode 100644
+index 0000000..76d75bd
+--- /dev/null
++++ b/tests/integration/storage/test_user_repo_concurrent_writers.py
+@@ -0,0 +1,71 @@
++"""Story 11.3 AC6 — concurrent-writer stress test on ``UserRepo``.
++
++Closes the explicit Story 9.0b deferred-finding (deferred-work.md line ~107):
++*"UserRepo and SessionRepo writes are not yet routed through the
++database-module write lock... add the lock when Epic 11 wires real homeowner
++credential flows."*
++
++Mirrors ``test_config_repo_concurrent_writers`` structurally: spawn N
++concurrent writers; assert all succeed without
++``OperationalError: cannot start a transaction within a transaction``.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import pathlib
++from collections.abc import AsyncGenerator
++
++import pytest
++import pytest_asyncio
++from alembic import command as alembic_command
++from alembic.config import Config
++
++from open_ems.storage.database import close_database, get_connection, init_database
++from open_ems.storage.repositories.user_repo import UserRepo, hash_password
++
++
++def _project_root() -> pathlib.Path:
++    here = pathlib.Path(__file__).resolve()
++    for parent in here.parents:
++        if (parent / "alembic.ini").exists():
++            return parent
++    raise RuntimeError("alembic.ini not found")
++
++
++@pytest_asyncio.fixture
++async def migrated_db(tmp_path: pathlib.Path) -> AsyncGenerator[None, None]:
++    db_path = str(tmp_path / "user_concurrent.db")
++    cfg = Config(str(_project_root() / "alembic.ini"))
++    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
++    await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
++    await init_database(db_path)
++    yield
++    await close_database()
++
++
++@pytest.mark.asyncio
++async def test_concurrent_create_users_no_transaction_within_transaction_error(
++    migrated_db: None,
++) -> None:
++    """AC6 — N parallel ``UserRepo.create()`` calls all succeed."""
++    repo = UserRepo()
++    n = 20
++
++    async def create_one(i: int) -> str:
++        return await repo.create(
++            username=f"user{i:02d}",
++            hashed_password=hash_password(f"password{i:04d}"),
++            role="installer" if i % 2 == 0 else "homeowner",
++        )
++
++    ids = await asyncio.gather(*(create_one(i) for i in range(n)))
++    assert len(ids) == n
++    assert len(set(ids)) == n  # all UUIDs distinct
++
++    # Round-trip — every row is queryable.
++    conn = get_connection()
++    async with conn.execute("SELECT COUNT(*) FROM users") as cursor:
++        row = await cursor.fetchone()
++        assert row is not None
++        assert int(row[0]) == n
+diff --git a/tests/integration/web/test_homeowner_credential_management_e2e.py b/tests/integration/web/test_homeowner_credential_management_e2e.py
+new file mode 100644
+index 0000000..86c178b
+--- /dev/null
++++ b/tests/integration/web/test_homeowner_credential_management_e2e.py
+@@ -0,0 +1,285 @@
++"""Story 11.3 AC22 #60-65 — end-to-end integration tests.
++
++Exercises the full installer↔homeowner credential lifecycle:
++1. Installer creates homeowner credentials.
++2. Homeowner attempts to log in; middleware redirects to /change-password.
++3. Homeowner submits the new password; session ends, redirect to /login.
++4. Installer resets the homeowner password; homeowner's existing session is
++   terminated.
++
++Plus regression coverage for the sidebar refactor and XSS-in-username.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime, timedelta
++
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import UserRepo, hash_password
++from open_ems.web.csrf import CsrfMiddleware
++from open_ems.web.must_change_password_middleware import MustChangePasswordMiddleware
++from open_ems.web.routes.actions import router as actions_router
++from open_ems.web.routes.auth import router as auth_router
++from open_ems.web.routes.fragments import router as fragments_router
++from open_ems.web.routes.installer import router as installer_router
++
++_CSRF_TOKEN = "c" * 64
++_VALID_PASSWORD_A = "FirstStrongPass1!"
++_VALID_PASSWORD_B = "SecondStrongPass2!"
++
++
++_CREATE_EVENT_LOG = """
++    CREATE TABLE IF NOT EXISTS event_log (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        schema_version INTEGER NOT NULL,
++        timestamp TEXT NOT NULL,
++        actor TEXT NOT NULL,
++        event_type TEXT NOT NULL,
++        summary TEXT NOT NULL,
++        detail TEXT,
++        device_id TEXT,
++        config_version TEXT
++    )
++"""
++
++
++async def _ensure_event_log_table() -> None:
++    conn = get_connection()
++    await conn.execute(_CREATE_EVENT_LOG)
++    await conn.commit()
++
++
++async def _create_session(role: str, *, must_change_password: bool = False) -> tuple[str, str]:
++    user_id = await UserRepo(get_connection()).create(
++        username=f"{role}_{generate_session_token()[:8]}",
++        hashed_password=hash_password("password1234"),
++        role=role,
++        must_change_password=must_change_password,
++    )
++    raw_token = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw_token),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=_CSRF_TOKEN,
++    )
++    return raw_token, user_id
++
++
++def _app() -> FastAPI:
++    app = FastAPI()
++    app.include_router(auth_router)
++    app.include_router(installer_router)
++    app.include_router(actions_router)
++    app.include_router(fragments_router)
++    # Story 11.3 AC12 ordering — last-registered runs first inbound.
++    app.add_middleware(CsrfMiddleware)
++    app.add_middleware(MustChangePasswordMiddleware)
++    return app
++
++
++def _client() -> TestClient:
++    return TestClient(_app(), base_url="https://test", follow_redirects=False)
++
++
++# ── AC22 #60: full create → forced-change flow ───────────────────────────────
++
++
++async def test_e2e_installer_creates_homeowner_then_homeowner_logs_in_and_is_redirected_to_change_password(  # noqa: E501
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++    installer_token, _ = await _create_session("installer")
++
++    # Step 1 — installer creates the homeowner.
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_token},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "home1", "password": _VALID_PASSWORD_A},
++    )
++    assert resp.status_code == 200
++
++    homeowner_row = await UserRepo(get_connection()).get_by_username("home1")
++    assert homeowner_row is not None
++    assert homeowner_row["must_change_password"] == 1
++
++    # Step 2 — simulate homeowner login by minting a session for them.
++    homeowner_token = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=str(homeowner_row["id"]),
++        token_hash=hash_token(homeowner_token),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token="h" * 64,
++    )
++
++    # Step 3 — homeowner navigation to ANY dashboard route → 303 to /change-password.
++    resp = _client().get("/homeowner/dashboard", cookies={"session": homeowner_token})
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/change-password"
++
++
++# ── AC22 #61: complete change-password then access dashboard ─────────────────
++
++
++async def test_e2e_homeowner_completes_change_password_then_accesses_dashboard(
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++
++    # Seed a forced-change homeowner.
++    homeowner_uid = await UserRepo(get_connection()).create(
++        username="forced-home",
++        hashed_password=hash_password(_VALID_PASSWORD_A),
++        role="homeowner",
++        must_change_password=True,
++    )
++    homeowner_token = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=homeowner_uid,
++        token_hash=hash_token(homeowner_token),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token="h" * 64,
++    )
++
++    # POST /change-password with valid inputs.
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": homeowner_token},
++        headers={"X-CSRF-Token": "h" * 64},
++        data={
++            "current_password": _VALID_PASSWORD_A,
++            "new_password": _VALID_PASSWORD_B,
++            "confirm_new_password": _VALID_PASSWORD_B,
++        },
++    )
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/login"
++
++    # Flag cleared on the user row.
++    row = await UserRepo(get_connection()).get_by_id(homeowner_uid)
++    assert row is not None
++    assert row["must_change_password"] == 0
++
++    # Original session is gone.
++    assert (
++        await SessionRepo(get_connection()).get_by_token_hash(hash_token(homeowner_token)) is None
++    )
++
++
++# ── AC22 #62: installer reset → homeowner session terminated ─────────────────
++
++
++async def test_e2e_installer_resets_homeowner_password_and_homeowner_sees_session_terminated(
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++    installer_token, _ = await _create_session("installer")
++
++    homeowner_uid = await UserRepo(get_connection()).create(
++        username="home2",
++        hashed_password=hash_password(_VALID_PASSWORD_A),
++        role="homeowner",
++        must_change_password=False,
++    )
++    homeowner_token = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=homeowner_uid,
++        token_hash=hash_token(homeowner_token),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token="h" * 64,
++    )
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_token},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"new_password": _VALID_PASSWORD_B},
++    )
++    assert resp.status_code == 200
++
++    # Homeowner session deleted.
++    assert (
++        await SessionRepo(get_connection()).get_by_token_hash(hash_token(homeowner_token)) is None
++    )
++    # Flag re-applied.
++    row = await UserRepo(get_connection()).get_by_id(homeowner_uid)
++    assert row is not None
++    assert row["must_change_password"] == 1
++
++
++# ── AC22 #63: every homeowner subpath redirects when flag is true ────────────
++
++
++async def test_e2e_homeowner_with_must_change_password_blocked_from_all_dashboard_routes(
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++    homeowner_token, _uid = await _create_session("homeowner", must_change_password=True)
++
++    representative_paths = [
++        "/homeowner/dashboard",
++        "/installer/dashboard",  # cross-role attempt is also gated by middleware first
++    ]
++    for path in representative_paths:
++        resp = _client().get(path, cookies={"session": homeowner_token})
++        assert resp.status_code == 303, path
++        assert resp.headers["location"] == "/change-password", path
++
++
++# ── AC22 #64: sidebar Settings link navigates correctly ──────────────────────
++
++
++async def test_e2e_installer_sidebar_settings_link_navigates_to_settings_page(
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++    installer_token, _ = await _create_session("installer")
++
++    # GET /installer/settings — should render successfully with the sidebar.
++    resp = _client().get("/installer/settings", cookies={"session": installer_token})
++    assert resp.status_code == 200
++    assert "Homeowner credentials" in resp.text
++    # Sidebar regression: Dashboard, Event Log, Settings all present.
++    assert 'href="/installer/dashboard"' in resp.text
++    assert 'href="/installer/event-log"' in resp.text
++    assert 'href="/installer/settings"' in resp.text
++    # Settings is the active item (aria-current=page on that link).
++    settings_link_block = resp.text.split('href="/installer/settings"')[1].split("</a>")[0]
++    assert 'aria-current="page"' in settings_link_block
++
++
++# ── AC22 #65: XSS in homeowner username renders escaped ──────────────────────
++
++
++async def test_e2e_xss_in_homeowner_username_renders_escaped(
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++    installer_token, _ = await _create_session("installer")
++
++    xss_payload = "<script>alert(1)</script>"
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_token},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": xss_payload, "password": _VALID_PASSWORD_A},
++    )
++    assert resp.status_code == 200
++    # Raw tag must NOT appear; Jinja autoescape converts to &lt;script&gt;.
++    assert "<script>" not in resp.text
++    assert "&lt;script&gt;" in resp.text
+diff --git a/tests/unit/web/test_change_password_route.py b/tests/unit/web/test_change_password_route.py
+new file mode 100644
+index 0000000..56ad42e
+--- /dev/null
++++ b/tests/unit/web/test_change_password_route.py
+@@ -0,0 +1,335 @@
++"""Story 11.3 AC22 #50-59 — GET/POST /change-password route tests."""
++
++from __future__ import annotations
++
++from collections.abc import AsyncIterator
++from datetime import UTC, datetime, timedelta
++
++import pytest
++import pytest_asyncio
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import (
++    UserRepo,
++    hash_password,
++    verify_password,
++)
++from open_ems.web.csrf import CsrfMiddleware
++from open_ems.web.routes.auth import router as auth_router
++
++_CSRF_TOKEN = "c" * 64
++_CURRENT_PASSWORD = "OldPasswordX12"
++_NEW_PASSWORD = "FreshNewPass1!"
++
++
++_CREATE_EVENT_LOG_TABLE = """
++    CREATE TABLE IF NOT EXISTS event_log (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        schema_version INTEGER NOT NULL,
++        timestamp TEXT NOT NULL,
++        actor TEXT NOT NULL,
++        event_type TEXT NOT NULL,
++        summary TEXT NOT NULL,
++        detail TEXT,
++        device_id TEXT,
++        config_version TEXT
++    )
++"""
++
++
++async def _ensure_event_log_table() -> None:
++    conn = get_connection()
++    await conn.execute(_CREATE_EVENT_LOG_TABLE)
++    await conn.commit()
++
++
++@pytest_asyncio.fixture
++async def authenticated_session(
++    session_repo: SessionRepo,
++) -> AsyncIterator[tuple[str, str]]:
++    """Yield (raw_session_token, user_id) for an installer with the current password."""
++    del session_repo
++    await _ensure_event_log_table()
++    user_repo = UserRepo(get_connection())
++    sess_repo = SessionRepo(get_connection())
++
++    user_id = await user_repo.create(
++        username="alice",
++        hashed_password=hash_password(_CURRENT_PASSWORD),
++        role="installer",
++        must_change_password=False,
++    )
++    raw = generate_session_token()
++    await sess_repo.create(
++        user_id=user_id,
++        token_hash=hash_token(raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=_CSRF_TOKEN,
++    )
++    yield raw, user_id
++
++
++def _app() -> FastAPI:
++    app = FastAPI()
++    app.include_router(auth_router)
++    app.add_middleware(CsrfMiddleware)
++    return app
++
++
++def _client() -> TestClient:
++    return TestClient(_app(), base_url="https://test", follow_redirects=False)
++
++
++def _post_data(
++    *, current: str = _CURRENT_PASSWORD, new: str = _NEW_PASSWORD, confirm: str | None = None
++) -> dict[str, str]:
++    """Form body for the change-password POST.
++
++    The CSRF token is passed via X-CSRF-Token header in the test (not in the
++    form body) because Starlette's BaseHTTPMiddleware-based CsrfMiddleware
++    reads the form via ``await request.form()``, which prevents FastAPI's
++    ``Form()`` parameters from re-reading the body (pre-existing issue
++    documented in deferred-work.md). Production HTMX requests use the header
++    path natively (htmx auto-adds X-CSRF-Token from base.html).
++    """
++    return {
++        "current_password": current,
++        "new_password": new,
++        "confirm_new_password": confirm if confirm is not None else new,
++    }
++
++
++def _csrf_headers() -> dict[str, str]:
++    return {"X-CSRF-Token": _CSRF_TOKEN}
++
++
++# ── AC22 #50: GET renders form for authenticated user ────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_get_change_password_renders_form_for_authenticated_user(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, _uid = authenticated_session
++    resp = _client().get("/change-password", cookies={"session": raw})
++    assert resp.status_code == 200
++    assert 'name="current_password"' in resp.text
++    assert 'name="new_password"' in resp.text
++    assert 'name="confirm_new_password"' in resp.text
++
++
++# ── AC22 #51: GET unauthenticated redirects to /login ────────────────────────
++
++
++def test_get_change_password_redirects_unauthenticated_to_login() -> None:
++    resp = _client().get("/change-password")
++    assert resp.status_code == 302
++    assert "/login" in resp.headers["location"]
++
++
++# ── AC22 #52: POST success clears must_change_password ───────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_success_clears_must_change_password_flag(
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++    user_repo = UserRepo(get_connection())
++    sess_repo = SessionRepo(get_connection())
++
++    # User with must_change_password=True (forced path)
++    user_id = await user_repo.create(
++        username="forced",
++        hashed_password=hash_password(_CURRENT_PASSWORD),
++        role="installer",
++        must_change_password=True,
++    )
++    raw = generate_session_token()
++    await sess_repo.create(
++        user_id=user_id,
++        token_hash=hash_token(raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=_CSRF_TOKEN,
++    )
++
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        headers=_csrf_headers(),
++        data=_post_data(),
++    )
++    # Success → 303 redirect to /login.
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/login"
++
++    row = await user_repo.get_by_id(user_id)
++    assert row is not None
++    assert row["must_change_password"] == 0
++    assert verify_password(_NEW_PASSWORD, row["hashed_password"]) is True
++
++
++# ── AC22 #53: POST success invalidates all user sessions ──────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_success_invalidates_all_user_sessions_and_redirects_to_login(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, user_id = authenticated_session
++
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        headers=_csrf_headers(),
++        data=_post_data(),
++    )
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/login"
++
++    # Session deleted — original token no longer resolves.
++    sess_repo = SessionRepo(get_connection())
++    assert await sess_repo.get_by_token_hash(hash_token(raw)) is None
++
++    # Cookie cleared on the response.
++    set_cookie = resp.headers.get("set-cookie", "")
++    assert "session=" in set_cookie
++    assert "max-age=0" in set_cookie.lower() or "expires=" in set_cookie.lower()
++    del user_id
++
++
++# ── AC22 #54: wrong current_password ──────────────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_wrong_current_password_renders_error(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, user_id = authenticated_session
++
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        headers=_csrf_headers(),
++        data=_post_data(current="WRONG-current12"),
++    )
++    assert resp.status_code == 200
++    assert "Current password is incorrect" in resp.text
++
++    # Password unchanged.
++    row = await UserRepo(get_connection()).get_by_id(user_id)
++    assert row is not None
++    assert verify_password(_CURRENT_PASSWORD, row["hashed_password"]) is True
++
++
++# ── AC22 #55: short new_password ─────────────────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_short_new_password_renders_error(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, _uid = authenticated_session
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        headers=_csrf_headers(),
++        data=_post_data(new="short", confirm="short"),
++    )
++    assert resp.status_code == 200
++    assert "12 characters" in resp.text
++
++
++# ── AC22 #56: mismatched confirm ─────────────────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_mismatched_confirm_renders_error(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, _uid = authenticated_session
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        headers=_csrf_headers(),
++        data=_post_data(new="FreshNewPass1!", confirm="MismatchPass1!"),
++    )
++    assert resp.status_code == 200
++    assert "Passwords do not match" in resp.text
++
++
++# ── AC22 #57: same as current ────────────────────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_same_as_current_renders_error(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, _uid = authenticated_session
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        headers=_csrf_headers(),
++        data=_post_data(new=_CURRENT_PASSWORD, confirm=_CURRENT_PASSWORD),
++    )
++    assert resp.status_code == 200
++    assert "must differ" in resp.text
++
++
++# ── AC22 #58: emits audit event with exact summary ────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_emits_audit_event(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, _uid = authenticated_session
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        headers=_csrf_headers(),
++        data=_post_data(),
++    )
++    assert resp.status_code == 303
++
++    rows = await EventLogRepo().list_filtered(
++        event_types=frozenset({"SYSTEM"}),
++        device_id=None,
++        since=None,
++        until=None,
++        keyword="",
++        limit=10,
++        offset=0,
++    )
++    summaries = [r.summary for r in rows]
++    assert "Password changed" in summaries
++
++
++# ── AC22 #59: CSRF token missing returns 403 ─────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_post_change_password_csrf_token_missing_returns_403(
++    authenticated_session: tuple[str, str],
++) -> None:
++    raw, _uid = authenticated_session
++    # Send data WITHOUT csrf_token form field and WITHOUT X-CSRF-Token header.
++    resp = _client().post(
++        "/change-password",
++        cookies={"session": raw},
++        data={
++            "current_password": _CURRENT_PASSWORD,
++            "new_password": _NEW_PASSWORD,
++            "confirm_new_password": _NEW_PASSWORD,
++        },
++    )
++    assert resp.status_code == 403
+diff --git a/tests/unit/web/test_create_homeowner_route.py b/tests/unit/web/test_create_homeowner_route.py
+new file mode 100644
+index 0000000..1bf2595
+--- /dev/null
++++ b/tests/unit/web/test_create_homeowner_route.py
+@@ -0,0 +1,342 @@
++"""Story 11.3 AC22 #31-42 — POST /actions/create-homeowner route tests."""
++
++from __future__ import annotations
++
++from collections.abc import AsyncIterator
++from datetime import UTC, datetime, timedelta
++
++import pytest
++import pytest_asyncio
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import UserRepo, hash_password
++from open_ems.web.csrf import CsrfMiddleware
++from open_ems.web.routes.actions import router as actions_router
++
++_CSRF_TOKEN = "c" * 64
++_VALID_PASSWORD = "Sup3rSecret1!23"
++_TOO_SHORT_PASSWORD = "short"  # 5 chars; below MIN_PASSWORD_LENGTH=12
++
++
++_CREATE_EVENT_LOG_TABLE = """
++    CREATE TABLE IF NOT EXISTS event_log (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        schema_version INTEGER NOT NULL,
++        timestamp TEXT NOT NULL,
++        actor TEXT NOT NULL,
++        event_type TEXT NOT NULL,
++        summary TEXT NOT NULL,
++        detail TEXT,
++        device_id TEXT,
++        config_version TEXT
++    )
++"""
++
++
++async def _ensure_event_log_table() -> None:
++    conn = get_connection()
++    await conn.execute(_CREATE_EVENT_LOG_TABLE)
++    await conn.commit()
++
++
++@pytest_asyncio.fixture
++async def installer_session(session_repo: SessionRepo) -> AsyncIterator[str]:
++    """Yield an installer's raw session cookie with a known CSRF token."""
++    del session_repo
++    await _ensure_event_log_table()
++    user_id = await UserRepo(get_connection()).create(
++        username="installer1",
++        hashed_password=hash_password("password1234"),
++        role="installer",
++        must_change_password=False,
++    )
++    raw = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=_CSRF_TOKEN,
++    )
++    yield raw
++
++
++@pytest_asyncio.fixture
++async def homeowner_session(session_repo: SessionRepo) -> AsyncIterator[str]:
++    """Yield a homeowner's raw session cookie (rejected by the route)."""
++    del session_repo
++    await _ensure_event_log_table()
++    user_id = await UserRepo(get_connection()).create(
++        username="home1",
++        hashed_password=hash_password("password1234"),
++        role="homeowner",
++        must_change_password=False,
++    )
++    raw = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=_CSRF_TOKEN,
++    )
++    yield raw
++
++
++def _app() -> FastAPI:
++    app = FastAPI()
++    app.include_router(actions_router)
++    app.add_middleware(CsrfMiddleware)
++    return app
++
++
++def _client() -> TestClient:
++    return TestClient(_app(), base_url="https://test", follow_redirects=False)
++
++
++# ── AC22 #31: success creates user with must_change_password=true ─────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_success_creates_user_with_must_change_password_true(
++    installer_session: str,
++) -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "newhome", "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200, resp.text
++    row = await UserRepo(get_connection()).get_by_username("newhome")
++    assert row is not None
++    assert row["role"] == "homeowner"
++    assert row["must_change_password"] == 1
++
++
++# ── AC22 #32: audit event emitted with exact summary ─────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_emits_audit_event_with_exact_summary(
++    installer_session: str,
++) -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "newhome", "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++    rows = await EventLogRepo().list_filtered(
++        event_types=frozenset({"SYSTEM"}),
++        device_id=None,
++        since=None,
++        until=None,
++        keyword="",
++        limit=10,
++        offset=0,
++    )
++    summaries = [r.summary for r in rows]
++    assert "Homeowner credentials created" in summaries
++
++
++# ── AC22 #33: rejects when homeowner already exists ──────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_rejects_when_homeowner_already_exists(
++    installer_session: str,
++) -> None:
++    # Seed an existing homeowner.
++    await UserRepo(get_connection()).create(
++        username="existing-home",
++        hashed_password=hash_password(_VALID_PASSWORD),
++        role="homeowner",
++    )
++
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "anotherhome", "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++    assert "homeowner account already exists" in resp.text.lower()
++    # The unwanted user must NOT have been created.
++    assert await UserRepo(get_connection()).get_by_username("anotherhome") is None
++
++
++# ── AC22 #34: rejects empty username ─────────────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_rejects_empty_username(installer_session: str) -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "   ", "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++    assert "1–64 characters" in resp.text
++
++
++# ── AC22 #35: rejects username over 64 chars ─────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_rejects_username_over_64_chars(
++    installer_session: str,
++) -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "x" * 65, "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++    assert "1–64 characters" in resp.text
++
++
++# ── AC22 #36: rejects duplicate username with neutral message ────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_rejects_duplicate_username_with_neutral_message(
++    installer_session: str,
++) -> None:
++    # "installer1" is the installer fixture's username — taken across roles.
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "installer1", "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++    # The neutral error message itself must not disclose the existing user's role.
++    # Extract the literal text inside the inline error <p role="alert">...</p>.
++    import re
++
++    match = re.search(
++        r'<p[^>]*role="alert"[^>]*>([^<]*)</p>',
++        resp.text,
++    )
++    assert match is not None, "expected an inline error <p role='alert'>"
++    error_text = match.group(1).strip().lower()
++    assert "already in use" in error_text
++    # The neutral phrasing — no "homeowner" or "installer" role hint.
++    assert "homeowner" not in error_text
++    assert "installer" not in error_text
++
++
++# ── AC22 #37: rejects password under 12 chars server-side ────────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_rejects_password_under_12_chars_server_side(
++    installer_session: str,
++) -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "newhome", "password": _TOO_SHORT_PASSWORD},
++    )
++    assert resp.status_code == 200
++    assert "12 characters" in resp.text
++    # Must NOT have persisted the user.
++    assert await UserRepo(get_connection()).get_by_username("newhome") is None
++
++
++# ── AC22 #38: rejects password over 72 bytes with byte-specific message ──────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_rejects_password_over_72_bytes_with_byte_message(
++    installer_session: str,
++) -> None:
++    # 80-char ASCII password = 80 bytes — exceeds bcrypt's 72-byte ceiling
++    # while satisfying the >= 12 char complexity rule.
++    long_password = "A" * 80
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "newhome", "password": long_password},
++    )
++    assert resp.status_code == 200
++    assert "12–72 bytes" in resp.text
++
++
++# ── AC22 #39: unauthenticated redirects to login ─────────────────────────────
++
++
++def test_create_homeowner_unauthenticated_redirects_to_login() -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        data={"username": "x", "password": _VALID_PASSWORD},
++    )
++    # CSRF middleware short-circuits on "no session cookie"; route's
++    # require_installer then 302s to /login.
++    assert resp.status_code == 302
++    assert "/login" in resp.headers["location"]
++
++
++# ── AC22 #40: homeowner role rejected 403 ────────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_homeowner_role_rejected_403(
++    homeowner_session: str,
++) -> None:
++    # Use the existing homeowner's CSRF (from fixture); the route should
++    # bounce the homeowner via require_installer.
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": homeowner_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "x", "password": _VALID_PASSWORD},
++    )
++    # role mismatch → 302 to homeowner home for browser; the test client is
++    # not an HTMX/JSON client, so the redirect is what require_installer emits.
++    assert resp.status_code == 302
++    assert "/homeowner" in resp.headers["location"]
++
++
++# ── AC22 #41: CSRF token missing returns 403 ─────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_csrf_token_missing_returns_403(
++    installer_session: str,
++) -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        data={"username": "x", "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 403
++
++
++# ── AC22 #42: success response includes View-in-event-log link ───────────────
++
++
++@pytest.mark.asyncio
++async def test_create_homeowner_response_includes_view_in_event_log_link(
++    installer_session: str,
++) -> None:
++    resp = _client().post(
++        "/actions/create-homeowner",
++        cookies={"session": installer_session},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"username": "newhome", "password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++    assert "/installer/event-log?type=SYSTEM" in resp.text
+diff --git a/tests/unit/web/test_installer_sidebar.py b/tests/unit/web/test_installer_sidebar.py
+new file mode 100644
+index 0000000..4005ea9
+--- /dev/null
++++ b/tests/unit/web/test_installer_sidebar.py
+@@ -0,0 +1,92 @@
++"""Story 11.3 AC22 #66-67 — installer sidebar regression tests.
++
++The sidebar partial ``installer/_sidebar.html`` is shared across the
++installer dashboard, event-log page, and (as of 11.3) settings page. These
++tests assert that the Settings item is now live AND that all three pages
++render the same 5 nav items in the same order — defending against drift
++from the 11.2 baseline.
++"""
++
++from __future__ import annotations
++
++import pathlib
++
++import pytest
++from fastapi import FastAPI, Request
++from fastapi.responses import HTMLResponse
++from fastapi.templating import Jinja2Templates
++from fastapi.testclient import TestClient
++
++_TEMPLATES_DIR = (
++    pathlib.Path(__file__).resolve().parents[3] / "src" / "open_ems" / "web" / "templates"
++)
++
++
++@pytest.fixture
++def render_sidebar() -> Jinja2Templates:
++    """Standalone Jinja2 environment that renders the sidebar partial in isolation."""
++    return Jinja2Templates(directory=str(_TEMPLATES_DIR))
++
++
++def _render_with_active(env: Jinja2Templates, active: str | None) -> str:
++    """Render a minimal wrapper that includes the sidebar partial with ``active``."""
++    app = FastAPI()
++
++    @app.get("/render", response_class=HTMLResponse)
++    async def render(request: Request) -> HTMLResponse:
++        # The partial uses Alpine ``x-data`` semantics from a parent scope —
++        # we wrap with the same Alpine wrapper the production pages use.
++        ctx = {"active": active}
++        return env.TemplateResponse(
++            request,
++            "installer/_sidebar.html",
++            ctx,
++        )
++
++    with TestClient(app) as client:
++        return client.get("/render").text
++
++
++def test_sidebar_settings_item_is_live_with_correct_href(
++    render_sidebar: Jinja2Templates,
++) -> None:
++    """AC22 #66: Settings is no longer a placeholder.
++
++    - ``href`` is ``/installer/settings`` (not ``#``)
++    - the ``aria-disabled="true"`` and ``tabindex="-1"`` attributes are GONE
++    """
++    html = _render_with_active(render_sidebar, active="settings")
++    assert 'href="/installer/settings"' in html
++    # When active="settings", the active modifier and aria-current must apply.
++    assert "installer-sidebar__item--active" in html
++    assert 'aria-current="page"' in html
++    # Settings line specifically — verify the disabled-placeholder attributes
++    # do NOT appear adjacent to the Settings link.
++    settings_block = html.split("/installer/settings")[1].split("</a>")[0]
++    assert 'aria-disabled="true"' not in settings_block
++    assert 'tabindex="-1"' not in settings_block
++
++
++def test_sidebar_dashboard_event_log_settings_render_in_consistent_order(
++    render_sidebar: Jinja2Templates,
++) -> None:
++    """AC22 #67: nav items render in the documented order: Dashboard, Devices,
++    Event Log, Settings, Setup. No reordering since 11.2.
++    """
++    html = _render_with_active(render_sidebar, active="dashboard")
++    # Reduce to the visible link text positions.
++    positions = {
++        label: html.find(f">{label}</a>")
++        for label in ("Dashboard", "Devices", "Event Log", "Settings", "Setup")
++    }
++    # Every label is present.
++    assert all(pos != -1 for pos in positions.values()), positions
++    # Order is strictly increasing.
++    ordered = sorted(positions.items(), key=lambda kv: kv[1])
++    assert [k for k, _ in ordered] == [
++        "Dashboard",
++        "Devices",
++        "Event Log",
++        "Settings",
++        "Setup",
++    ]
+diff --git a/tests/unit/web/test_must_change_password_middleware.py b/tests/unit/web/test_must_change_password_middleware.py
+new file mode 100644
+index 0000000..7369271
+--- /dev/null
++++ b/tests/unit/web/test_must_change_password_middleware.py
+@@ -0,0 +1,287 @@
++"""Story 11.3 AC22 #20-30 — MustChangePasswordMiddleware unit tests.
++
++Exercises the middleware against a minimal FastAPI app that:
++- has no business logic of its own (the middleware is the system under test)
++- registers a handful of representative routes (installer dashboard subpath,
++  homeowner dashboard subpath, fragments, actions, allow-list paths)
++- mounts a static directory so the ``/static/`` prefix branch is reachable
++
++The middleware decision is the only thing under test. Route-level
++dependencies (require_installer / require_homeowner) are NOT used here —
++the middleware should redirect before any route handler runs.
++"""
++
++from __future__ import annotations
++
++from collections.abc import AsyncIterator
++from datetime import UTC, datetime, timedelta
++
++import pytest
++import pytest_asyncio
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import UserRepo, hash_password
++from open_ems.web.must_change_password_middleware import MustChangePasswordMiddleware
++
++# ── App fixture ───────────────────────────────────────────────────────────────
++
++
++def _build_app() -> FastAPI:
++    app = FastAPI()
++
++    @app.get("/installer/dashboard")
++    async def installer_dashboard() -> dict[str, str]:
++        return {"ok": "installer/dashboard"}
++
++    @app.get("/installer/event-log")
++    async def installer_event_log() -> dict[str, str]:
++        return {"ok": "installer/event-log"}
++
++    @app.get("/homeowner/dashboard")
++    async def homeowner_dashboard() -> dict[str, str]:
++        return {"ok": "homeowner/dashboard"}
++
++    @app.get("/fragments/homeowner/battery-card")
++    async def homeowner_fragment() -> dict[str, str]:
++        return {"ok": "fragment"}
++
++    @app.post("/actions/ev-override")
++    async def homeowner_action() -> dict[str, str]:
++        return {"ok": "action"}
++
++    @app.get("/change-password")
++    async def change_password_get() -> dict[str, str]:
++        return {"ok": "change-password"}
++
++    @app.post("/change-password")
++    async def change_password_post() -> dict[str, str]:
++        return {"ok": "change-password-post"}
++
++    @app.post("/login")
++    async def login_post() -> dict[str, str]:
++        return {"ok": "login"}
++
++    @app.post("/logout")
++    async def logout_post() -> dict[str, str]:
++        return {"ok": "logout"}
++
++    @app.get("/static/htmx.min.js")
++    async def static_asset() -> dict[str, str]:
++        return {"ok": "static"}
++
++    @app.get("/health/live")
++    async def health_live() -> dict[str, str]:
++        return {"ok": "live"}
++
++    app.add_middleware(MustChangePasswordMiddleware)
++    return app
++
++
++@pytest.fixture
++def client(session_repo: SessionRepo) -> TestClient:
++    del session_repo  # fixture wires DB; not used directly
++    return TestClient(_build_app(), base_url="https://test", follow_redirects=False)
++
++
++# ── Session helpers ───────────────────────────────────────────────────────────
++
++
++@pytest_asyncio.fixture
++async def session_with_flag_true(session_repo: SessionRepo) -> AsyncIterator[str]:
++    """Yield a raw session cookie token for a user with must_change_password=1."""
++    del session_repo
++    user_id = await UserRepo(get_connection()).create(
++        username="forced-user",
++        hashed_password=hash_password("password1234"),
++        role="installer",
++        must_change_password=True,
++    )
++    raw = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token="c" * 64,
++    )
++    yield raw
++
++
++@pytest_asyncio.fixture
++async def session_with_flag_false(session_repo: SessionRepo) -> AsyncIterator[str]:
++    """Yield a raw session cookie for a user with must_change_password=0."""
++    del session_repo
++    user_id = await UserRepo(get_connection()).create(
++        username="normal-user",
++        hashed_password=hash_password("password1234"),
++        role="installer",
++        must_change_password=False,
++    )
++    raw = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token="c" * 64,
++    )
++    yield raw
++
++
++@pytest_asyncio.fixture
++async def expired_session_with_flag_true(session_repo: SessionRepo) -> AsyncIterator[str]:
++    """Yield a raw session cookie whose session row is expired."""
++    del session_repo
++    user_id = await UserRepo(get_connection()).create(
++        username="expired-user",
++        hashed_password=hash_password("password1234"),
++        role="installer",
++        must_change_password=True,
++    )
++    raw = generate_session_token()
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw),
++        expires_at=datetime.now(UTC) - timedelta(hours=1),
++        csrf_token="c" * 64,
++    )
++    yield raw
++
++
++# ── Tests (AC22 #20-30) ───────────────────────────────────────────────────────
++
++
++def test_no_session_cookie_middleware_is_noop(client: TestClient) -> None:
++    """AC22 #20: a request without a session cookie passes through unchanged."""
++    resp = client.get("/installer/dashboard")
++    assert resp.status_code == 200
++    assert resp.json() == {"ok": "installer/dashboard"}
++
++
++@pytest.mark.asyncio
++async def test_session_with_must_change_password_false_middleware_is_noop(
++    client: TestClient, session_with_flag_false: str
++) -> None:
++    """AC22 #21: middleware is a no-op when ``must_change_password=0``."""
++    resp = client.get("/installer/dashboard", cookies={"session": session_with_flag_false})
++    assert resp.status_code == 200
++    assert resp.json() == {"ok": "installer/dashboard"}
++
++
++@pytest.mark.asyncio
++async def test_session_with_must_change_password_true_redirects_to_change_password(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #22: a request to a protected page redirects 303 to /change-password."""
++    resp = client.get("/installer/dashboard", cookies={"session": session_with_flag_true})
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/change-password"
++
++
++@pytest.mark.asyncio
++async def test_change_password_path_itself_allowed_when_flag_is_true(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #23: the change-password form itself is in the allow-list."""
++    resp = client.get("/change-password", cookies={"session": session_with_flag_true})
++    assert resp.status_code == 200
++
++
++@pytest.mark.asyncio
++async def test_login_and_logout_paths_allowed_when_flag_is_true(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #24: /login and /logout bypass the redirect."""
++    # /login (POST) — re-authenticate path
++    resp = client.post("/login", cookies={"session": session_with_flag_true})
++    assert resp.status_code == 200
++    # /logout (POST) — escape hatch
++    resp = client.post("/logout", cookies={"session": session_with_flag_true})
++    assert resp.status_code == 200
++
++
++@pytest.mark.asyncio
++async def test_static_assets_allowed_when_flag_is_true(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #25: /static/* prefix is in the allow-list."""
++    resp = client.get("/static/htmx.min.js", cookies={"session": session_with_flag_true})
++    assert resp.status_code == 200
++
++
++@pytest.mark.asyncio
++async def test_htmx_request_returns_200_with_hx_redirect_header(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #26: HTMX requests get 200 + HX-Redirect, not a 303 (UX contract)."""
++    resp = client.get(
++        "/fragments/homeowner/battery-card",
++        cookies={"session": session_with_flag_true},
++        headers={"HX-Request": "true"},
++    )
++    assert resp.status_code == 200
++    assert resp.headers["hx-redirect"] == "/change-password"
++
++
++@pytest.mark.asyncio
++async def test_subpath_under_installer_redirects_when_flag_is_true(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #27: installer sub-pages (with query params) redirect to /change-password.
++
++    The redirect destination is plain ``/change-password`` — query params from
++    the originally-requested URL are intentionally dropped.
++    """
++    resp = client.get(
++        "/installer/event-log?type=DECISION",
++        cookies={"session": session_with_flag_true},
++    )
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/change-password"
++
++
++@pytest.mark.asyncio
++async def test_subpath_under_homeowner_redirects_when_flag_is_true(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #28: homeowner sub-pages redirect to /change-password."""
++    resp = client.get("/homeowner/dashboard", cookies={"session": session_with_flag_true})
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/change-password"
++
++
++@pytest.mark.asyncio
++async def test_post_actions_path_redirects_when_flag_is_true(
++    client: TestClient, session_with_flag_true: str
++) -> None:
++    """AC22 #29: POST /actions/* redirects even without CSRF.
++
++    Confirms the middleware ordering: MustChangePasswordMiddleware runs FIRST
++    inbound; CSRF is never reached on the redirect path.
++    """
++    resp = client.post("/actions/ev-override", cookies={"session": session_with_flag_true})
++    assert resp.status_code == 303
++    assert resp.headers["location"] == "/change-password"
++
++
++@pytest.mark.asyncio
++async def test_expired_session_no_redirect(
++    client: TestClient, expired_session_with_flag_true: str
++) -> None:
++    """AC22 #30: an expired session is treated as "no session" — middleware is a no-op.
++
++    The route-level dependency handles the expiry redirect later in the
++    request lifecycle; the middleware does not double up.
++    """
++    resp = client.get(
++        "/installer/dashboard",
++        cookies={"session": expired_session_with_flag_true},
++    )
++    # Middleware noop → route handler executes (returns 200 in this test
++    # harness because no require_installer dependency is wired).
++    assert resp.status_code == 200
+diff --git a/tests/unit/web/test_reset_homeowner_password_route.py b/tests/unit/web/test_reset_homeowner_password_route.py
+new file mode 100644
+index 0000000..c8db33d
+--- /dev/null
++++ b/tests/unit/web/test_reset_homeowner_password_route.py
+@@ -0,0 +1,282 @@
++"""Story 11.3 AC22 #43-49 — POST /actions/reset-homeowner-password tests."""
++
++from __future__ import annotations
++
++from collections.abc import AsyncIterator
++from datetime import UTC, datetime, timedelta
++
++import pytest
++import pytest_asyncio
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.event_log_repo import EventLogRepo
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import (
++    UserRepo,
++    hash_password,
++    verify_password,
++)
++from open_ems.web.csrf import CsrfMiddleware
++from open_ems.web.routes.actions import router as actions_router
++from open_ems.web.routes.fragments import router as fragments_router
++
++_CSRF_TOKEN = "c" * 64
++_VALID_PASSWORD = "BrandNewPasswd1!"
++
++
++_CREATE_EVENT_LOG_TABLE = """
++    CREATE TABLE IF NOT EXISTS event_log (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        schema_version INTEGER NOT NULL,
++        timestamp TEXT NOT NULL,
++        actor TEXT NOT NULL,
++        event_type TEXT NOT NULL,
++        summary TEXT NOT NULL,
++        detail TEXT,
++        device_id TEXT,
++        config_version TEXT
++    )
++"""
++
++
++async def _ensure_event_log_table() -> None:
++    conn = get_connection()
++    await conn.execute(_CREATE_EVENT_LOG_TABLE)
++    await conn.commit()
++
++
++@pytest_asyncio.fixture
++async def installer_session_and_homeowner(
++    session_repo: SessionRepo,
++) -> AsyncIterator[tuple[str, str, str, str]]:
++    """Yield (installer_session_token, installer_session_id, homeowner_id,
++    homeowner_session_token).
++    """
++    del session_repo
++    await _ensure_event_log_table()
++    user_repo = UserRepo(get_connection())
++    sess_repo = SessionRepo(get_connection())
++
++    installer_uid = await user_repo.create(
++        username="installer1",
++        hashed_password=hash_password("password1234"),
++        role="installer",
++        must_change_password=False,
++    )
++    homeowner_uid = await user_repo.create(
++        username="home1",
++        hashed_password=hash_password("oldpassword12"),
++        role="homeowner",
++        must_change_password=False,
++    )
++
++    installer_raw = generate_session_token()
++    installer_sid = await sess_repo.create(
++        user_id=installer_uid,
++        token_hash=hash_token(installer_raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=_CSRF_TOKEN,
++    )
++    homeowner_raw = generate_session_token()
++    await sess_repo.create(
++        user_id=homeowner_uid,
++        token_hash=hash_token(homeowner_raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token="h" * 64,
++    )
++
++    yield installer_raw, installer_sid, homeowner_uid, homeowner_raw
++
++
++def _app() -> FastAPI:
++    app = FastAPI()
++    app.include_router(actions_router)
++    app.include_router(fragments_router)
++    app.add_middleware(CsrfMiddleware)
++    return app
++
++
++def _client() -> TestClient:
++    return TestClient(_app(), base_url="https://test", follow_redirects=False)
++
++
++# ── AC22 #43: success updates hash + sets must_change_password ───────────────
++
++
++@pytest.mark.asyncio
++async def test_reset_homeowner_password_success_updates_hash_and_sets_must_change_password_true(
++    installer_session_and_homeowner: tuple[str, str, str, str],
++) -> None:
++    installer_raw, _sid, homeowner_uid, _homeowner_raw = installer_session_and_homeowner
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_raw},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"new_password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200, resp.text
++
++    row = await UserRepo(get_connection()).get_by_id(homeowner_uid)
++    assert row is not None
++    assert row["must_change_password"] == 1
++    assert verify_password(_VALID_PASSWORD, row["hashed_password"]) is True
++    # Old password no longer verifies.
++    assert verify_password("oldpassword12", row["hashed_password"]) is False
++
++
++# ── AC22 #44: invalidates all homeowner sessions ─────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_reset_homeowner_password_invalidates_all_homeowner_sessions(
++    installer_session_and_homeowner: tuple[str, str, str, str],
++) -> None:
++    installer_raw, _sid, _homeowner_uid, homeowner_raw = installer_session_and_homeowner
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_raw},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"new_password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++
++    # Homeowner session no longer resolvable.
++    sess_repo = SessionRepo(get_connection())
++    assert await sess_repo.get_by_token_hash(hash_token(homeowner_raw)) is None
++
++
++# ── AC22 #45: does NOT invalidate installer session ──────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_reset_homeowner_password_does_not_invalidate_installer_session(
++    installer_session_and_homeowner: tuple[str, str, str, str],
++) -> None:
++    installer_raw, installer_sid, _homeowner_uid, _homeowner_raw = installer_session_and_homeowner
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_raw},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"new_password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++
++    sess_repo = SessionRepo(get_connection())
++    installer_row = await sess_repo.get_by_token_hash(hash_token(installer_raw))
++    assert installer_row is not None
++    assert str(installer_row["id"]) == installer_sid
++
++
++# ── AC22 #46: emits audit event with exact summary ───────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_reset_homeowner_password_emits_audit_event_with_exact_summary(
++    installer_session_and_homeowner: tuple[str, str, str, str],
++) -> None:
++    installer_raw, _sid, _homeowner_uid, _homeowner_raw = installer_session_and_homeowner
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_raw},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"new_password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++
++    rows = await EventLogRepo().list_filtered(
++        event_types=frozenset({"SYSTEM"}),
++        device_id=None,
++        since=None,
++        until=None,
++        keyword="",
++        limit=10,
++        offset=0,
++    )
++    summaries = [r.summary for r in rows]
++    assert "Homeowner credentials reset" in summaries
++
++
++# ── AC22 #47: rejects when no homeowner exists ───────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_reset_homeowner_password_rejects_when_no_homeowner_exists(
++    session_repo: SessionRepo,
++) -> None:
++    del session_repo
++    await _ensure_event_log_table()
++    user_repo = UserRepo(get_connection())
++    sess_repo = SessionRepo(get_connection())
++
++    installer_uid = await user_repo.create(
++        username="installer-only",
++        hashed_password=hash_password("password1234"),
++        role="installer",
++        must_change_password=False,
++    )
++    installer_raw = generate_session_token()
++    await sess_repo.create(
++        user_id=installer_uid,
++        token_hash=hash_token(installer_raw),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=_CSRF_TOKEN,
++    )
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_raw},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"new_password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 200
++    assert "no homeowner account exists" in resp.text.lower()
++
++
++# ── AC22 #48: rejects short password ─────────────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_reset_homeowner_password_rejects_short_password(
++    installer_session_and_homeowner: tuple[str, str, str, str],
++) -> None:
++    installer_raw, _sid, homeowner_uid, _homeowner_raw = installer_session_and_homeowner
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_raw},
++        headers={"X-CSRF-Token": _CSRF_TOKEN},
++        data={"new_password": "shortpass"},
++    )
++    assert resp.status_code == 200
++    assert "12 characters" in resp.text
++    # Password unchanged.
++    row = await UserRepo(get_connection()).get_by_id(homeowner_uid)
++    assert row is not None
++    assert verify_password("oldpassword12", row["hashed_password"]) is True
++
++
++# ── AC22 #49: CSRF token missing returns 403 ─────────────────────────────────
++
++
++@pytest.mark.asyncio
++async def test_reset_homeowner_password_csrf_token_missing_returns_403(
++    installer_session_and_homeowner: tuple[str, str, str, str],
++) -> None:
++    installer_raw, _sid, _homeowner_uid, _homeowner_raw = installer_session_and_homeowner
++
++    resp = _client().post(
++        "/actions/reset-homeowner-password",
++        cookies={"session": installer_raw},
++        data={"new_password": _VALID_PASSWORD},
++    )
++    assert resp.status_code == 403

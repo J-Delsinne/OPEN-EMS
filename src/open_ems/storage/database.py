@@ -66,6 +66,10 @@ def get_write_lock() -> asyncio.Lock:
     "cannot start a transaction within a transaction" race that was empirically
     reproduced by ``tests/integration/storage/test_config_repo_concurrent_writers``.
 
+    Story 11.3 (2026-05-12) extended the discipline to ``UserRepo`` and
+    ``SessionRepo`` — closing the explicit 9.0b deferred-finding that gated
+    the retrofit to "when Epic 11 wires real homeowner credential flows".
+
     Lazy initialization: unit tests that bypass ``init_database`` and pass
     their own ``aiosqlite.Connection`` to a repo still call into the writers
     and so still hit ``get_write_lock``. We lazy-create a process-local lock
