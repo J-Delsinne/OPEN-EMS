@@ -340,6 +340,83 @@ def test_headline_ignores_device_state_per_ac14() -> None:
     assert build_homeowner_headline_context(base) == build_homeowner_headline_context(variant)
 
 
+# ---------------------------------------------------------------------------
+# Story 10.3 AC5 — strategy_options list in headline context
+# ---------------------------------------------------------------------------
+
+
+def test_build_homeowner_headline_context_includes_strategy_options_in_enum_declaration_order() -> (
+    None
+):
+    """AC5: strategy_options follows EnergyStrategy declaration order (NOT alphabetized).
+
+    UX spec line 805 and the journey-flow ordering rely on the declaration order:
+    minimize_cost → maximize_self_consumption → prioritize_ev.
+    """
+    snapshot = _snapshot().model_copy(
+        update={"active_strategy": EnergyStrategy.maximize_self_consumption}
+    )
+    context = build_homeowner_headline_context(snapshot)
+    options = context["strategy_options"]
+    assert isinstance(options, list)
+    assert [opt["value"] for opt in options] == [
+        "minimize_cost",
+        "maximize_self_consumption",
+        "prioritize_ev",
+    ]
+
+
+@pytest.mark.parametrize(
+    "active",
+    [
+        EnergyStrategy.minimize_cost,
+        EnergyStrategy.maximize_self_consumption,
+        EnergyStrategy.prioritize_ev,
+    ],
+)
+def test_build_homeowner_headline_context_marks_only_one_strategy_option_active(
+    active: EnergyStrategy,
+) -> None:
+    """AC5: exactly one option has active=True, matching snapshot.active_strategy."""
+    snapshot = _snapshot().model_copy(update={"active_strategy": active})
+    context = build_homeowner_headline_context(snapshot)
+    options = context["strategy_options"]
+    active_flags = [opt["active"] for opt in options]
+    assert active_flags.count(True) == 1
+    assert active_flags.count(False) == 2
+    active_option = next(opt for opt in options if opt["active"])
+    assert active_option["value"] == active.value
+
+
+def test_build_homeowner_headline_context_strategy_option_labels_match_strategy_labels_table() -> (
+    None
+):
+    """AC5: option labels are sourced from _STRATEGY_LABELS (single source of truth).
+
+    Closes the label-duplication anti-pattern structurally — if someone adds a
+    hardcoded label string to the template OR the builder, this test fails.
+    """
+    from open_ems.web.state_serialization import _STRATEGY_LABELS
+
+    snapshot = _snapshot()
+    context = build_homeowner_headline_context(snapshot)
+    for opt in context["strategy_options"]:
+        enum_member = EnergyStrategy(opt["value"])
+        assert opt["label"] == _STRATEGY_LABELS[enum_member]
+
+
+def test_build_homeowner_headline_context_strategy_options_match_every_enum_member() -> None:
+    """AC5: every EnergyStrategy member appears as an option (exhaustiveness).
+
+    A future enum addition without updating the builder fails CI here.
+    """
+    snapshot = _snapshot()
+    context = build_homeowner_headline_context(snapshot)
+    option_values = {opt["value"] for opt in context["strategy_options"]}
+    enum_values = {s.value for s in EnergyStrategy}
+    assert option_values == enum_values
+
+
 def test_grid_card_row_includes_direction_suffix_per_ac9() -> None:
     """AC9: grid card primary value is magnitude + plain-language direction."""
     base = _snapshot()

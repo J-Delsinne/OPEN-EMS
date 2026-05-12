@@ -956,6 +956,39 @@ async def test_eval_input_homeowner_override_active_is_false_when_no_override() 
     assert eval_input.ev_scheduling.homeowner_override_active is False
 
 
+async def test_control_loop_picks_up_strategy_change_on_next_tick_via_snapshot_read() -> None:
+    """Story 10.3 AC7: a mid-flight strategy change propagates on the next tick.
+
+    Structural enforcement of the snapshot-patch propagation contract: the
+    ``set_active_strategy`` mutator patches the published snapshot, and
+    ``ControlLoop._build_evaluation_input`` reads strategy from
+    ``snapshot.active_strategy`` (control_loop.py:202). A future refactor that
+    drops the snapshot patch in the mutator OR re-introduces a notification
+    channel into the loop would break this test.
+    """
+    store = StateStore(
+        system_clock_status="valid",
+        active_strategy=EnergyStrategy.maximize_self_consumption,
+    )
+    loop = _control_loop(state_store=store, adapters={})
+    await _populate_required_slots(store)
+
+    # Tick 1: starts on the constructor default.
+    snap1 = store.get_snapshot()
+    eval1 = loop._build_evaluation_input(snap1, datetime.now(UTC))  # noqa: SLF001
+    assert eval1.strategy is EnergyStrategy.maximize_self_consumption
+
+    # Homeowner changes strategy (no publish between mutator and next tick).
+    mutated = await store.set_active_strategy(EnergyStrategy.minimize_cost)
+    assert mutated is True
+
+    # Tick 2: same _build_evaluation_input call site, reading via get_snapshot()
+    # which must reflect the mutation immediately (snapshot-patch contract).
+    snap2 = store.get_snapshot()
+    eval2 = loop._build_evaluation_input(snap2, datetime.now(UTC))  # noqa: SLF001
+    assert eval2.strategy is EnergyStrategy.minimize_cost
+
+
 def _control_loop_with_seed(seed: float) -> ControlLoop:
     """Construct a ControlLoop with a specified initial_monthly_peak_kw seed.
 

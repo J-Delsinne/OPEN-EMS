@@ -1,14 +1,19 @@
-{# Story 10.3 AC8 — homeowner status headline + inline strategy selector. #}
-{# This <section> is the HTMX swap target for BOTH /fragments/homeowner/status-headline #}
-{# (10s polling) AND POST /actions/set-strategy (homeowner strategy change). #}
+{# Story 10.3 AC4 — strategy-update failure fragment. Returned with status 200 #}
+{# so HTMX swaps it into #status-headline (replacing the entire section). The #}
+{# headline + selector panel from the route's failure-branch render reflect #}
+{# the unchanged active_strategy; the failure notice is rendered inline. The #}
+{# previously-active strategy stays visually marked because the route renders #}
+{# the SAME headline fragment as a successful no-op POST would. #}
 <section
   id="status-headline"
   class="status-headline status-headline--{{ presentation_mode }}"
   data-presentation-mode="{{ presentation_mode }}"
   data-operating-mode="{{ operating_mode }}"
   data-active-strategy="{{ active_strategy }}"
+  data-strategy-update-failed="true"
   aria-label="System status"
   x-data="strategySelector({initialStrategy: {{ active_strategy | tojson }}, timeoutSeconds: {{ strategy_update_confirmation_timeout_seconds | tojson }}, failureMessage: {{ failure_message | tojson }}})"
+  x-init="errorMessage = {{ failure_message | tojson }}"
 >
   <h2 class="status-headline__heading">
     <span class="status-headline__text" aria-live="polite">{{ headline_text }}</span>
@@ -57,9 +62,7 @@
     class="strategy-selector__failure"
     role="status"
     aria-live="polite"
-    x-show="errorMessage"
-    x-cloak
   >
-    <p x-text="errorMessage"></p>
+    <p>{{ failure_message }}</p>
   </div>
 </section>

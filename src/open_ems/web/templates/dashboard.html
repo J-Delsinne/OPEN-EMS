@@ -92,6 +92,89 @@
         }
       }
     }));
+
+    // Story 10.3 AC9 — strategy-selector factory. Client owns the
+    // open/close/pending state; the server is authoritative for the
+    // selected-strategy value (encoded in the swapped-in fragment's
+    // `data-active-strategy` + the `--active` class on the matching option).
+    // On HTMX success, this Alpine instance is destroyed by the outerHTML
+    // swap; a new instance is constructed from the server-authored
+    // initialStrategy. On HTMX failure, _fail() collapses the panel and shows
+    // the calm-notice text. The htmx:* listeners are bound at
+    // #strategy-selector-panel level (template) so only this panel's child
+    // requests trigger _fail(); errors from the EV card bubble through a
+    // different listener owner.
+    Alpine.data('strategySelector', (config) => ({
+      open: false,
+      pendingStrategy: null,
+      errorMessage: '',
+      initialStrategy: (config && config.initialStrategy) ? config.initialStrategy : null,
+      timeoutSeconds: (config && Number.isFinite(config.timeoutSeconds))
+        ? config.timeoutSeconds
+        : null,
+      // Failure copy is server-authored (single source of truth: actions.py's
+      // _STRATEGY_FAILURE_MESSAGE). Threading it through the factory config
+      // prevents drift between client-side fail paths (timeout / htmx-error)
+      // and server-rendered failure fragments.
+      failureMessage: (config && typeof config.failureMessage === 'string' && config.failureMessage)
+        ? config.failureMessage
+        : 'Strategy update failed. Your previous setting is still active.',
+      _timer: null,
+
+      toggle() {
+        this.open = !this.open;
+        if (!this.open) {
+          this._clearTimer();
+        }
+      },
+
+      close() {
+        this.open = false;
+        this._clearTimer();
+      },
+
+      markPending(strategyValue) {
+        // Optimistic — only marks WHICH option was tapped; the active class
+        // does not visually move until the server-authored fragment replaces
+        // this section. On failure (no swap arrives within timeoutSeconds OR
+        // an htmx:responseError fires), _fail() collapses the panel and the
+        // headline is left unchanged. Clear any prior pending-timer first so
+        // rapid clicks don't leak a stale timer that fires _fail() after a
+        // subsequent successful POST.
+        this._clearTimer();
+        this.errorMessage = '';
+        this.pendingStrategy = strategyValue;
+        if (this.timeoutSeconds && this.timeoutSeconds > 0) {
+          this._timer = setTimeout(() => {
+            if (this.pendingStrategy !== null) {
+              this._fail(this.failureMessage);
+            }
+          }, this.timeoutSeconds * 1000);
+        }
+      },
+
+      failFromHtmx() {
+        this._fail(this.failureMessage);
+      },
+
+      _fail(msg) {
+        this._clearTimer();
+        this.open = false;
+        this.pendingStrategy = null;
+        this.errorMessage = msg;
+      },
+
+      _clearTimer() {
+        if (this._timer !== null) {
+          clearTimeout(this._timer);
+          this._timer = null;
+        }
+      },
+
+      destroy() {
+        this._clearTimer();
+      }
+    }));
   });
 </script>
 {% endblock %}

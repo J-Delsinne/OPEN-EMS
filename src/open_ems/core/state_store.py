@@ -1,11 +1,19 @@
 """Async single-writer StateStore with lock-free snapshot reads.
 
-Writer-lock invariant (Story 10.2): every single-field mutator
-(``set_ev_override`` — and future siblings such as Story 10.3's
-``set_active_strategy``) MUST acquire ``self._writer_lock``. The reader path
-inside ``publish()`` also runs under the same lock, so single-field state
-cannot tear between read and snapshot-build. ``get_snapshot()`` itself is
-lock-free because the snapshot is immutable; replacement is atomic.
+Writer-lock invariant (Story 10.2 + 10.3): every single-field mutator
+(``set_ev_override``, ``set_active_strategy``) MUST acquire
+``self._writer_lock``, update the in-memory field, AND patch the published
+snapshot via ``previous.model_copy(update={...})`` so ``get_snapshot()``
+reflects the mutation immediately without waiting for the next ``publish()``.
+The reader path inside ``publish()`` also runs under the same lock, so
+single-field state cannot tear between read and snapshot-build.
+``get_snapshot()`` itself is lock-free because the snapshot is immutable;
+replacement is atomic.
+
+Single-field mutators do NOT advance ``sequence_id`` or ``captured_at`` —
+bumping the sequence on a non-publish mutation would emit a torn snapshot to
+SSE/age consumers (the previous publish's ``captured_at`` would mismatch the
+new sequence number).
 """
 
 from __future__ import annotations
@@ -84,6 +92,37 @@ class StateStore:
             active_ev_override=None,
         )
 
+    async def set_active_strategy(self, strategy: EnergyStrategy) -> bool:
+        """Install a new active strategy under the writer lock (Story 10.3 AC1).
+
+        Mirrors the ``set_ev_override`` canonical pattern: writer-lock + in-lock
+        idempotency check + snapshot patch via ``previous.model_copy(update={...})``
+        so ``get_snapshot()`` reflects immediately. ``sequence_id`` and
+        ``captured_at`` are intentionally NOT advanced (single-field patch ≠
+        publish cycle).
+
+        Returns ``True`` if the strategy actually changed (caller can suppress a
+        no-op audit emission); ``False`` if ``strategy`` already matched the
+        in-lock current value and no mutation was applied.
+        """
+        async with self._writer_lock:
+            if self._active_strategy == strategy:
+                return False
+            previous_strategy = self._active_strategy
+            self._active_strategy = strategy
+            previous_snapshot = self._snapshot
+            self._snapshot = previous_snapshot.model_copy(update={"active_strategy": strategy})
+            # Emit inside the lock so concurrent mutators cannot interleave
+            # their log records relative to their mutation order. structlog is
+            # non-blocking under standard configuration.
+            logger.info(
+                "active_strategy_changed",
+                previous_strategy=previous_strategy.value,
+                new_strategy=strategy.value,
+                component="state_store",
+            )
+        return True
+
     async def set_ev_override(self, override: EVOverrideState | None) -> None:
         """Install or clear the active EV override under the writer lock (Story 10.2 AC3).
 
@@ -96,9 +135,44 @@ class StateStore:
         The next ``publish()`` advances ``sequence_id`` normally.
         """
         async with self._writer_lock:
+            previous_override = self._active_ev_override
             self._active_ev_override = override
             previous = self._snapshot
             self._snapshot = previous.model_copy(update={"active_ev_override": override})
+            # Story 10.3 R7 patch — symmetric lifecycle observability with
+            # set_active_strategy. Closes the 10.2 deferred items at
+            # state_store.py:86-104 ("no INFO emission distinguishing install
+            # vs clear") and :96-104 ("silently displaces existing non-None
+            # override without log/audit"). Emitted inside the lock so the
+            # ordering of records matches the ordering of mutations under
+            # concurrent access.
+            if override is None and previous_override is not None:
+                logger.info(
+                    "ev_override_cleared_via_mutator",
+                    previous_correlation_id=str(previous_override.correlation_id),
+                    previous_dispatch_status=previous_override.dispatch_status,
+                    component="state_store",
+                )
+            elif override is not None and previous_override is None:
+                logger.info(
+                    "ev_override_installed",
+                    correlation_id=str(override.correlation_id),
+                    dispatch_status=override.dispatch_status,
+                    component="state_store",
+                )
+            elif (
+                override is not None
+                and previous_override is not None
+                and override.correlation_id != previous_override.correlation_id
+            ):
+                logger.info(
+                    "ev_override_displaced",
+                    previous_correlation_id=str(previous_override.correlation_id),
+                    previous_dispatch_status=previous_override.dispatch_status,
+                    new_correlation_id=str(override.correlation_id),
+                    new_dispatch_status=override.dispatch_status,
+                    component="state_store",
+                )
 
     async def compare_and_set_ev_override(
         self,

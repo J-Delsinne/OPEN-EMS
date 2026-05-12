@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     # plain-language reason). Strictly positive: a 0 kW override would dispatch
     # successfully but never start a session, stranding the UI in Optimistic.
     ev_override_default_rate_kw: float = Field(default=11.0, gt=0.0)
+    # Story 10.3 — Strategy-selector client-side confirmation budget. After the
+    # homeowner taps an option, the Alpine optimistic layer waits this many
+    # seconds for the HTMX outerHTML swap (success → headline replaced) OR an
+    # htmx:responseError event (failure → calm notice rendered). If neither
+    # fires within the budget the layer renders the same calm-notice failure UX.
+    # Not enforced server-side — the route returns synchronously (no background
+    # dispatch task). Tighter than EV-override timeout because the server-side
+    # path is a single StateStore write + audit + headline render (~50ms).
+    strategy_update_confirmation_timeout_seconds: int = Field(default=5, ge=1, le=30)
 
 
 _settings: Settings | None = None

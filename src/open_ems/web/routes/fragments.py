@@ -96,11 +96,33 @@ async def homeowner_ev_card(
 @router.get("/fragments/homeowner/status-headline", response_class=HTMLResponse)
 async def homeowner_status_headline(
     request: Request,
-    _user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
+    user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
     store: StateStore = Depends(get_state_store),  # noqa: B008
+    settings: Settings = Depends(get_settings_dep),  # noqa: B008
 ) -> HTMLResponse:
+    """Story 10.3 AC8: headline fragment + inline strategy selector.
+
+    The route injects ``csrf_token``, ``strategy_update_confirmation_timeout_seconds``,
+    and ``failure_message`` at the context level (NOT through
+    ``build_homeowner_headline_context``) so the builder stays pure-functional
+    over ``SystemSnapshot`` only. ``failure_message`` is the single source of
+    truth for the calm-notice copy used by both server-rendered failure
+    fragments and Alpine-side fail paths.
+    """
+    # Local import avoids a circular dependency between fragments.py and
+    # actions.py (actions.py imports build_homeowner_headline_context from
+    # state_serialization, which fragments.py also uses). Importing here keeps
+    # the failure-message constant single-sourced in actions.py without
+    # introducing a top-level cycle.
+    from open_ems.web.routes.actions import _STRATEGY_FAILURE_MESSAGE
+
     snapshot = store.get_snapshot()
     context = build_homeowner_headline_context(snapshot)
+    context["csrf_token"] = user.csrf_token
+    context["strategy_update_confirmation_timeout_seconds"] = (
+        settings.strategy_update_confirmation_timeout_seconds
+    )
+    context["failure_message"] = _STRATEGY_FAILURE_MESSAGE
     return _templates.TemplateResponse(
         request,
         "fragments/homeowner/status-headline.html",

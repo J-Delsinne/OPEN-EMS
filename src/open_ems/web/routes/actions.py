@@ -1,33 +1,32 @@
-"""Homeowner action endpoints (Story 10.2).
+"""Homeowner action endpoints (Story 10.2 + 10.3).
 
 Hosts the imperative ``/actions/*`` namespace described in architecture.md
-§"API endpoints" (line 269). Today the only inhabitant is
-``POST /actions/ev-override``; ``POST /actions/set-strategy`` (Story 10.3) will
-live alongside it.
+§"API endpoints" (line 269). Inhabitants:
 
-Dispatch pattern: the route writes a ``pending`` ``EVOverrideState`` into the
-``StateStore`` under the writer lock, then spawns a fire-and-forget
-``asyncio.Task`` that drives the command through ``PolicyGuard``. The route
-returns within ~50ms regardless of dispatch latency, satisfying the UX spec
-2-second response contract (line 1840). The dispatch task's terminal status
-update (``failed`` / ``timeout`` / ``rejected``) lands asynchronously and is
-visible on the next HTMX poll of ``/fragments/homeowner/ev-card``.
+* ``POST /actions/ev-override`` (Story 10.2) — fire-and-forget command dispatch
+  through PolicyGuard. Returns ~50ms; dispatch settles asynchronously.
+* ``POST /actions/set-strategy`` (Story 10.3) — synchronous StateStore mutation
+  + audit + headline-fragment render. No PolicyGuard touchpoint (strategy is
+  not a device command). Returns the rendered headline as the HTMX swap target.
 """
 
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
 
 from open_ems.core import (
     CommandOrigin,
     CommandStatus,
     DeviceRole,
+    EnergyStrategy,
     EVChargerState,
     EVOverrideState,
     SetEVChargingRateCommand,
@@ -43,9 +42,15 @@ from open_ems.web.dependencies import (
     get_state_store,
     require_homeowner,
 )
+from open_ems.web.state_serialization import build_homeowner_headline_context
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+
+_TEMPLATES_DIR = pathlib.Path(__file__).parent.parent / "templates"
+_templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+_STRATEGY_FAILURE_MESSAGE = "Strategy update failed. Your previous setting is still active."
 
 # Module-level set holding references to outstanding dispatch tasks. Per the
 # asyncio docs (``asyncio.create_task``), a task may be garbage-collected
@@ -325,3 +330,119 @@ async def _safe_audit(
             summary=summary,
             error=repr(exc),
         )
+
+
+# ---------------------------------------------------------------------------
+# Story 10.3 — POST /actions/set-strategy
+# ---------------------------------------------------------------------------
+
+
+@router.post("/actions/set-strategy")
+async def post_set_strategy(
+    request: Request,
+    user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
+    state_store: StateStore = Depends(get_state_store),  # noqa: B008
+    settings: Settings = Depends(get_settings_dep),  # noqa: B008
+) -> HTMLResponse:
+    """Homeowner-initiated energy-strategy change (Story 10.3 AC2).
+
+    Synchronous: validate → mutate StateStore → emit audit (on actual change)
+    → re-read snapshot → render headline fragment. Returns within ~50ms; the
+    response IS the HTMX swap target so the headline updates in one
+    round-trip without a separate fragment fetch.
+
+    Invalid strategy values yield a 200 + failure-fragment response so HTMX
+    swaps the calm-notice text into ``#status-headline`` without leaving the
+    headline frozen on a 4xx.
+    """
+    form = await request.form()
+    raw_strategy = form.get("strategy")
+    observability = _resolve_observability(request)
+
+    # AC2 step 2 + AC4 — invalid value path. ``EnergyStrategy`` is a StrEnum;
+    # ``EnergyStrategy(value)`` raises ``ValueError`` only (KeyError is
+    # produced by subscript lookup ``EnergyStrategy[name]`` which we do not
+    # use here). Strip surrounding whitespace defensively — clipboard /
+    # extension / proxy paths sometimes inject a trailing space which
+    # otherwise routes silently to the failure fragment with zero signal.
+    try:
+        if not isinstance(raw_strategy, str):
+            raise ValueError("strategy is required")
+        new_strategy = EnergyStrategy(raw_strategy.strip())
+    except ValueError:
+        logger.warning(
+            "set_strategy_invalid_value",
+            component="actions",
+            raw_strategy=raw_strategy if isinstance(raw_strategy, str) else None,
+            user_id=user.user_id,
+        )
+        return _render_strategy_failure(request, state_store, settings, user)
+
+    # AC2 step 3 — capture previous value BEFORE mutation so the audit row
+    # records the correct from→to transition.
+    previous_strategy = state_store.get_snapshot().active_strategy
+    try:
+        mutated = await state_store.set_active_strategy(new_strategy)
+    except Exception:  # noqa: BLE001 — mutator must not 500 the homeowner flow
+        logger.exception(
+            "set_active_strategy_mutator_failed",
+            component="actions",
+            previous_strategy=previous_strategy.value,
+            requested_strategy=raw_strategy,
+        )
+        return _render_strategy_failure(request, state_store, settings, user)
+
+    # AC2 step 4 + AC6 — audit emission only when actual mutation occurred.
+    if mutated:
+        await _safe_audit(
+            observability,
+            actor="homeowner",
+            event_type="DEVICE",
+            summary="Homeowner changed energy strategy",
+            detail={
+                "event": "homeowner_strategy_changed",
+                "previous_strategy": previous_strategy.value,
+                "new_strategy": new_strategy.value,
+                "user_id": user.user_id,
+            },
+        )
+
+    # AC2 step 5 — render the post-mutation headline fragment as the HTMX
+    # swap target. Both the mutated and idempotent-no-op paths reach this.
+    try:
+        snapshot = state_store.get_snapshot()
+        context = build_homeowner_headline_context(snapshot)
+        context["csrf_token"] = user.csrf_token
+        context["strategy_update_confirmation_timeout_seconds"] = (
+            settings.strategy_update_confirmation_timeout_seconds
+        )
+        context["failure_message"] = _STRATEGY_FAILURE_MESSAGE
+        return _templates.TemplateResponse(
+            request,
+            "fragments/homeowner/status-headline.html",
+            context,
+        )
+    except Exception:  # noqa: BLE001 — render failure must not 500 the flow
+        logger.exception("set_strategy_headline_render_failed", component="actions")
+        return _render_strategy_failure(request, state_store, settings, user)
+
+
+def _render_strategy_failure(
+    request: Request,
+    state_store: StateStore,
+    settings: Settings,
+    user: HomeownerUser,
+) -> HTMLResponse:
+    """AC4: render the calm-notice failure fragment without mutating state."""
+    snapshot = state_store.get_snapshot()
+    context = build_homeowner_headline_context(snapshot)
+    context["csrf_token"] = user.csrf_token
+    context["strategy_update_confirmation_timeout_seconds"] = (
+        settings.strategy_update_confirmation_timeout_seconds
+    )
+    context["failure_message"] = _STRATEGY_FAILURE_MESSAGE
+    return _templates.TemplateResponse(
+        request,
+        "fragments/homeowner/strategy-failure.html",
+        context,
+    )

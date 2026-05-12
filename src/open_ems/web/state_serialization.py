@@ -283,6 +283,11 @@ def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, obje
     is the structural enforcement of Epic 10's cross-story constraint that
     the headline is derived exclusively from SystemOperatingMode + active
     strategy — verified by test_state_serialization::test_headline_ignores_device_state.
+
+    Story 10.3 AC5: emits ``strategy_options`` — one entry per ``EnergyStrategy``
+    enum member in declaration order — for the inline selector panel. The
+    labels are sourced from ``_STRATEGY_LABELS`` (single source of truth);
+    each option carries an ``active`` boolean matching the current strategy.
     """
     operating_mode = snapshot.operating_mode
     active_strategy = snapshot.active_strategy
@@ -299,6 +304,14 @@ def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, obje
     else:
         headline_text = "Running with limited functionality"
         explanation_text = _DEGRADED_EXPLANATIONS.get(operating_mode, "")
+    strategy_options: list[dict[str, object]] = [
+        {
+            "value": option.value,
+            "label": _STRATEGY_LABELS.get(option, option.value.replace("_", " ").title()),
+            "active": option is active_strategy,
+        }
+        for option in EnergyStrategy
+    ]
     return {
         "operating_mode": operating_mode.value,
         "active_strategy": active_strategy.value,
@@ -306,6 +319,7 @@ def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, obje
         "strategy_label": strategy_label,
         "headline_text": headline_text,
         "explanation_text": explanation_text,
+        "strategy_options": strategy_options,
     }
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
@@ -274,3 +275,89 @@ async def test_status_headline_degraded_mode_renders_calm_styling(
     # but explicit fail-style classes (.fail, fail-, color-fail) must not appear.
     assert "color-fail" not in lower
     assert "state-card--fail" not in lower
+
+
+# ---------------------------------------------------------------------------
+# Story 10.3 — status-headline fragment includes the inline strategy selector
+# ---------------------------------------------------------------------------
+
+
+async def test_status_headline_fragment_includes_strategy_selector_panel_with_three_options(
+    session_repo: SessionRepo,
+) -> None:
+    """AC8: headline fragment renders three strategy option buttons in enum order."""
+    store = StateStore(
+        system_clock_status="valid",
+        operating_mode=SystemOperatingMode.normal,
+        active_strategy=EnergyStrategy.maximize_self_consumption,
+    )
+    raw_token = await _create_session("homeowner")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get(
+        "/fragments/homeowner/status-headline",
+        cookies={"session": raw_token},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    # Three option buttons in role=option with the EXACT enum-declaration order.
+    minimize_idx = body.index('hx-vals=\'{"strategy": "minimize_cost"}\'')
+    maximize_idx = body.index('hx-vals=\'{"strategy": "maximize_self_consumption"}\'')
+    prioritize_idx = body.index('hx-vals=\'{"strategy": "prioritize_ev"}\'')
+    assert minimize_idx < maximize_idx < prioritize_idx
+    # Selector panel structure.
+    assert 'id="strategy-selector-panel"' in body
+    assert 'role="listbox"' in body
+    assert body.count('role="option"') == 3
+    # Failure slot present in DOM (visibility gated by Alpine x-show).
+    assert 'id="strategy-failure-slot"' in body
+    # Alpine factory bound.
+    assert "strategySelector(" in body
+    # CSRF token per-button hx-headers (survives outerHTML swap).
+    assert "X-CSRF-Token" in body
+
+
+async def test_status_headline_fragment_active_strategy_uses_no_pass_green_fragments(
+    session_repo: SessionRepo,
+) -> None:
+    """AC13 + AC14 load-bearing design rule: active option uses accent left-border,
+    NOT pass-green/amber/red/warn class fragments. Pairs with the 10.2 EV-card
+    no-pass-green test as the second instance of the design-rule enforcement.
+    """
+    store = StateStore(
+        system_clock_status="valid",
+        operating_mode=SystemOperatingMode.normal,
+        active_strategy=EnergyStrategy.prioritize_ev,
+    )
+    raw_token = await _create_session("homeowner")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get(
+        "/fragments/homeowner/status-headline",
+        cookies={"session": raw_token},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    body = response.text
+    # Exactly one option has the --active modifier class.
+    assert body.count("strategy-selector__option--active") == 1
+    # The active option is prioritize_ev.
+    active_match = re.search(
+        r'<button[^>]*strategy-selector__option--active[^>]*hx-vals=\'\{"strategy": "([^"]+)"\}\'',
+        body,
+        re.DOTALL,
+    )
+    assert active_match is not None
+    assert active_match.group(1) == "prioritize_ev"
+    # No pass-green / amber / red / warn class fragments anywhere in the selector panel.
+    lower = body.lower()
+    assert "pass-green" not in lower
+    assert "color-pass" not in lower
+    assert "--color-pass" not in lower
+    # 'amber' was already asserted absent above for degraded mode; reassert here
+    # for the selector's own DOM tree just to pin the design rule on this surface.
+    assert "amber" not in lower
+    assert "color-warn" not in lower

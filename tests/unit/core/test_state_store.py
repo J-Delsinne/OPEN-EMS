@@ -663,3 +663,83 @@ async def test_state_store_compare_and_set_ev_override_noop_when_cleared_to_none
     swapped = await store.compare_and_set_ev_override(original.correlation_id, stale_terminal)
     assert swapped is False
     assert store.get_snapshot().active_ev_override is None
+
+
+# ---------------------------------------------------------------------------
+# Story 10.3 — set_active_strategy mutator (AC1)
+# ---------------------------------------------------------------------------
+
+
+async def test_state_store_set_active_strategy_installs_strategy_under_writer_lock() -> None:
+    store = StateStore(system_clock_status="valid")
+    # Default cold-start strategy is maximize_self_consumption.
+    assert store.get_snapshot().active_strategy is EnergyStrategy.maximize_self_consumption
+    await store.set_active_strategy(EnergyStrategy.minimize_cost)
+    assert store.get_snapshot().active_strategy is EnergyStrategy.minimize_cost
+
+
+async def test_state_store_set_active_strategy_returns_true_when_changed() -> None:
+    store = StateStore(system_clock_status="valid")
+    mutated = await store.set_active_strategy(EnergyStrategy.prioritize_ev)
+    assert mutated is True
+
+
+async def test_state_store_set_active_strategy_returns_false_on_idempotent_no_op() -> None:
+    store = StateStore(system_clock_status="valid")
+    # First call from the default → True.
+    assert await store.set_active_strategy(EnergyStrategy.minimize_cost) is True
+    # Second call with the same value → False, no mutation.
+    snap_before = store.get_snapshot()
+    mutated = await store.set_active_strategy(EnergyStrategy.minimize_cost)
+    snap_after = store.get_snapshot()
+    assert mutated is False
+    # Snapshot reference is unchanged on no-op (no model_copy invoked).
+    assert snap_after is snap_before
+    assert snap_after.active_strategy is EnergyStrategy.minimize_cost
+
+
+async def test_state_store_set_active_strategy_does_not_advance_sequence_id() -> None:
+    """Same single-field patch contract as set_ev_override (10.2 review precedent).
+
+    sequence_id and captured_at must stay frozen — a strategy POST is not a
+    publish cycle. The next publish() advances sequence_id normally.
+    """
+    store = StateStore(system_clock_status="valid")
+    snap_before = await store.publish({DeviceRole.inverter: _inverter()})
+    seq_before = snap_before.sequence_id
+    await store.set_active_strategy(EnergyStrategy.minimize_cost)
+    snap_after_mutate = store.get_snapshot()
+    # The strategy is immediately visible…
+    assert snap_after_mutate.active_strategy is EnergyStrategy.minimize_cost
+    # …but the snapshot is NOT a fresh publish.
+    assert snap_after_mutate.sequence_id == seq_before
+    assert snap_after_mutate.captured_at == snap_before.captured_at
+    # Next real publish advances sequence_id normally and carries the new strategy.
+    snap_after_publish = await store.publish({DeviceRole.inverter: _inverter()})
+    assert snap_after_publish.sequence_id == seq_before + 1
+    assert snap_after_publish.active_strategy is EnergyStrategy.minimize_cost
+
+
+async def test_state_store_publish_after_set_active_strategy_carries_new_value() -> None:
+    store = StateStore(system_clock_status="valid")
+    await store.set_active_strategy(EnergyStrategy.prioritize_ev)
+    snapshot = await store.publish({DeviceRole.inverter: _inverter()})
+    assert snapshot.active_strategy is EnergyStrategy.prioritize_ev
+
+
+async def test_state_store_set_active_strategy_round_trip_through_get_snapshot_reflects_immediately() -> None:  # noqa: E501  # fmt: skip
+    """Story 10.2 Subtask 4.5 lesson: mutator MUST patch the published snapshot.
+
+    Without the snapshot patch, get_snapshot() returns a stale value until the
+    next publish() — and any caller (the route's post-mutation snapshot read in
+    Story 10.3 AC2 step 5, ControlLoop._build_evaluation_input on the next tick)
+    sees the wrong value. This test enforces the contract structurally so a
+    future refactor cannot drop the model_copy line without failing CI.
+    """
+    store = StateStore(system_clock_status="valid")
+    await store.publish({DeviceRole.inverter: _inverter()})
+    await store.set_active_strategy(EnergyStrategy.minimize_cost)
+    # No publish in between — get_snapshot() must reflect the mutation.
+    assert store.get_snapshot().active_strategy is EnergyStrategy.minimize_cost
+    await store.set_active_strategy(EnergyStrategy.prioritize_ev)
+    assert store.get_snapshot().active_strategy is EnergyStrategy.prioritize_ev

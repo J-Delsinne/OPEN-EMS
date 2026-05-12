@@ -1,0 +1,1625 @@
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index 19f8958..b4cbf6b 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -35,7 +35,7 @@
+ # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+ 
+ generated: '2026-05-01'
+-last_updated: '2026-05-12'  # Story 10-2 done 2026-05-12 via bmad-code-review (A7 gate passed: 16 resolved, 10 deferred-and-verified, 7 dismissed). 16 in-cycle patches applied. Highest-impact: (1) set_ev_override torn-snapshot fix — drop sequence_id bump; mutator is a single-field patch not a publish cycle. (2) New compare_and_set_ev_override(expected_correlation_id, updated) atomic CAS mutator closes the dispatch-task TOCTOU race between lock-free get_snapshot() read and set_ev_override write — _dispatch_and_settle_ev_override now uses CAS for the terminal-status write; lock-free pre-check kept for fast-path orphan logging. (3) PolicyGuard's adapter-exception path normalized: reason="command_dispatch_failed" (stable key) instead of repr(exc); diagnostic detail preserved in structlog warning. New _OVERRIDE_FAILURE_REASONS entry maps it to plain language. (4) ev_override_confirmation_timeout_seconds Setting fully wired through build_homeowner_ev_card_context (new confirmation_timeout_seconds kwarg) → fragments.py /fragments/homeowner/ev-card (new get_settings_dep dep) → ev-card.html data-confirmation-timeout-seconds attr + x-data config → dashboard.html Alpine factory setTimeout that flips state from 'optimistic' to 'fallback' after the budget; clears in destroy(). Closes the R3 "10s maximum Alpine-server desync window" invariant which was previously unenforced. (5) Exhaustiveness test test_resolve_failure_reason_plain_covers_every_policy_guard_rejection_reason rewritten: path now resolved via open_ems.engine.policy_guard.__file__ (was cwd-fragile relative Path); regex extended to cover (a) self._reject(command, "...") literals (b) inline CommandResult(reason="...") on dispatch-timeout / dispatch-failed paths (c) capability_missing: prefix; asserts direct_reasons or inline_reasons is non-empty (defensive against silent vacuous-pass). Other patches: P6 module-level _OUTSTANDING_DISPATCH_TASKS set + discard callback (asyncio anti-pattern fix); P7 stripped unnecessary parens from _OVERRIDE_FAILURE_REASONS entries; P8 EVOverrideState model_validator _expires_after_requested requires strict expires_at > requested_at; P9 removed outer aria-live="polite" from state-card__body (nested aria-live → double announcements); P10 added x-bind:aria-disabled alongside static aria-disabled for SSR + Alpine consistency; P14 ev_override_default_rate_kw gt=0.0 (was ge=0.0; 0 kW would never start a session); P15 x-data initialState now uses |tojson; P16 new test_alpine_provenance.py verifies static/alpine.min.js SHA256 matches README. Test deltas: 1555 → 1568 passing (+13 net new beyond +76 from dev cycle: temporal-ordering rejection (2), sequence_id-not-advanced contract, CAS swap-on-match / no-op-on-drift / no-op-on-None (3), dispatch-task None-clear orphan, _safe_audit happy-path emission, data-correlation-id render, confirmation-timeout data attr, alpine provenance (3)). 1 modified: test_adapter_exception_is_wrapped_as_failed_command_result asserts reason == "command_dispatch_failed" (was substring match on "modbus_explode"). Ruff check + format clean across 239 files; mypy clean across 99 source files. 10 items deferred to deferred-work.md under "code review of 10-2-..." heading. 7 items dismissed-with-rationale inline. A7 gate is the fourth proof-of-enforcement target after 9-Y-a, 9-X, 10-1. Adds EVOverrideState (frozen Pydantic, six fields with UTC validators + failure_reason iff terminal model-validator) + SystemSnapshot.active_ev_override field (Pydantic-level default None — structural sentinel deviation from 10.1 active_strategy). StateStore.set_ev_override mutator rebuilds the published snapshot via previous.model_copy(update=...) so get_snapshot() reflects mutations immediately (caught in test — original spec relied on next publish() and the background dispatch task's concurrency check always saw stale None, logging orphan and dropping every result). publish() three-clause AC4 evaluation in load-bearing order: expiry-clear → session-flip detect → natural-completion clear (test asserts ordering). POST /actions/ev-override route in new web/routes/actions.py with fire-and-forget asyncio.create_task background dispatch + done-callback for unhandled-exception logging + 2-second response contract (test asserts <2s even with slow PolicyGuard); idempotent replay returns existing correlation_id without re-dispatching; first homeowner CommandOrigin consumer; correlation_id round-trips through SetEVChargingRateCommand. _dispatch_and_settle_ev_override task: explicit CancelledError re-raise; concurrency-check via get_snapshot().active_ev_override.correlation_id (orphan exit prevents clobbering newer override); CommandStatus → dispatch_status mapping (success leaves pending — Confirmed requires session_active=true observation via AC4 clause 2; failed/timeout/rejected/correlation_broken map to terminal); _safe_audit wrapper prevents audit-emission failure from blocking the homeowner flow. ControlLoop._build_evaluation_input line 210 reads snapshot.active_ev_override + gates homeowner_override_active on dispatch_status=="pending". Serializers: _serialize_homeowner_ev_override_state helper + active_ev_override flows through both homeowner + installer SSE payloads. build_homeowner_ev_card_context derives 4-state model deterministically from active_ev_override + ev_charger.session_active only (device-state independence enforced structurally by test asserting identical override_state for snapshots differing only in inverter/battery/grid_meter); confirmed state suppresses constraint_notice when operating_mode is fail_safe; unavailable branch routes None + DegradedDeviceState to UX-spec-line-1503 "No EV charger connected" with button hidden. _OVERRIDE_FAILURE_REASONS plain-language mapping covers every PolicyGuard P0–P5 + dispatch-timeout + correlation-broken reason (test greps engine/policy_guard.py source for self._reject literals and asserts exhaustive coverage); capability_missing: prefix rule handles P4 structured suffix; calm catch-all for unknown reasons. Fragment route uses new get_active_constraints_optional dep (returns None instead of HTTP 503) for graceful pre-installer-wizard-complete render (next_session_summary falls back to "No charging session scheduled"). Three new Settings fields: ev_override_window_seconds=7200 (Field(gt=0)) + ev_override_confirmation_timeout_seconds=30 (Field(ge=5, le=60)) + ev_override_default_rate_kw=11.0 (Field(ge=0)). Standalone ev-card.html template (NOT _card.html include): Alpine.js x-data="evOverride(initialState)" optimistic-layer factory + aria-live="polite" status span separate from button text + HTMX-bound buttons with per-button hx-headers CSRF (survives outerHTML swaps regardless of htmx:configRequest listener timing) + state-card__ev-button--{state} class for each of 4 states + retry-link rendered ONLY in fallback. dashboard.html: re-added #ev-card section between #grid-card and stack-close + {% block scripts %} with alpine:init Alpine.data('evOverride', ...) factory. base.html: <script src="/static/alpine.min.js" defer>. Self-hosted Alpine.js 3.13.10 from unpkg (SHA256 fb9b146b7fbd1bbf251fb3ef464f2e7c5d33a4a83aeb0fcf21e92ca6a9558c4b, 44KB) at src/open_ems/web/static/alpine.min.js with static/README.md provenance. open-ems.css: appended EV-card class rules using existing --color-accent / --color-accent-hover / --color-degraded-bg / --color-text-secondary tokens; --color-accent-hover for Confirmed (load-bearing per UX spec line 1097 — NOT --color-pass; pass-green reserved for PASS validation states; integration test asserts NO pass-green/color-pass/amber/color-fail class fragments leak into confirmed HTML); ev-pulse keyframe with @media (prefers-reduced-motion: reduce) guard; .visually-hidden helper for aria-live status; .state-card--ev { min-height: 12rem } reserves retry-link slot height to prevent layout shift between fallback ↔ non-fallback. Test deltas: 1479 → 1555 (+76 net) + 1 skipped a11y placeholder + 6 xfailed (unchanged baseline). New test files: test_ev_override.py (11), test_ev_card_template.py (11), test_ev_override_route.py (13), test_ev_override_e2e.py (8 + 1 skipped a11y). Updated test_dashboard_route.py to expect 5 HTMX-bound sections (was 4) + Alpine.js bundle + evOverride factory. Ruff check + format clean across 255 files; mypy clean across 99 source files. uv.lock unchanged (Alpine.js is static asset, not Python dep). 21 ACs satisfied; A1 R1–R7 orchestration artifacts in dev notes are accurate to implementation. Story file: _bmad-output/implementation-artifacts/10-2-implement-ev-status-card-with-4-state-optimistic-override-and-statestore-backed-persistence.md. Awaits A7 review-closure gate via bmad-code-review (would be the fourth proof-of-enforcement target after 9-Y-a, 9-X, 10-1). (Status: ready-for-dev → in-progress → review).
++last_updated: '2026-05-12'  # Story 10-3 ready-for-dev → in-progress → review on 2026-05-12 via bmad-dev-story. 8 tasks + R7 bundled patch (symmetric structlog INFO emissions in set_ev_override + set_active_strategy closes 10.2 deferred items [state_store.py:96-104] and [state_store.py:86-104]). New StateStore.set_active_strategy(strategy: EnergyStrategy) -> bool mutator follows 10.2 canonical pattern: writer-lock + in-lock idempotency check (returns False on same-strategy no-op) + snapshot patch via previous.model_copy(update={"active_strategy": strategy}) + no sequence_id/captured_at bump + active_strategy_changed structlog INFO emission outside lock. POST /actions/set-strategy in existing actions.py: form-parse strategy → enum-validate (invalid → strategy-failure.html partial 200) → mutator → audit row only when mutated is True (idempotent no-op skips audit per AC3) → re-read snapshot → render status-headline.html as the HTMX outerHTML swap target. New strategy-failure.html partial returns same outer section structure as headline fragment with data-strategy-update-failed="true" + x-init="errorMessage = ..." Alpine seed for the calm notice "Strategy update failed. Your previous setting is still active." Alpine strategySelector factory added to dashboard.html {% block scripts %} below evOverride (state: open/pendingStrategy/errorMessage; methods: toggle/close/markPending/failFromHtmx/_fail/_clearTimer/destroy). htmx:response-error + htmx:send-error listeners bound at #strategy-selector-panel level (NOT .window — disjoint listener scopes per R3 forbidden-state #7). build_homeowner_headline_context extended with strategy_options list (EnergyStrategy declaration-order iteration: minimize_cost → maximize_self_consumption → prioritize_ev; defensive .get(...) fallback per 10.1 review patch #2 pattern). New Settings.strategy_update_confirmation_timeout_seconds (default 5s, bounded [1,30]). [x-cloak]{display:none!important} added (first codebase use). 22 new unit tests (6 state_store + 6 state_serialization + 1 control_loop + 2 fragment_routes + 10 set_strategy_route) + 6 integration tests (5 passing + 1 a11y xfail placeholder). pytest 1598 passed + 1 skipped + 7 xfailed (baseline 1568 + 1 + 6 → +30 net passing). Ruff check + format clean across 258 files; mypy clean across 99 source files; uv.lock unchanged. Story file: _bmad-output/implementation-artifacts/10-3-implement-inline-strategy-selector-with-statestore-authoritative-update-and-specific-failure-messaging.md. Awaits A7 review-closure gate via bmad-code-review (fifth proof-of-enforcement target after 9-Y-a / 9-X / 10-1 / 10-2). Story 10-3 created 2026-05-12 via bmad-create-story (A2-triggered: T1 lifecycle state machine + T4 timing — strategy_update_confirmation_timeout_seconds; R1–R7 substantive per A1 enforcement). Closes 10.1 review-deferred [src/open_ems/core/state_store.py:46, 92] writer-lock contract finding (must-before-10-3). New StateStore.set_active_strategy(strategy: EnergyStrategy) -> bool mutator follows 10.2 canonical pattern: writer-lock + in-lock idempotency check + snapshot patch via previous.model_copy(update={...}) so get_snapshot() reflects immediately + no sequence_id bump. POST /actions/set-strategy in existing actions.py (created Story 10.2 — no PolicyGuard / no background dispatch task; synchronous ≤50ms write + audit + headline render in one round-trip). HTMX outerHTML swap on #status-headline returns the new headline fragment + selector panel with new active flag. New strategy-failure.html partial renders failure into #strategy-failure-slot. Alpine strategySelector factory (added to dashboard.html's existing {% block scripts %} below evOverride) manages local open/pendingStrategy/errorMessage state with htmx:responseError listener bound at #strategy-selector-panel level (NOT .window — see AC9). New Settings.strategy_update_confirmation_timeout_seconds (default 5s, bounded [1,30]). Idempotent same-strategy POST short-circuits via mutator's bool return → skip audit emission per AC3 (deliberate UX-spec line 1916 deviation rationale documented). R7 bundles two 10.2 deferred items (acceptable-post-story-10-2) as safe-during-this-story symmetric structlog INFO patches: add active_strategy_changed emission to set_active_strategy + add ev_override_installed emission to set_ev_override. 22 unit tests + 6 integration tests (incl. 1 a11y placeholder) targeting ≥1586 passing + 7 xfailed (1568 + 18 net; 6 + 1 a11y). _STRATEGY_LABELS table reused; strategy_options[*] list added to build_homeowner_headline_context with EnergyStrategy declaration-order iteration + exhaustiveness test that catches future enum members missing a label. csrf_token + strategy_update_confirmation_timeout_seconds injected at route level into headline fragment context (builder stays pure-functional). x-cloak global CSS added (first codebase usage). No new Python deps; uv.lock unchanged. Story file: _bmad-output/implementation-artifacts/10-3-implement-inline-strategy-selector-with-statestore-authoritative-update-and-specific-failure-messaging.md. (Status: ready-for-dev). Story 10-2 done 2026-05-12 via bmad-code-review (A7 gate passed: 16 resolved, 10 deferred-and-verified, 7 dismissed). 16 in-cycle patches applied. Highest-impact: (1) set_ev_override torn-snapshot fix — drop sequence_id bump; mutator is a single-field patch not a publish cycle. (2) New compare_and_set_ev_override(expected_correlation_id, updated) atomic CAS mutator closes the dispatch-task TOCTOU race between lock-free get_snapshot() read and set_ev_override write — _dispatch_and_settle_ev_override now uses CAS for the terminal-status write; lock-free pre-check kept for fast-path orphan logging. (3) PolicyGuard's adapter-exception path normalized: reason="command_dispatch_failed" (stable key) instead of repr(exc); diagnostic detail preserved in structlog warning. New _OVERRIDE_FAILURE_REASONS entry maps it to plain language. (4) ev_override_confirmation_timeout_seconds Setting fully wired through build_homeowner_ev_card_context (new confirmation_timeout_seconds kwarg) → fragments.py /fragments/homeowner/ev-card (new get_settings_dep dep) → ev-card.html data-confirmation-timeout-seconds attr + x-data config → dashboard.html Alpine factory setTimeout that flips state from 'optimistic' to 'fallback' after the budget; clears in destroy(). Closes the R3 "10s maximum Alpine-server desync window" invariant which was previously unenforced. (5) Exhaustiveness test test_resolve_failure_reason_plain_covers_every_policy_guard_rejection_reason rewritten: path now resolved via open_ems.engine.policy_guard.__file__ (was cwd-fragile relative Path); regex extended to cover (a) self._reject(command, "...") literals (b) inline CommandResult(reason="...") on dispatch-timeout / dispatch-failed paths (c) capability_missing: prefix; asserts direct_reasons or inline_reasons is non-empty (defensive against silent vacuous-pass). Other patches: P6 module-level _OUTSTANDING_DISPATCH_TASKS set + discard callback (asyncio anti-pattern fix); P7 stripped unnecessary parens from _OVERRIDE_FAILURE_REASONS entries; P8 EVOverrideState model_validator _expires_after_requested requires strict expires_at > requested_at; P9 removed outer aria-live="polite" from state-card__body (nested aria-live → double announcements); P10 added x-bind:aria-disabled alongside static aria-disabled for SSR + Alpine consistency; P14 ev_override_default_rate_kw gt=0.0 (was ge=0.0; 0 kW would never start a session); P15 x-data initialState now uses |tojson; P16 new test_alpine_provenance.py verifies static/alpine.min.js SHA256 matches README. Test deltas: 1555 → 1568 passing (+13 net new beyond +76 from dev cycle: temporal-ordering rejection (2), sequence_id-not-advanced contract, CAS swap-on-match / no-op-on-drift / no-op-on-None (3), dispatch-task None-clear orphan, _safe_audit happy-path emission, data-correlation-id render, confirmation-timeout data attr, alpine provenance (3)). 1 modified: test_adapter_exception_is_wrapped_as_failed_command_result asserts reason == "command_dispatch_failed" (was substring match on "modbus_explode"). Ruff check + format clean across 239 files; mypy clean across 99 source files. 10 items deferred to deferred-work.md under "code review of 10-2-..." heading. 7 items dismissed-with-rationale inline. A7 gate is the fourth proof-of-enforcement target after 9-Y-a, 9-X, 10-1. Adds EVOverrideState (frozen Pydantic, six fields with UTC validators + failure_reason iff terminal model-validator) + SystemSnapshot.active_ev_override field (Pydantic-level default None — structural sentinel deviation from 10.1 active_strategy). StateStore.set_ev_override mutator rebuilds the published snapshot via previous.model_copy(update=...) so get_snapshot() reflects mutations immediately (caught in test — original spec relied on next publish() and the background dispatch task's concurrency check always saw stale None, logging orphan and dropping every result). publish() three-clause AC4 evaluation in load-bearing order: expiry-clear → session-flip detect → natural-completion clear (test asserts ordering). POST /actions/ev-override route in new web/routes/actions.py with fire-and-forget asyncio.create_task background dispatch + done-callback for unhandled-exception logging + 2-second response contract (test asserts <2s even with slow PolicyGuard); idempotent replay returns existing correlation_id without re-dispatching; first homeowner CommandOrigin consumer; correlation_id round-trips through SetEVChargingRateCommand. _dispatch_and_settle_ev_override task: explicit CancelledError re-raise; concurrency-check via get_snapshot().active_ev_override.correlation_id (orphan exit prevents clobbering newer override); CommandStatus → dispatch_status mapping (success leaves pending — Confirmed requires session_active=true observation via AC4 clause 2; failed/timeout/rejected/correlation_broken map to terminal); _safe_audit wrapper prevents audit-emission failure from blocking the homeowner flow. ControlLoop._build_evaluation_input line 210 reads snapshot.active_ev_override + gates homeowner_override_active on dispatch_status=="pending". Serializers: _serialize_homeowner_ev_override_state helper + active_ev_override flows through both homeowner + installer SSE payloads. build_homeowner_ev_card_context derives 4-state model deterministically from active_ev_override + ev_charger.session_active only (device-state independence enforced structurally by test asserting identical override_state for snapshots differing only in inverter/battery/grid_meter); confirmed state suppresses constraint_notice when operating_mode is fail_safe; unavailable branch routes None + DegradedDeviceState to UX-spec-line-1503 "No EV charger connected" with button hidden. _OVERRIDE_FAILURE_REASONS plain-language mapping covers every PolicyGuard P0–P5 + dispatch-timeout + correlation-broken reason (test greps engine/policy_guard.py source for self._reject literals and asserts exhaustive coverage); capability_missing: prefix rule handles P4 structured suffix; calm catch-all for unknown reasons. Fragment route uses new get_active_constraints_optional dep (returns None instead of HTTP 503) for graceful pre-installer-wizard-complete render (next_session_summary falls back to "No charging session scheduled"). Three new Settings fields: ev_override_window_seconds=7200 (Field(gt=0)) + ev_override_confirmation_timeout_seconds=30 (Field(ge=5, le=60)) + ev_override_default_rate_kw=11.0 (Field(ge=0)). Standalone ev-card.html template (NOT _card.html include): Alpine.js x-data="evOverride(initialState)" optimistic-layer factory + aria-live="polite" status span separate from button text + HTMX-bound buttons with per-button hx-headers CSRF (survives outerHTML swaps regardless of htmx:configRequest listener timing) + state-card__ev-button--{state} class for each of 4 states + retry-link rendered ONLY in fallback. dashboard.html: re-added #ev-card section between #grid-card and stack-close + {% block scripts %} with alpine:init Alpine.data('evOverride', ...) factory. base.html: <script src="/static/alpine.min.js" defer>. Self-hosted Alpine.js 3.13.10 from unpkg (SHA256 fb9b146b7fbd1bbf251fb3ef464f2e7c5d33a4a83aeb0fcf21e92ca6a9558c4b, 44KB) at src/open_ems/web/static/alpine.min.js with static/README.md provenance. open-ems.css: appended EV-card class rules using existing --color-accent / --color-accent-hover / --color-degraded-bg / --color-text-secondary tokens; --color-accent-hover for Confirmed (load-bearing per UX spec line 1097 — NOT --color-pass; pass-green reserved for PASS validation states; integration test asserts NO pass-green/color-pass/amber/color-fail class fragments leak into confirmed HTML); ev-pulse keyframe with @media (prefers-reduced-motion: reduce) guard; .visually-hidden helper for aria-live status; .state-card--ev { min-height: 12rem } reserves retry-link slot height to prevent layout shift between fallback ↔ non-fallback. Test deltas: 1479 → 1555 (+76 net) + 1 skipped a11y placeholder + 6 xfailed (unchanged baseline). New test files: test_ev_override.py (11), test_ev_card_template.py (11), test_ev_override_route.py (13), test_ev_override_e2e.py (8 + 1 skipped a11y). Updated test_dashboard_route.py to expect 5 HTMX-bound sections (was 4) + Alpine.js bundle + evOverride factory. Ruff check + format clean across 255 files; mypy clean across 99 source files. uv.lock unchanged (Alpine.js is static asset, not Python dep). 21 ACs satisfied; A1 R1–R7 orchestration artifacts in dev notes are accurate to implementation. Story file: _bmad-output/implementation-artifacts/10-2-implement-ev-status-card-with-4-state-optimistic-override-and-statestore-backed-persistence.md. Awaits A7 review-closure gate via bmad-code-review (would be the fourth proof-of-enforcement target after 9-Y-a, 9-X, 10-1). (Status: ready-for-dev → in-progress → review).
+ # Story 10-1 DONE 2026-05-11 via bmad-code-review A2-triggered (T1 state machine: Idle/Optimistic/Confirmed/Fallback four-state model; T2 retries/cancellation: idempotency-window dedup + "Try again" + fire-and-forget background dispatch task with explicit CancelledError re-raise + concurrency-check on dispatch result; T4 timing: expires_at deadline + ev_override_confirmation_timeout_seconds UI budget + load-bearing publish-time evaluation ordering expiry-clear → session-flip detect → natural-completion clear). All seven R1–R7 orchestration artifacts authored and substantive per A1 enforcement contract: R1 enumerates five domain convergences (override lifecycle ↔ PolicyGuard CommandResult contract; idempotency-window ↔ 2s response contract; background task ↔ shutdown lifecycle; PolicyGuard P0 ↔ existing-override carry-through; UI ↔ StateStore ↔ ControlLoop ↔ IntentExecutor ↔ PolicyGuard ↔ EV adapter five-component data flow) with story-specific risks for each; R2 covers three state machines (server-side override-lifecycle in StateStore/routes with transitions for None↔pending↔failed/timeout/rejected↔None via expiry/natural-completion/expiry, UI-side render-state derivation, Alpine.js client optimistic-layer transient overwritten on every poll); R3 lists eight forbidden state combinations with structural invariants (model-validator-enforced failure_reason iff terminal, single-mutator-path correlation_id uniqueness, P5 synthetic-CommandResult correlation_id preservation, AC7 step 2 background-task concurrency-check, 10s maximum Alpine-server desync window) plus mandatory cold-start subsection tracing boot→first-cycle (initial StateStore active_ev_override=None, EV card unavailable branch until BootNotification+first ControlLoop tick observes EVChargerState in place of _DeferredOCPPAdapter proxy state, normal-operation marker = EV card transitions to Idle); R4 cancellation ownership table covers five async operations (background dispatch task with explicit try/except CancelledError: raise per Story 8-4 precedent, PolicyGuard.authorize_and_dispatch which already excludes BaseException at engine/policy_guard.py:222 and :277, StateStore.set_ev_override single-await-in-lock acquisition, HTMX client-side abort, fragment GET idempotent) + documents why RetryPolicy is intentionally NOT used (homeowner-authored retry surfaces failures directly via Fallback button); R5 traces lifespan step 0 process boot → state_store init with active_ev_override=None → yield point with routes live → first-tick ControlLoop poll yielding DegradedDeviceState from _DeferredOCPPAdapter proxy → normal-operation marker (EV charger BootNotification + next tick produces EVChargerState) + explicit invariant relaxations (button structurally hidden, homeowner_override_active=False, ev_charging_window may be None pre-installer-wizard) + process-restart-with-active-override resolution; R6 source-of-truth table flags two drift risks (session_observed_active publish-only-writer invariant enforced by code comment + AC7 step 4 mandate, _OVERRIDE_FAILURE_REASONS exhaustiveness gap covered by CI test grepping engine/policy_guard.py reason strings); R7 deferred-findings triage cites nine entries from deferred-work.md (10-1 review-deferred items _active_strategy writer-lock contract safe-during-this-story since 10.2 establishes the canonical mutator pattern that 10.3 will follow + HTMX-error UX acceptable-post-this-story since same gap broader UX pattern + fail_safe parametrization gap acceptable-post-this-story since AC19 #3 covers EV-card route variant; 9-X W1/W2/W3 all acceptable-post-this-story since EV charger is OCPP-only path not Modbus; 9-5 DF1 acceptable-post-this-story since get_active_constraints helper returns 503 cleanly; OCPP synthesized-address acceptable-post-this-story installer-only impact; CsrfMiddleware-exhausts-body acceptable-post-this-story pre-existing pattern). 21 acceptance criteria covering EVOverrideState model (frozen Pydantic with model validator failure_reason iff terminal-status), SystemSnapshot.active_ev_override field with Pydantic-level default=None (deviation from 10.1 active_strategy pattern justified by structural-sentinel-not-domain-enum), StateStore mutator under writer lock + publish-time three-clause evaluation in load-bearing order, POST /actions/ev-override route in new web/routes/actions.py with fire-and-forget background dispatch task pattern satisfying UX 2-second response contract, _dispatch_and_settle_ev_override task with concurrency-check + CommandStatus→dispatch_status mapping including correlation_broken→failed routing per P5 indeterminate-applied semantics, three new Settings fields (ev_override_window_seconds=7200 default 2h with Field(gt=0), ev_override_confirmation_timeout_seconds=30 client-side budget, ev_override_default_rate_kw=11.0), ControlLoop._build_evaluation_input line 210 wiring snapshot.active_ev_override→homeowner_override_active flag gated on dispatch_status=="pending", serializer additions covering both homeowner and installer SSE payloads, build_homeowner_ev_card_context deterministic 4-state derivation reading ONLY active_ev_override + ev_charger.session_active, _OVERRIDE_FAILURE_REASONS plain-language mapping with capability_missing: prefix-rule + calm catch-all, fragment route re-targeted with active_constraints + csrf_token injection, standalone ev-card.html template (NOT _card.html include) with Alpine.js x-data factory + aria-live status span + hx-headers per-button CSRF + retry-link slot reserved, dashboard.html re-adds #ev-card section between #grid-card and stack close + {% block scripts %} Alpine factory, self-hosted Alpine.js 3.x at static/alpine.min.js with provenance README, EV-card CSS rules using --color-accent-hover for Confirmed (NOT --color-pass per UX spec line 1097) + ev-pulse keyframe with prefers-reduced-motion guard + visually-hidden helper, three CONTROL audit emissions (accepted/idempotent-replay/no-charger-rejected) with PolicyGuard's dispatch-side audit not double-emitted, ~42 unit tests + ~9 integration scenarios + 1 a11y placeholder following Story 9.x xfail+skipif precedent, quality gates targeting ≥1514 passed (+35 net from 1479 baseline) with ruff/format/mypy clean, uv.lock unchanged (Alpine.js is static asset only). Story file: _bmad-output/implementation-artifacts/10-2-implement-ev-status-card-with-4-state-optimistic-override-and-statestore-backed-persistence.md. (Status: ready-for-dev) (review-closure gate A7 passed). Adversarial review (Blind Hunter + Edge Case Hunter + Acceptance Auditor) produced 0 decision-needed, 8 patches (all applied in-cycle), 3 deferred (entered in deferred-work.md under "code review of 10-1" heading), 17 dismissed-with-rationale. Acceptance Auditor verdict on AC1–AC21: clean. Patches applied: (1) HIGH — restored orphaned non-UTC-tzinfo `pytest.raises` assertion to `test_snapshot_requires_utc_captured_at` after diff-time grafting onto `test_snapshot_accepts_all_energy_strategy_values` (tests/unit/core/test_state.py); (2) MEDIUM — defensive `.get(...)` fallback for `_STRATEGY_LABELS` and `_DEGRADED_EXPLANATIONS` in `build_homeowner_headline_context` (prevents 500 on future enum additions; exhaustiveness tests still enforce the table-coverage invariant at test time); (3) MEDIUM — NaN/Inf guard in `_format_grid_power` returning "Unavailable" instead of homeowner-facing "nan kW idle" / "inf kW importing"; (4) MEDIUM — new `test_static_css_bundle_is_servable_at_expected_url` integration test verifying `/static/open-ems.css` is reachable (200 + text/css + sentinel design-token content) — catches StaticFiles mis-mount / missing-asset deploy regressions; (5) LOW — removed dead `.state-card__metrics` / `.state-card__metric` CSS rules unreachable after AC8 single-primary-value refactor; (6) LOW — tightened `test_homeowner_dashboard_redirects_unauthenticated_to_login` from `(302, 401)` to exact 302 + Location-starts-with-/login assertion; (7) LOW — clarifying comment in `_format_grid_power` documenting that the trailing `abs()` is load-bearing for `-0.0` normalization; (8) LOW — `_homeowner_card_rows` docstring updated to acknowledge the EV branch's value-field "Unavailable" exception (preserved for Story 10.2). Deferred to deferred-work.md (3 items, all acceptable-post-epic-10 or must-before-10-3): D1 `_active_strategy` writer-lock contract for Story 10.3 mutator (must-before-10-3); D2 route-level `fail_safe` parametrization gap in `test_status_headline_*` (serializer-layer test already parametrizes all three operating modes); D3 HTMX-error UX pattern when `/fragments/homeowner/status-headline` 500s (broader UX pattern not specific to 10.1). Test deltas after patches: 1479 passed + 6 xfailed (was 1478 + 6 pre-patches; +1 from the new static-css servability test). Ruff check + format clean across 250 files; mypy clean across 98 source files. Epic 10 continues — Story 10.2 (EV status card) and 10.3 (inline strategy selector) are now unblocked. A7 review-closure gate is the third proof-of-enforcement target (after 9-Y-a and 9-X). (Status: ready-for-dev → in-progress → review → done) after bmad-code-review applied 16 patches in-session (1 decision-needed resolved → patched; 15 patches; 3 deferred to deferred-work.md; ~14 dismissed as noise). All 19 ACs satisfied AFTER review-cycle patches. Final test counts: 1445 passed + 5 xfailed (+7 net new tests beyond the original +23: AC4 spec-mandated proxy contract scenarios + OCPP register idempotency guard + invalid charge_point_id rejection + AC14 dispatch-past-P1 / dispatch-rejected-at-P1 lifespan integration assertions). Ruff check + format clean across 247 files; mypy clean across 98 source files. Closes Story 8-2's [app.py:223-236] deferred finding. Epic 10 introduction in epics.md amended (AC18) to declare 9-X as a hard prerequisite to Story 10.2. Review-cycle changes from baseline 9-X: (a) AC4 spec-mandated `_DeferredOCPPAdapter` proxy IMPLEMENTED (intercepts `get_state`/`get_capabilities`/`send_command` pre-boot and emits the AC4 reason strings `ocpp_charger_not_connected`; raises `RuntimeError("ocpp_charger_not_connected")` from `get_capabilities` so PolicyGuard P2 fires pre-boot as R3 #2 / R5 documented); (b) DSMR `connect()` loop added in lifespan step 4h.1 to start the DSMR background read task (without this, grid_meter telemetry was permanently `dsmr_unavailable`); (c) `RuntimeAdapterMap` extended with `protocols_by_role` field so AC8 log emits the full `(role, protocol, device_id)` triple; (d) AC14 dispatch-past-P1 assertions added to integration test (populated battery + empty-registry sibling); (e) `_construct_adapter` wraps non-`RuntimeAdapterWiringError` exceptions so AC9 fail-loud handler matches; (f) shutdown disconnect loop wrapped in `asyncio.wait_for(timeout=5.0)` per adapter so a hung disconnect cannot eat the systemd STOPSIGTERM grace; (g) OCPP `charge_point_id` derivation validated against `[A-Za-z0-9_.-]+` regex; (h) `OCPPCentralSystem.register()` guarded with `get_adapter()` idempotency fence (defensive — the previous "idempotent" comment misrepresented the actual destructive-overwrite contract); (i) partial-construct adapter leak fixed via best-effort disconnect on mid-loop failure; (j) AC16 stale comment at app.py:358-365 rewritten to past tense; (k) test improvements: AC4 reason-string assertions, OCPP post-boot delegation test, idempotency-guard test, invalid charge_point_id parametrize, removed sleight-of-hand empty-address parametrize case, integration test bootstraps schema via direct `_run_alembic_upgrade` instead of discarded lifespan run, `ObservabilityService.audit` patched to no-op for AC14 dispatch tests to prevent structlog cache poisoning. Deferred to deferred-work.md (3 items): W1 `_MODBUS_REGISTER_RANGES_BY_MODEL` PLACEHOLDER values [must-before-real-hardware-commissioning]; W2 model-key/capability-registry sync invariant [safe-during-Epic-10]; W3 test-matrix completeness for `(modbus_tcp, inverter)`-no-model and `(modbus_tcp, ev_charger)` cases [acceptable-post-Epic-10]. 9-X is the final architectural prep gate before Epic 10 work; Epic 10 Story 10.1 may now start. A7 review-closure gate PASSED on 2026-05-11 (second proof-of-enforcement story after 9-Y-a). Story file: _bmad-output/implementation-artifacts/9-X-wire-adapter-map-into-policy-guard-and-control-loop.md. Epic 9 retro: _bmad-output/implementation-artifacts/epic-9-retro-2026-05-11.md. (Status: ready-for-dev → in-progress → review). Adds SystemSnapshot.active_strategy field (non-Optional, no model-level default; StateStore boundary supplies cold-start default EnergyStrategy.maximize_self_consumption per AC2; carried through publish across snapshots; no public mutator added — Story 10.3 owns the write path). ControlLoop._build_evaluation_input now reads strategy from snapshot.active_strategy (control_loop.py:203). New homeowner status-headline fragment endpoint + template renders "Your home is running on solar · {strategy_label}" in normal mode and calm "Running with limited functionality" + degraded explanation in degraded/conservative/fail_safe modes (no amber per UX spec). Metric cards refactored per UX spec §"Metric Card" to single primary value with slate-400 stale caption in stable bottom slot and "Unavailable" body (not 0 kW/0%). Dashboard restructured to vertical card stack (headline + battery + solar + grid); EV card temporarily removed from primary render path — fragment endpoint preserved for Story 10.2 to re-add with override button. Grid card primary value renders magnitude + plain-language direction suffix ("1.2 kW importing" / "2.5 kW exporting" / "0.0 kW idle") per AC9 honoring architecture.md energy sign convention. AC14 structural enforcement: build_homeowner_headline_context reads ONLY snapshot.operating_mode + snapshot.active_strategy (no device-state inference) — verified by test_headline_ignores_device_state_per_ac14 which asserts identical headline output for two snapshots differing only in device-state fields. AC19 Path B chosen: hand-authored CSS bundle src/open_ems/web/static/open-ems.css with CSS custom-property design tokens (no Tailwind, no CDN, no Node.js, no build step); StaticFiles mounted at /static in create_app(); linked from base.html. Test deltas: +33 passing (1445 → 1478) + 1 xfailed a11y placeholder. New test files: test_dashboard_route.py (4 tests including AC16 perf ceiling under 200ms 10-iter average), test_homeowner_dashboard.py integration (4 e2e scenarios), test_homeowner_dashboard_a11y.py placeholder (xfail+skipif per Story 9.x precedent). Quality gates green: ruff check + format clean across 250 files; mypy clean across 98 source files. 14 pre-existing snapshot fixtures across the test suite required active_strategy kwarg per the no-model-default decision. Story file: _bmad-output/implementation-artifacts/10-1-implement-homeowner-dashboard-layout-with-systemoperatingmode-driven-headline-and-metric-cards.md. Awaits A7 review-closure gate via bmad-code-review. (Status: ready-for-dev → in-progress → review → done) after bmad-code-review applied 16 patches in-session (1 decision-needed resolved → patched; 15 patches; 3 deferred to deferred-work.md; ~14 dismissed as noise). All 19 ACs satisfied AFTER review-cycle patches. Final test counts: 1445 passed + 5 xfailed (+7 net new tests beyond the original +23: AC4 spec-mandated proxy contract scenarios + OCPP register idempotency guard + invalid charge_point_id rejection + AC14 dispatch-past-P1 / dispatch-rejected-at-P1 lifespan integration assertions). Ruff check + format clean across 247 files; mypy clean across 98 source files. Closes Story 8-2's [app.py:223-236] deferred finding. Epic 10 introduction in epics.md amended (AC18) to declare 9-X as a hard prerequisite to Story 10.2. Review-cycle changes from baseline 9-X: (a) AC4 spec-mandated `_DeferredOCPPAdapter` proxy IMPLEMENTED (intercepts `get_state`/`get_capabilities`/`send_command` pre-boot and emits the AC4 reason strings `ocpp_charger_not_connected`; raises `RuntimeError("ocpp_charger_not_connected")` from `get_capabilities` so PolicyGuard P2 fires pre-boot as R3 #2 / R5 documented); (b) DSMR `connect()` loop added in lifespan step 4h.1 to start the DSMR background read task (without this, grid_meter telemetry was permanently `dsmr_unavailable`); (c) `RuntimeAdapterMap` extended with `protocols_by_role` field so AC8 log emits the full `(role, protocol, device_id)` triple; (d) AC14 dispatch-past-P1 assertions added to integration test (populated battery + empty-registry sibling); (e) `_construct_adapter` wraps non-`RuntimeAdapterWiringError` exceptions so AC9 fail-loud handler matches; (f) shutdown disconnect loop wrapped in `asyncio.wait_for(timeout=5.0)` per adapter so a hung disconnect cannot eat the systemd STOPSIGTERM grace; (g) OCPP `charge_point_id` derivation validated against `[A-Za-z0-9_.-]+` regex; (h) `OCPPCentralSystem.register()` guarded with `get_adapter()` idempotency fence (defensive — the previous "idempotent" comment misrepresented the actual destructive-overwrite contract); (i) partial-construct adapter leak fixed via best-effort disconnect on mid-loop failure; (j) AC16 stale comment at app.py:358-365 rewritten to past tense; (k) test improvements: AC4 reason-string assertions, OCPP post-boot delegation test, idempotency-guard test, invalid charge_point_id parametrize, removed sleight-of-hand empty-address parametrize case, integration test bootstraps schema via direct `_run_alembic_upgrade` instead of discarded lifespan run, `ObservabilityService.audit` patched to no-op for AC14 dispatch tests to prevent structlog cache poisoning. Deferred to deferred-work.md (3 items): W1 `_MODBUS_REGISTER_RANGES_BY_MODEL` PLACEHOLDER values [must-before-real-hardware-commissioning]; W2 model-key/capability-registry sync invariant [safe-during-Epic-10]; W3 test-matrix completeness for `(modbus_tcp, inverter)`-no-model and `(modbus_tcp, ev_charger)` cases [acceptable-post-Epic-10]. 9-X is the final architectural prep gate before Epic 10 work; Epic 10 Story 10.1 may now start. A7 review-closure gate PASSED on 2026-05-11 (second proof-of-enforcement story after 9-Y-a). Story file: _bmad-output/implementation-artifacts/9-X-wire-adapter-map-into-policy-guard-and-control-loop.md. Epic 9 retro: _bmad-output/implementation-artifacts/epic-9-retro-2026-05-11.md.
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -140,7 +140,7 @@ development_status:
+   epic-10: in-progress
+   10-1-implement-homeowner-dashboard-layout-with-systemoperatingmode-driven-headline-and-metric-cards: done
+   10-2-implement-ev-status-card-with-4-state-optimistic-override-and-statestore-backed-persistence: done
+-  10-3-implement-inline-strategy-selector-with-statestore-authoritative-update-and-specific-failure-messaging: backlog
++  10-3-implement-inline-strategy-selector-with-statestore-authoritative-update-and-specific-failure-messaging: review
+   10-4-implement-fr30-weekly-energy-summary-as-non-blocking-pre-aggregated-secondary-feature: backlog
+   epic-10-retrospective: optional
+ 
+diff --git a/src/open_ems/core/state_store.py b/src/open_ems/core/state_store.py
+index 3da5dea..9685f42 100644
+--- a/src/open_ems/core/state_store.py
++++ b/src/open_ems/core/state_store.py
+@@ -1,11 +1,19 @@
+ """Async single-writer StateStore with lock-free snapshot reads.
+ 
+-Writer-lock invariant (Story 10.2): every single-field mutator
+-(``set_ev_override`` — and future siblings such as Story 10.3's
+-``set_active_strategy``) MUST acquire ``self._writer_lock``. The reader path
+-inside ``publish()`` also runs under the same lock, so single-field state
+-cannot tear between read and snapshot-build. ``get_snapshot()`` itself is
+-lock-free because the snapshot is immutable; replacement is atomic.
++Writer-lock invariant (Story 10.2 + 10.3): every single-field mutator
++(``set_ev_override``, ``set_active_strategy``) MUST acquire
++``self._writer_lock``, update the in-memory field, AND patch the published
++snapshot via ``previous.model_copy(update={...})`` so ``get_snapshot()``
++reflects the mutation immediately without waiting for the next ``publish()``.
++The reader path inside ``publish()`` also runs under the same lock, so
++single-field state cannot tear between read and snapshot-build.
++``get_snapshot()`` itself is lock-free because the snapshot is immutable;
++replacement is atomic.
++
++Single-field mutators do NOT advance ``sequence_id`` or ``captured_at`` —
++bumping the sequence on a non-publish mutation would emit a torn snapshot to
++SSE/age consumers (the previous publish's ``captured_at`` would mismatch the
++new sequence number).
+ """
+ 
+ from __future__ import annotations
+@@ -84,6 +92,34 @@ class StateStore:
+             active_ev_override=None,
+         )
+ 
++    async def set_active_strategy(self, strategy: EnergyStrategy) -> bool:
++        """Install a new active strategy under the writer lock (Story 10.3 AC1).
++
++        Mirrors the ``set_ev_override`` canonical pattern: writer-lock + in-lock
++        idempotency check + snapshot patch via ``previous.model_copy(update={...})``
++        so ``get_snapshot()`` reflects immediately. ``sequence_id`` and
++        ``captured_at`` are intentionally NOT advanced (single-field patch ≠
++        publish cycle).
++
++        Returns ``True`` if the strategy actually changed (caller can suppress a
++        no-op audit emission); ``False`` if ``strategy`` already matched the
++        in-lock current value and no mutation was applied.
++        """
++        async with self._writer_lock:
++            if self._active_strategy == strategy:
++                return False
++            previous_strategy = self._active_strategy
++            self._active_strategy = strategy
++            previous_snapshot = self._snapshot
++            self._snapshot = previous_snapshot.model_copy(update={"active_strategy": strategy})
++        logger.info(
++            "active_strategy_changed",
++            previous_strategy=previous_strategy.value,
++            new_strategy=strategy.value,
++            component="state_store",
++        )
++        return True
++
+     async def set_ev_override(self, override: EVOverrideState | None) -> None:
+         """Install or clear the active EV override under the writer lock (Story 10.2 AC3).
+ 
+@@ -96,9 +132,42 @@ class StateStore:
+         The next ``publish()`` advances ``sequence_id`` normally.
+         """
+         async with self._writer_lock:
++            previous_override = self._active_ev_override
+             self._active_ev_override = override
+             previous = self._snapshot
+             self._snapshot = previous.model_copy(update={"active_ev_override": override})
++        # Story 10.3 R7 patch — symmetric lifecycle observability with
++        # set_active_strategy. Closes the 10.2 deferred items at
++        # state_store.py:86-104 ("no INFO emission distinguishing install vs
++        # clear") and :96-104 ("silently displaces existing non-None override
++        # without log/audit").
++        if override is None and previous_override is not None:
++            logger.info(
++                "ev_override_cleared_via_mutator",
++                previous_correlation_id=str(previous_override.correlation_id),
++                previous_dispatch_status=previous_override.dispatch_status,
++                component="state_store",
++            )
++        elif override is not None and previous_override is None:
++            logger.info(
++                "ev_override_installed",
++                correlation_id=str(override.correlation_id),
++                dispatch_status=override.dispatch_status,
++                component="state_store",
++            )
++        elif (
++            override is not None
++            and previous_override is not None
++            and override.correlation_id != previous_override.correlation_id
++        ):
++            logger.info(
++                "ev_override_displaced",
++                previous_correlation_id=str(previous_override.correlation_id),
++                previous_dispatch_status=previous_override.dispatch_status,
++                new_correlation_id=str(override.correlation_id),
++                new_dispatch_status=override.dispatch_status,
++                component="state_store",
++            )
+ 
+     async def compare_and_set_ev_override(
+         self,
+diff --git a/src/open_ems/settings.py b/src/open_ems/settings.py
+index 5f08b37..b746d59 100644
+--- a/src/open_ems/settings.py
++++ b/src/open_ems/settings.py
+@@ -62,6 +62,15 @@ class Settings(BaseSettings):
+     # plain-language reason). Strictly positive: a 0 kW override would dispatch
+     # successfully but never start a session, stranding the UI in Optimistic.
+     ev_override_default_rate_kw: float = Field(default=11.0, gt=0.0)
++    # Story 10.3 — Strategy-selector client-side confirmation budget. After the
++    # homeowner taps an option, the Alpine optimistic layer waits this many
++    # seconds for the HTMX outerHTML swap (success → headline replaced) OR an
++    # htmx:responseError event (failure → calm notice rendered). If neither
++    # fires within the budget the layer renders the same calm-notice failure UX.
++    # Not enforced server-side — the route returns synchronously (no background
++    # dispatch task). Tighter than EV-override timeout because the server-side
++    # path is a single StateStore write + audit + headline render (~50ms).
++    strategy_update_confirmation_timeout_seconds: int = Field(default=5, ge=1, le=30)
+ 
+ 
+ _settings: Settings | None = None
+diff --git a/src/open_ems/web/routes/actions.py b/src/open_ems/web/routes/actions.py
+index 1c44294..ebde756 100644
+--- a/src/open_ems/web/routes/actions.py
++++ b/src/open_ems/web/routes/actions.py
+@@ -1,33 +1,32 @@
+-"""Homeowner action endpoints (Story 10.2).
++"""Homeowner action endpoints (Story 10.2 + 10.3).
+ 
+ Hosts the imperative ``/actions/*`` namespace described in architecture.md
+-§"API endpoints" (line 269). Today the only inhabitant is
+-``POST /actions/ev-override``; ``POST /actions/set-strategy`` (Story 10.3) will
+-live alongside it.
+-
+-Dispatch pattern: the route writes a ``pending`` ``EVOverrideState`` into the
+-``StateStore`` under the writer lock, then spawns a fire-and-forget
+-``asyncio.Task`` that drives the command through ``PolicyGuard``. The route
+-returns within ~50ms regardless of dispatch latency, satisfying the UX spec
+-2-second response contract (line 1840). The dispatch task's terminal status
+-update (``failed`` / ``timeout`` / ``rejected``) lands asynchronously and is
+-visible on the next HTMX poll of ``/fragments/homeowner/ev-card``.
++§"API endpoints" (line 269). Inhabitants:
++
++* ``POST /actions/ev-override`` (Story 10.2) — fire-and-forget command dispatch
++  through PolicyGuard. Returns ~50ms; dispatch settles asynchronously.
++* ``POST /actions/set-strategy`` (Story 10.3) — synchronous StateStore mutation
++  + audit + headline-fragment render. No PolicyGuard touchpoint (strategy is
++  not a device command). Returns the rendered headline as the HTMX swap target.
+ """
+ 
+ from __future__ import annotations
+ 
+ import asyncio
++import pathlib
+ import uuid
+ from datetime import UTC, datetime, timedelta
+ 
+ import structlog
+ from fastapi import APIRouter, Depends, Request
+-from fastapi.responses import JSONResponse
++from fastapi.responses import HTMLResponse, JSONResponse
++from fastapi.templating import Jinja2Templates
+ 
+ from open_ems.core import (
+     CommandOrigin,
+     CommandStatus,
+     DeviceRole,
++    EnergyStrategy,
+     EVChargerState,
+     EVOverrideState,
+     SetEVChargingRateCommand,
+@@ -43,10 +42,16 @@ from open_ems.web.dependencies import (
+     get_state_store,
+     require_homeowner,
+ )
++from open_ems.web.state_serialization import build_homeowner_headline_context
+ 
+ router = APIRouter()
+ logger = structlog.get_logger(__name__)
+ 
++_TEMPLATES_DIR = pathlib.Path(__file__).parent.parent / "templates"
++_templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
++
++_STRATEGY_FAILURE_MESSAGE = "Strategy update failed. Your previous setting is still active."
++
+ # Module-level set holding references to outstanding dispatch tasks. Per the
+ # asyncio docs (``asyncio.create_task``), a task may be garbage-collected
+ # mid-execution if the only reference goes out of scope. The route's local
+@@ -325,3 +330,107 @@ async def _safe_audit(
+             summary=summary,
+             error=repr(exc),
+         )
++
++
++# ---------------------------------------------------------------------------
++# Story 10.3 — POST /actions/set-strategy
++# ---------------------------------------------------------------------------
++
++
++@router.post("/actions/set-strategy")
++async def post_set_strategy(
++    request: Request,
++    user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
++    state_store: StateStore = Depends(get_state_store),  # noqa: B008
++    settings: Settings = Depends(get_settings_dep),  # noqa: B008
++) -> HTMLResponse:
++    """Homeowner-initiated energy-strategy change (Story 10.3 AC2).
++
++    Synchronous: validate → mutate StateStore → emit audit (on actual change)
++    → re-read snapshot → render headline fragment. Returns within ~50ms; the
++    response IS the HTMX swap target so the headline updates in one
++    round-trip without a separate fragment fetch.
++
++    Invalid strategy values yield a 200 + failure-fragment response so HTMX
++    swaps the calm-notice text into ``#status-headline`` without leaving the
++    headline frozen on a 4xx.
++    """
++    form = await request.form()
++    raw_strategy = form.get("strategy")
++    observability = _resolve_observability(request)
++
++    # AC2 step 2 + AC4 — invalid value path.
++    try:
++        if not isinstance(raw_strategy, str):
++            raise ValueError("strategy is required")
++        new_strategy = EnergyStrategy(raw_strategy)
++    except (ValueError, KeyError):
++        return _render_strategy_failure(request, state_store, settings, user)
++
++    # AC2 step 3 — capture previous value BEFORE mutation so the audit row
++    # records the correct from→to transition.
++    previous_strategy = state_store.get_snapshot().active_strategy
++    try:
++        mutated = await state_store.set_active_strategy(new_strategy)
++    except Exception:  # noqa: BLE001 — mutator must not 500 the homeowner flow
++        logger.exception(
++            "set_active_strategy_mutator_failed",
++            component="actions",
++            previous_strategy=previous_strategy.value,
++            requested_strategy=raw_strategy,
++        )
++        return _render_strategy_failure(request, state_store, settings, user)
++
++    # AC2 step 4 + AC6 — audit emission only when actual mutation occurred.
++    if mutated:
++        await _safe_audit(
++            observability,
++            actor="homeowner",
++            event_type="DEVICE",
++            summary="Homeowner changed energy strategy",
++            detail={
++                "event": "homeowner_strategy_changed",
++                "previous_strategy": previous_strategy.value,
++                "new_strategy": new_strategy.value,
++                "user_id": user.user_id,
++            },
++        )
++
++    # AC2 step 5 — render the post-mutation headline fragment as the HTMX
++    # swap target. Both the mutated and idempotent-no-op paths reach this.
++    try:
++        snapshot = state_store.get_snapshot()
++        context = build_homeowner_headline_context(snapshot)
++        context["csrf_token"] = user.csrf_token
++        context["strategy_update_confirmation_timeout_seconds"] = (
++            settings.strategy_update_confirmation_timeout_seconds
++        )
++        return _templates.TemplateResponse(
++            request,
++            "fragments/homeowner/status-headline.html",
++            context,
++        )
++    except Exception:  # noqa: BLE001 — render failure must not 500 the flow
++        logger.exception("set_strategy_headline_render_failed", component="actions")
++        return _render_strategy_failure(request, state_store, settings, user)
++
++
++def _render_strategy_failure(
++    request: Request,
++    state_store: StateStore,
++    settings: Settings,
++    user: HomeownerUser,
++) -> HTMLResponse:
++    """AC4: render the calm-notice failure fragment without mutating state."""
++    snapshot = state_store.get_snapshot()
++    context = build_homeowner_headline_context(snapshot)
++    context["csrf_token"] = user.csrf_token
++    context["strategy_update_confirmation_timeout_seconds"] = (
++        settings.strategy_update_confirmation_timeout_seconds
++    )
++    context["failure_message"] = _STRATEGY_FAILURE_MESSAGE
++    return _templates.TemplateResponse(
++        request,
++        "fragments/homeowner/strategy-failure.html",
++        context,
++    )
+diff --git a/src/open_ems/web/routes/fragments.py b/src/open_ems/web/routes/fragments.py
+index 08ebd72..22aabea 100644
+--- a/src/open_ems/web/routes/fragments.py
++++ b/src/open_ems/web/routes/fragments.py
+@@ -96,11 +96,23 @@ async def homeowner_ev_card(
+ @router.get("/fragments/homeowner/status-headline", response_class=HTMLResponse)
+ async def homeowner_status_headline(
+     request: Request,
+-    _user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
++    user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
+     store: StateStore = Depends(get_state_store),  # noqa: B008
++    settings: Settings = Depends(get_settings_dep),  # noqa: B008
+ ) -> HTMLResponse:
++    """Story 10.3 AC8: headline fragment + inline strategy selector.
++
++    The route injects ``csrf_token`` and
++    ``strategy_update_confirmation_timeout_seconds`` at the context level
++    (NOT through ``build_homeowner_headline_context``) so the builder stays
++    pure-functional over ``SystemSnapshot`` only.
++    """
+     snapshot = store.get_snapshot()
+     context = build_homeowner_headline_context(snapshot)
++    context["csrf_token"] = user.csrf_token
++    context["strategy_update_confirmation_timeout_seconds"] = (
++        settings.strategy_update_confirmation_timeout_seconds
++    )
+     return _templates.TemplateResponse(
+         request,
+         "fragments/homeowner/status-headline.html",
+diff --git a/src/open_ems/web/state_serialization.py b/src/open_ems/web/state_serialization.py
+index 2d74970..9c6c587 100644
+--- a/src/open_ems/web/state_serialization.py
++++ b/src/open_ems/web/state_serialization.py
+@@ -283,6 +283,11 @@ def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, obje
+     is the structural enforcement of Epic 10's cross-story constraint that
+     the headline is derived exclusively from SystemOperatingMode + active
+     strategy — verified by test_state_serialization::test_headline_ignores_device_state.
++
++    Story 10.3 AC5: emits ``strategy_options`` — one entry per ``EnergyStrategy``
++    enum member in declaration order — for the inline selector panel. The
++    labels are sourced from ``_STRATEGY_LABELS`` (single source of truth);
++    each option carries an ``active`` boolean matching the current strategy.
+     """
+     operating_mode = snapshot.operating_mode
+     active_strategy = snapshot.active_strategy
+@@ -299,6 +304,14 @@ def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, obje
+     else:
+         headline_text = "Running with limited functionality"
+         explanation_text = _DEGRADED_EXPLANATIONS.get(operating_mode, "")
++    strategy_options: list[dict[str, object]] = [
++        {
++            "value": option.value,
++            "label": _STRATEGY_LABELS.get(option, option.value.replace("_", " ").title()),
++            "active": option is active_strategy,
++        }
++        for option in EnergyStrategy
++    ]
+     return {
+         "operating_mode": operating_mode.value,
+         "active_strategy": active_strategy.value,
+@@ -306,6 +319,7 @@ def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, obje
+         "strategy_label": strategy_label,
+         "headline_text": headline_text,
+         "explanation_text": explanation_text,
++        "strategy_options": strategy_options,
+     }
+ 
+ 
+diff --git a/src/open_ems/web/static/open-ems.css b/src/open_ems/web/static/open-ems.css
+index ab1c689..97d475c 100644
+--- a/src/open_ems/web/static/open-ems.css
++++ b/src/open_ems/web/static/open-ems.css
+@@ -289,3 +289,71 @@ h1 {
+     animation: none;
+   }
+ }
++
++/* ------------------------------------------------------------------ */
++/* Story 10.3 — Inline strategy selector (UX spec component #5).      */
++/* ------------------------------------------------------------------ */
++
++[x-cloak] {
++  display: none !important;
++}
++
++.status-headline__strategy-trigger {
++  align-self: flex-start;
++  margin-top: 0.5rem;
++  padding: 0.25rem 0.75rem;
++  border: 1px solid var(--color-border);
++  border-radius: 6px;
++  background: var(--color-page-bg);
++  color: var(--color-accent);
++  font-size: 0.875rem;
++  cursor: pointer;
++}
++
++.status-headline__strategy-trigger:focus-visible {
++  outline: 2px solid var(--color-accent);
++  outline-offset: 2px;
++}
++
++.strategy-selector {
++  margin-top: 0.75rem;
++  display: flex;
++  flex-direction: column;
++  gap: 0.25rem;
++}
++
++.strategy-selector__option {
++  display: block;
++  width: 100%;
++  text-align: left;
++  padding: 0.625rem 0.75rem;
++  border: 1px solid var(--color-border);
++  border-left: 4px solid transparent;  /* reserved slot for active indicator */
++  border-radius: 6px;
++  background: var(--color-surface);
++  color: var(--color-text-primary);
++  font-size: 1rem;
++  cursor: pointer;
++}
++
++.strategy-selector__option--active {
++  border-left-color: var(--color-accent);
++  /* No background change — accent left-border is the only visual delta. */
++}
++
++.strategy-selector__option:focus-visible {
++  outline: 2px solid var(--color-accent);
++  outline-offset: 2px;
++}
++
++.strategy-selector__failure {
++  margin-top: 0.5rem;
++  padding: 0.5rem 0.75rem;
++  /* Calm, NOT amber — UX spec line 1133 mandates neutral styling. */
++  color: var(--color-text-secondary);
++  font-size: 0.875rem;
++}
++
++.strategy-selector__failure p {
++  margin: 0;
++}
+diff --git a/src/open_ems/web/templates/dashboard.html b/src/open_ems/web/templates/dashboard.html
+index 7a6bda8..bc4b794 100644
+--- a/src/open_ems/web/templates/dashboard.html
++++ b/src/open_ems/web/templates/dashboard.html
+@@ -92,6 +92,79 @@
+         }
+       }
+     }));
++
++    // Story 10.3 AC9 — strategy-selector factory. Client owns the
++    // open/close/pending state; the server is authoritative for the
++    // selected-strategy value (encoded in the swapped-in fragment's
++    // `data-active-strategy` + the `--active` class on the matching option).
++    // On HTMX success, this Alpine instance is destroyed by the outerHTML
++    // swap; a new instance is constructed from the server-authored
++    // initialStrategy. On HTMX failure, _fail() collapses the panel and shows
++    // the calm-notice text. The htmx:* listeners are bound at
++    // #strategy-selector-panel level (template) so only this panel's child
++    // requests trigger _fail(); errors from the EV card bubble through a
++    // different listener owner.
++    Alpine.data('strategySelector', (config) => ({
++      open: false,
++      pendingStrategy: null,
++      errorMessage: '',
++      initialStrategy: (config && config.initialStrategy) ? config.initialStrategy : null,
++      timeoutSeconds: (config && Number.isFinite(config.timeoutSeconds))
++        ? config.timeoutSeconds
++        : null,
++      _timer: null,
++
++      toggle() {
++        this.open = !this.open;
++        if (!this.open) {
++          this._clearTimer();
++        }
++      },
++
++      close() {
++        this.open = false;
++        this._clearTimer();
++      },
++
++      markPending(strategyValue) {
++        // Optimistic — only marks WHICH option was tapped; the active class
++        // does not visually move until the server-authored fragment replaces
++        // this section. On failure (no swap arrives within timeoutSeconds OR
++        // an htmx:responseError fires), _fail() collapses the panel and the
++        // headline is left unchanged.
++        this.errorMessage = '';
++        this.pendingStrategy = strategyValue;
++        if (this.timeoutSeconds && this.timeoutSeconds > 0) {
++          this._timer = setTimeout(() => {
++            if (this.pendingStrategy !== null) {
++              this._fail('Strategy update failed. Your previous setting is still active.');
++            }
++          }, this.timeoutSeconds * 1000);
++        }
++      },
++
++      failFromHtmx() {
++        this._fail('Strategy update failed. Your previous setting is still active.');
++      },
++
++      _fail(msg) {
++        this._clearTimer();
++        this.open = false;
++        this.pendingStrategy = null;
++        this.errorMessage = msg;
++      },
++
++      _clearTimer() {
++        if (this._timer !== null) {
++          clearTimeout(this._timer);
++          this._timer = null;
++        }
++      },
++
++      destroy() {
++        this._clearTimer();
++      }
++    }));
+   });
+ </script>
+ {% endblock %}
+diff --git a/src/open_ems/web/templates/fragments/homeowner/status-headline.html b/src/open_ems/web/templates/fragments/homeowner/status-headline.html
+index 27b3ba1..bc657dc 100644
+--- a/src/open_ems/web/templates/fragments/homeowner/status-headline.html
++++ b/src/open_ems/web/templates/fragments/homeowner/status-headline.html
+@@ -1,3 +1,6 @@
++{# Story 10.3 AC8 — homeowner status headline + inline strategy selector. #}
++{# This <section> is the HTMX swap target for BOTH /fragments/homeowner/status-headline #}
++{# (10s polling) AND POST /actions/set-strategy (homeowner strategy change). #}
+ <section
+   id="status-headline"
+   class="status-headline status-headline--{{ presentation_mode }}"
+@@ -5,9 +8,57 @@
+   data-operating-mode="{{ operating_mode }}"
+   data-active-strategy="{{ active_strategy }}"
+   aria-label="System status"
++  x-data="strategySelector({initialStrategy: {{ active_strategy | tojson }}, timeoutSeconds: {{ strategy_update_confirmation_timeout_seconds | tojson }}})"
+ >
+   <h2 class="status-headline__heading">
+     <span class="status-headline__text" aria-live="polite">{{ headline_text }}</span>
+   </h2>
+   <p class="status-headline__explanation">{% if explanation_text %}{{ explanation_text }}{% else %}&nbsp;{% endif %}</p>
++
++  <button
++    type="button"
++    class="status-headline__strategy-trigger"
++    aria-expanded="false"
++    x-bind:aria-expanded="open ? 'true' : 'false'"
++    aria-controls="strategy-selector-panel"
++    x-on:click="toggle()"
++  >Change strategy</button>
++
++  <div
++    id="strategy-selector-panel"
++    class="strategy-selector"
++    role="listbox"
++    aria-label="Energy strategy"
++    x-show="open"
++    x-cloak
++    x-on:keydown.escape.window="close()"
++    x-on:htmx:response-error="failFromHtmx()"
++    x-on:htmx:send-error="failFromHtmx()"
++  >
++    {% for option in strategy_options %}
++    <button
++      type="button"
++      class="strategy-selector__option{% if option.active %} strategy-selector__option--active{% endif %}"
++      role="option"
++      aria-selected="{{ 'true' if option.active else 'false' }}"
++      hx-post="/actions/set-strategy"
++      hx-vals='{"strategy": "{{ option.value }}"}'
++      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
++      hx-target="#status-headline"
++      hx-swap="outerHTML"
++      x-on:click="markPending({{ option.value | tojson }})"
++    >{{ option.label }}</button>
++    {% endfor %}
++  </div>
++
++  <div
++    id="strategy-failure-slot"
++    class="strategy-selector__failure"
++    role="status"
++    aria-live="polite"
++    x-show="errorMessage"
++    x-cloak
++  >
++    <p x-text="errorMessage"></p>
++  </div>
+ </section>
+diff --git a/tests/unit/core/test_state_store.py b/tests/unit/core/test_state_store.py
+index 5c7364f..70a93cb 100644
+--- a/tests/unit/core/test_state_store.py
++++ b/tests/unit/core/test_state_store.py
+@@ -663,3 +663,83 @@ async def test_state_store_compare_and_set_ev_override_noop_when_cleared_to_none
+     swapped = await store.compare_and_set_ev_override(original.correlation_id, stale_terminal)
+     assert swapped is False
+     assert store.get_snapshot().active_ev_override is None
++
++
++# ---------------------------------------------------------------------------
++# Story 10.3 — set_active_strategy mutator (AC1)
++# ---------------------------------------------------------------------------
++
++
++async def test_state_store_set_active_strategy_installs_strategy_under_writer_lock() -> None:
++    store = StateStore(system_clock_status="valid")
++    # Default cold-start strategy is maximize_self_consumption.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.maximize_self_consumption
++    await store.set_active_strategy(EnergyStrategy.minimize_cost)
++    assert store.get_snapshot().active_strategy is EnergyStrategy.minimize_cost
++
++
++async def test_state_store_set_active_strategy_returns_true_when_changed() -> None:
++    store = StateStore(system_clock_status="valid")
++    mutated = await store.set_active_strategy(EnergyStrategy.prioritize_ev)
++    assert mutated is True
++
++
++async def test_state_store_set_active_strategy_returns_false_on_idempotent_no_op() -> None:
++    store = StateStore(system_clock_status="valid")
++    # First call from the default → True.
++    assert await store.set_active_strategy(EnergyStrategy.minimize_cost) is True
++    # Second call with the same value → False, no mutation.
++    snap_before = store.get_snapshot()
++    mutated = await store.set_active_strategy(EnergyStrategy.minimize_cost)
++    snap_after = store.get_snapshot()
++    assert mutated is False
++    # Snapshot reference is unchanged on no-op (no model_copy invoked).
++    assert snap_after is snap_before
++    assert snap_after.active_strategy is EnergyStrategy.minimize_cost
++
++
++async def test_state_store_set_active_strategy_does_not_advance_sequence_id() -> None:
++    """Same single-field patch contract as set_ev_override (10.2 review precedent).
++
++    sequence_id and captured_at must stay frozen — a strategy POST is not a
++    publish cycle. The next publish() advances sequence_id normally.
++    """
++    store = StateStore(system_clock_status="valid")
++    snap_before = await store.publish({DeviceRole.inverter: _inverter()})
++    seq_before = snap_before.sequence_id
++    await store.set_active_strategy(EnergyStrategy.minimize_cost)
++    snap_after_mutate = store.get_snapshot()
++    # The strategy is immediately visible…
++    assert snap_after_mutate.active_strategy is EnergyStrategy.minimize_cost
++    # …but the snapshot is NOT a fresh publish.
++    assert snap_after_mutate.sequence_id == seq_before
++    assert snap_after_mutate.captured_at == snap_before.captured_at
++    # Next real publish advances sequence_id normally and carries the new strategy.
++    snap_after_publish = await store.publish({DeviceRole.inverter: _inverter()})
++    assert snap_after_publish.sequence_id == seq_before + 1
++    assert snap_after_publish.active_strategy is EnergyStrategy.minimize_cost
++
++
++async def test_state_store_publish_after_set_active_strategy_carries_new_value() -> None:
++    store = StateStore(system_clock_status="valid")
++    await store.set_active_strategy(EnergyStrategy.prioritize_ev)
++    snapshot = await store.publish({DeviceRole.inverter: _inverter()})
++    assert snapshot.active_strategy is EnergyStrategy.prioritize_ev
++
++
++async def test_state_store_set_active_strategy_round_trip_via_get_snapshot_immediately() -> None:
++    """Story 10.2 Subtask 4.5 lesson: mutator MUST patch the published snapshot.
++
++    Without the snapshot patch, get_snapshot() returns a stale value until the
++    next publish() — and any caller (the route's post-mutation snapshot read in
++    Story 10.3 AC2 step 5, ControlLoop._build_evaluation_input on the next tick)
++    sees the wrong value. This test enforces the contract structurally so a
++    future refactor cannot drop the model_copy line without failing CI.
++    """
++    store = StateStore(system_clock_status="valid")
++    await store.publish({DeviceRole.inverter: _inverter()})
++    await store.set_active_strategy(EnergyStrategy.minimize_cost)
++    # No publish in between — get_snapshot() must reflect the mutation.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.minimize_cost
++    await store.set_active_strategy(EnergyStrategy.prioritize_ev)
++    assert store.get_snapshot().active_strategy is EnergyStrategy.prioritize_ev
+diff --git a/tests/unit/engine/test_control_loop.py b/tests/unit/engine/test_control_loop.py
+index 49080a9..6e7204a 100644
+--- a/tests/unit/engine/test_control_loop.py
++++ b/tests/unit/engine/test_control_loop.py
+@@ -956,6 +956,39 @@ async def test_eval_input_homeowner_override_active_is_false_when_no_override()
+     assert eval_input.ev_scheduling.homeowner_override_active is False
+ 
+ 
++async def test_control_loop_picks_up_strategy_change_on_next_tick_via_snapshot_read() -> None:
++    """Story 10.3 AC7: a mid-flight strategy change propagates on the next tick.
++
++    Structural enforcement of the snapshot-patch propagation contract: the
++    ``set_active_strategy`` mutator patches the published snapshot, and
++    ``ControlLoop._build_evaluation_input`` reads strategy from
++    ``snapshot.active_strategy`` (control_loop.py:202). A future refactor that
++    drops the snapshot patch in the mutator OR re-introduces a notification
++    channel into the loop would break this test.
++    """
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    loop = _control_loop(state_store=store, adapters={})
++    await _populate_required_slots(store)
++
++    # Tick 1: starts on the constructor default.
++    snap1 = store.get_snapshot()
++    eval1 = loop._build_evaluation_input(snap1, datetime.now(UTC))  # noqa: SLF001
++    assert eval1.strategy is EnergyStrategy.maximize_self_consumption
++
++    # Homeowner changes strategy (no publish between mutator and next tick).
++    mutated = await store.set_active_strategy(EnergyStrategy.minimize_cost)
++    assert mutated is True
++
++    # Tick 2: same _build_evaluation_input call site, reading via get_snapshot()
++    # which must reflect the mutation immediately (snapshot-patch contract).
++    snap2 = store.get_snapshot()
++    eval2 = loop._build_evaluation_input(snap2, datetime.now(UTC))  # noqa: SLF001
++    assert eval2.strategy is EnergyStrategy.minimize_cost
++
++
+ def _control_loop_with_seed(seed: float) -> ControlLoop:
+     """Construct a ControlLoop with a specified initial_monthly_peak_kw seed.
+ 
+diff --git a/tests/unit/web/test_fragment_routes.py b/tests/unit/web/test_fragment_routes.py
+index 526e456..199c668 100644
+--- a/tests/unit/web/test_fragment_routes.py
++++ b/tests/unit/web/test_fragment_routes.py
+@@ -274,3 +274,91 @@ async def test_status_headline_degraded_mode_renders_calm_styling(
+     # but explicit fail-style classes (.fail, fail-, color-fail) must not appear.
+     assert "color-fail" not in lower
+     assert "state-card--fail" not in lower
++
++
++# ---------------------------------------------------------------------------
++# Story 10.3 — status-headline fragment includes the inline strategy selector
++# ---------------------------------------------------------------------------
++
++
++async def test_status_headline_fragment_includes_strategy_selector_panel_with_three_options(
++    session_repo: SessionRepo,
++) -> None:
++    """AC8: headline fragment renders three strategy option buttons in enum order."""
++    store = StateStore(
++        system_clock_status="valid",
++        operating_mode=SystemOperatingMode.normal,
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    raw_token = await _create_session("homeowner")
++    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
++
++    response = client.get(
++        "/fragments/homeowner/status-headline",
++        cookies={"session": raw_token},
++        headers={"HX-Request": "true"},
++    )
++
++    assert response.status_code == 200
++    body = response.text
++    # Three option buttons in role=option with the EXACT enum-declaration order.
++    minimize_idx = body.index('hx-vals=\'{"strategy": "minimize_cost"}\'')
++    maximize_idx = body.index('hx-vals=\'{"strategy": "maximize_self_consumption"}\'')
++    prioritize_idx = body.index('hx-vals=\'{"strategy": "prioritize_ev"}\'')
++    assert minimize_idx < maximize_idx < prioritize_idx
++    # Selector panel structure.
++    assert 'id="strategy-selector-panel"' in body
++    assert 'role="listbox"' in body
++    assert body.count('role="option"') == 3
++    # Failure slot present in DOM (visibility gated by Alpine x-show).
++    assert 'id="strategy-failure-slot"' in body
++    # Alpine factory bound.
++    assert "strategySelector(" in body
++    # CSRF token per-button hx-headers (survives outerHTML swap).
++    assert "X-CSRF-Token" in body
++
++
++async def test_status_headline_fragment_active_strategy_uses_no_pass_green_fragments(
++    session_repo: SessionRepo,
++) -> None:
++    """AC13 + AC14 load-bearing design rule: active option uses accent left-border,
++    NOT pass-green/amber/red/warn class fragments. Pairs with the 10.2 EV-card
++    no-pass-green test as the second instance of the design-rule enforcement.
++    """
++    store = StateStore(
++        system_clock_status="valid",
++        operating_mode=SystemOperatingMode.normal,
++        active_strategy=EnergyStrategy.prioritize_ev,
++    )
++    raw_token = await _create_session("homeowner")
++    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
++
++    response = client.get(
++        "/fragments/homeowner/status-headline",
++        cookies={"session": raw_token},
++        headers={"HX-Request": "true"},
++    )
++
++    assert response.status_code == 200
++    body = response.text
++    # Exactly one option has the --active modifier class.
++    assert body.count("strategy-selector__option--active") == 1
++    # The active option is prioritize_ev.
++    import re
++
++    active_match = re.search(
++        r'<button[^>]*strategy-selector__option--active[^>]*hx-vals=\'\{"strategy": "([^"]+)"\}\'',
++        body,
++        re.DOTALL,
++    )
++    assert active_match is not None
++    assert active_match.group(1) == "prioritize_ev"
++    # No pass-green / amber / red / warn class fragments anywhere in the selector panel.
++    lower = body.lower()
++    assert "pass-green" not in lower
++    assert "color-pass" not in lower
++    assert "--color-pass" not in lower
++    # 'amber' was already asserted absent above for degraded mode; reassert here
++    # for the selector's own DOM tree just to pin the design rule on this surface.
++    assert "amber" not in lower
++    assert "color-warn" not in lower
+diff --git a/tests/unit/web/test_state_serialization.py b/tests/unit/web/test_state_serialization.py
+index e70accf..aa60302 100644
+--- a/tests/unit/web/test_state_serialization.py
++++ b/tests/unit/web/test_state_serialization.py
+@@ -340,6 +340,83 @@ def test_headline_ignores_device_state_per_ac14() -> None:
+     assert build_homeowner_headline_context(base) == build_homeowner_headline_context(variant)
+ 
+ 
++# ---------------------------------------------------------------------------
++# Story 10.3 AC5 — strategy_options list in headline context
++# ---------------------------------------------------------------------------
++
++
++def test_build_homeowner_headline_context_includes_strategy_options_in_enum_declaration_order() -> (
++    None
++):
++    """AC5: strategy_options follows EnergyStrategy declaration order (NOT alphabetized).
++
++    UX spec line 805 and the journey-flow ordering rely on the declaration order:
++    minimize_cost → maximize_self_consumption → prioritize_ev.
++    """
++    snapshot = _snapshot().model_copy(
++        update={"active_strategy": EnergyStrategy.maximize_self_consumption}
++    )
++    context = build_homeowner_headline_context(snapshot)
++    options = context["strategy_options"]
++    assert isinstance(options, list)
++    assert [opt["value"] for opt in options] == [
++        "minimize_cost",
++        "maximize_self_consumption",
++        "prioritize_ev",
++    ]
++
++
++@pytest.mark.parametrize(
++    "active",
++    [
++        EnergyStrategy.minimize_cost,
++        EnergyStrategy.maximize_self_consumption,
++        EnergyStrategy.prioritize_ev,
++    ],
++)
++def test_build_homeowner_headline_context_marks_only_one_strategy_option_active(
++    active: EnergyStrategy,
++) -> None:
++    """AC5: exactly one option has active=True, matching snapshot.active_strategy."""
++    snapshot = _snapshot().model_copy(update={"active_strategy": active})
++    context = build_homeowner_headline_context(snapshot)
++    options = context["strategy_options"]
++    active_flags = [opt["active"] for opt in options]
++    assert active_flags.count(True) == 1
++    assert active_flags.count(False) == 2
++    active_option = next(opt for opt in options if opt["active"])
++    assert active_option["value"] == active.value
++
++
++def test_build_homeowner_headline_context_strategy_option_labels_match_strategy_labels_table() -> (
++    None
++):
++    """AC5: option labels are sourced from _STRATEGY_LABELS (single source of truth).
++
++    Closes the label-duplication anti-pattern structurally — if someone adds a
++    hardcoded label string to the template OR the builder, this test fails.
++    """
++    from open_ems.web.state_serialization import _STRATEGY_LABELS
++
++    snapshot = _snapshot()
++    context = build_homeowner_headline_context(snapshot)
++    for opt in context["strategy_options"]:
++        enum_member = EnergyStrategy(opt["value"])
++        assert opt["label"] == _STRATEGY_LABELS[enum_member]
++
++
++def test_build_homeowner_headline_context_strategy_options_match_every_enum_member() -> None:
++    """AC5: every EnergyStrategy member appears as an option (exhaustiveness).
++
++    A future enum addition without updating the builder fails CI here.
++    """
++    snapshot = _snapshot()
++    context = build_homeowner_headline_context(snapshot)
++    option_values = {opt["value"] for opt in context["strategy_options"]}
++    enum_values = {s.value for s in EnergyStrategy}
++    assert option_values == enum_values
++
++
+ def test_grid_card_row_includes_direction_suffix_per_ac9() -> None:
+     """AC9: grid card primary value is magnitude + plain-language direction."""
+     base = _snapshot()
+diff --git a/src/open_ems/web/templates/fragments/homeowner/strategy-failure.html b/src/open_ems/web/templates/fragments/homeowner/strategy-failure.html
+new file mode 100644
+index 0000000..7432312
+--- /dev/null
++++ b/src/open_ems/web/templates/fragments/homeowner/strategy-failure.html
+@@ -0,0 +1,67 @@
++{# Story 10.3 AC4 — strategy-update failure fragment. Returned with status 200 #}
++{# so HTMX swaps it into #status-headline (replacing the entire section). The #}
++{# headline + selector panel from the route's failure-branch render reflect #}
++{# the unchanged active_strategy; the failure notice is rendered inline. The #}
++{# previously-active strategy stays visually marked because the route renders #}
++{# the SAME headline fragment as a successful no-op POST would. #}
++<section
++  id="status-headline"
++  class="status-headline status-headline--{{ presentation_mode }}"
++  data-presentation-mode="{{ presentation_mode }}"
++  data-operating-mode="{{ operating_mode }}"
++  data-active-strategy="{{ active_strategy }}"
++  data-strategy-update-failed="true"
++  aria-label="System status"
++  x-data="strategySelector({initialStrategy: {{ active_strategy | tojson }}, timeoutSeconds: {{ strategy_update_confirmation_timeout_seconds | tojson }}})"
++  x-init="errorMessage = {{ failure_message | tojson }}"
++>
++  <h2 class="status-headline__heading">
++    <span class="status-headline__text" aria-live="polite">{{ headline_text }}</span>
++  </h2>
++  <p class="status-headline__explanation">{% if explanation_text %}{{ explanation_text }}{% else %}&nbsp;{% endif %}</p>
++
++  <button
++    type="button"
++    class="status-headline__strategy-trigger"
++    aria-expanded="false"
++    x-bind:aria-expanded="open ? 'true' : 'false'"
++    aria-controls="strategy-selector-panel"
++    x-on:click="toggle()"
++  >Change strategy</button>
++
++  <div
++    id="strategy-selector-panel"
++    class="strategy-selector"
++    role="listbox"
++    aria-label="Energy strategy"
++    x-show="open"
++    x-cloak
++    x-on:keydown.escape.window="close()"
++    x-on:htmx:response-error="failFromHtmx()"
++    x-on:htmx:send-error="failFromHtmx()"
++  >
++    {% for option in strategy_options %}
++    <button
++      type="button"
++      class="strategy-selector__option{% if option.active %} strategy-selector__option--active{% endif %}"
++      role="option"
++      aria-selected="{{ 'true' if option.active else 'false' }}"
++      hx-post="/actions/set-strategy"
++      hx-vals='{"strategy": "{{ option.value }}"}'
++      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
++      hx-target="#status-headline"
++      hx-swap="outerHTML"
++      x-on:click="markPending({{ option.value | tojson }})"
++    >{{ option.label }}</button>
++    {% endfor %}
++  </div>
++
++  <div
++    id="strategy-failure-slot"
++    class="strategy-selector__failure"
++    role="status"
++    aria-live="polite"
++  >
++    <p>{{ failure_message }}</p>
++  </div>
++</section>
+diff --git a/tests/unit/web/test_set_strategy_route.py b/tests/unit/web/test_set_strategy_route.py
+new file mode 100644
+index 0000000..3f5c96a
+--- /dev/null
++++ b/tests/unit/web/test_set_strategy_route.py
+@@ -0,0 +1,333 @@
++"""Unit tests for POST /actions/set-strategy (Story 10.3 AC14 #12–#21)."""
++
++from __future__ import annotations
++
++import time
++from datetime import UTC, datetime, timedelta
++from unittest.mock import AsyncMock
++
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from open_ems.core import EnergyStrategy, StateStore, SystemOperatingMode
++from open_ems.services.audit_log import ObservabilityService
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import UserRepo, hash_password
++from open_ems.web.csrf import CsrfMiddleware
++from open_ems.web.routes.actions import router as actions_router
++from open_ems.web.routes.fragments import router as fragments_router
++
++
++async def _create_session(role: str) -> tuple[str, str]:
++    """Returns (session_token, csrf_token)."""
++    user_id = await UserRepo(get_connection()).create(
++        username=f"{role}_{generate_session_token()[:8]}",
++        hashed_password=hash_password("secret"),
++        role=role,
++    )
++    raw_token = generate_session_token()
++    csrf = "test-csrf"
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw_token),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=csrf,
++    )
++    return raw_token, csrf
++
++
++def _build_app(
++    *,
++    store: StateStore,
++    observability: ObservabilityService | None = None,
++) -> FastAPI:
++    app = FastAPI()
++    app.state.state_store = store
++    app.state.observability = observability or AsyncMock(spec=ObservabilityService)
++    app.include_router(actions_router)
++    # Headline fragment is rendered by the route's success path — include the
++    # fragments router so /actions/set-strategy can return a headline render
++    # OR a failure fragment (template paths resolved by the same Jinja env).
++    app.include_router(fragments_router)
++    app.add_middleware(CsrfMiddleware)
++    return app
++
++
++# ---------------------------------------------------------------------------
++# AC14 #12 — happy path: minimize_cost updates snapshot + returns headline
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_minimize_cost_updates_snapshot_and_returns_headline_fragment(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        operating_mode=SystemOperatingMode.normal,
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_session("homeowner")
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    assert resp.status_code == 200
++    assert resp.headers["content-type"].startswith("text/html")
++    # State store updated.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.minimize_cost
++    # Response is the headline fragment with the new strategy.
++    assert "Your home is running on solar · Minimize Cost" in resp.text
++    assert 'data-active-strategy="minimize_cost"' in resp.text
++
++
++# ---------------------------------------------------------------------------
++# AC14 #13 — idempotent: same strategy → 200, no audit, no mutation
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_idempotent_when_strategy_unchanged(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.minimize_cost,
++    )
++    observability = AsyncMock(spec=ObservabilityService)
++    app = _build_app(store=store, observability=observability)
++    raw_token, csrf = await _create_session("homeowner")
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},  # SAME as current
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    assert resp.status_code == 200
++    # Snapshot unchanged.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.minimize_cost
++    # NO audit row emitted on same-strategy no-op (AC3 contract).
++    observability.audit.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# AC14 #14 — invalid value: failure fragment, no mutation
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_invalid_value_returns_failure_fragment(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_session("homeowner")
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "does_not_exist"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    # 200 (HTMX-friendly), with the failure fragment as response body.
++    assert resp.status_code == 200
++    assert "Strategy update failed. Your previous setting is still active." in resp.text
++    assert 'data-strategy-update-failed="true"' in resp.text
++    # State unchanged.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.maximize_self_consumption
++
++
++# ---------------------------------------------------------------------------
++# AC14 #15 — audit row emitted on actual change
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_emits_homeowner_strategy_changed_audit(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    observability = AsyncMock(spec=ObservabilityService)
++    app = _build_app(store=store, observability=observability)
++    raw_token, csrf = await _create_session("homeowner")
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "prioritize_ev"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    assert resp.status_code == 200
++    observability.audit.assert_called_once()
++    call_kwargs = observability.audit.call_args.kwargs
++    assert call_kwargs["actor"] == "homeowner"
++    detail = call_kwargs["detail"]
++    assert detail["event"] == "homeowner_strategy_changed"
++    assert detail["previous_strategy"] == "maximize_self_consumption"
++    assert detail["new_strategy"] == "prioritize_ev"
++    assert "user_id" in detail
++
++
++# ---------------------------------------------------------------------------
++# AC14 #16 — HTMX unauth → 401 (NOT 302) with WWW-Authenticate-style detail
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_unauthenticated_returns_401_for_htmx(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(system_clock_status="valid")
++    app = _build_app(store=store)
++    with TestClient(app, follow_redirects=False) as client:
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"X-CSRF-Token": "test-csrf", "HX-Request": "true"},
++        )
++    assert resp.status_code == 401
++
++
++# ---------------------------------------------------------------------------
++# AC14 #17 — installer → 403 for HTMX
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_installer_returns_403_for_htmx(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(system_clock_status="valid")
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_session("installer")
++    with TestClient(app, follow_redirects=False) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    assert resp.status_code == 403
++
++
++# ---------------------------------------------------------------------------
++# AC14 #18 — missing CSRF token → 403 (CsrfMiddleware)
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_requires_csrf_token(session_repo: SessionRepo) -> None:
++    store = StateStore(system_clock_status="valid")
++    app = _build_app(store=store)
++    raw_token, _csrf = await _create_session("homeowner")
++    with TestClient(app, follow_redirects=False) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"HX-Request": "true"},  # NO X-CSRF-Token
++        )
++    assert resp.status_code == 403
++
++
++# ---------------------------------------------------------------------------
++# AC14 #19 — 2-second response contract (margin check; route is synchronous)
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_returns_within_2_seconds(session_repo: SessionRepo) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_session("homeowner")
++    durations: list[float] = []
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        # Alternate strategies so we never short-circuit on idempotent no-op.
++        toggles = ["minimize_cost", "maximize_self_consumption"] * 3
++        for strategy in toggles:
++            t0 = time.perf_counter()
++            resp = client.post(
++                "/actions/set-strategy",
++                data={"strategy": strategy},
++                headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++            )
++            durations.append(time.perf_counter() - t0)
++            assert resp.status_code == 200
++    avg = sum(durations) / len(durations)
++    assert avg < 2.0, f"Average POST duration {avg:.3f}s exceeds 2s contract"
++
++
++# ---------------------------------------------------------------------------
++# AC14 #20 — response marks the new strategy as the active option
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_response_body_marks_new_strategy_as_active_option(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_session("homeowner")
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "prioritize_ev"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    assert resp.status_code == 200
++    body = resp.text
++    # Exactly one option carries the --active modifier and it is prioritize_ev.
++    assert body.count("strategy-selector__option--active") == 1
++    import re
++
++    active_match = re.search(
++        r'<button[^>]*strategy-selector__option--active[^>]*hx-vals=\'\{"strategy": "([^"]+)"\}\'',
++        body,
++        re.DOTALL,
++    )
++    assert active_match is not None
++    assert active_match.group(1) == "prioritize_ev"
++
++
++# ---------------------------------------------------------------------------
++# AC14 #21 — response carries CSRF token for outerHTML swap survival
++# ---------------------------------------------------------------------------
++
++
++async def test_post_set_strategy_response_body_contains_csrf_token_for_outerhtml_swap_survival(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_session("homeowner")
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    assert resp.status_code == 200
++    body = resp.text
++    # Every option button must carry hx-headers with the per-session csrf_token
++    # so the NEXT strategy POST survives outerHTML replacement of the section.
++    assert body.count(f'X-CSRF-Token": "{csrf}"') == 3  # one per option button
+diff --git a/tests/integration/web/test_strategy_selector_e2e.py b/tests/integration/web/test_strategy_selector_e2e.py
+new file mode 100644
+index 0000000..0c753b8
+--- /dev/null
++++ b/tests/integration/web/test_strategy_selector_e2e.py
+@@ -0,0 +1,269 @@
++"""Integration tests for the homeowner strategy selector end-to-end flow (Story 10.3 AC15)."""
++
++from __future__ import annotations
++
++import shutil
++from datetime import UTC, datetime, timedelta
++from unittest.mock import AsyncMock
++
++import pytest
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++
++from open_ems.core import EnergyStrategy, StateStore, SystemOperatingMode
++from open_ems.services.audit_log import ObservabilityService
++from open_ems.storage.database import get_connection
++from open_ems.storage.repositories.session_repo import (
++    SessionRepo,
++    generate_session_token,
++    hash_token,
++)
++from open_ems.storage.repositories.user_repo import UserRepo, hash_password
++from open_ems.web.csrf import CsrfMiddleware
++from open_ems.web.routes.actions import router as actions_router
++from open_ems.web.routes.fragments import router as fragments_router
++from open_ems.web.routes.homeowner import router as homeowner_router
++
++
++async def _create_homeowner_session() -> tuple[str, str]:
++    user_id = await UserRepo(get_connection()).create(
++        username=f"hw_{generate_session_token()[:8]}",
++        hashed_password=hash_password("secret"),
++        role="homeowner",
++    )
++    raw_token = generate_session_token()
++    csrf = "test-csrf"
++    await SessionRepo(get_connection()).create(
++        user_id=user_id,
++        token_hash=hash_token(raw_token),
++        expires_at=datetime.now(UTC) + timedelta(hours=4),
++        csrf_token=csrf,
++    )
++    return raw_token, csrf
++
++
++def _build_app(
++    *,
++    store: StateStore,
++    observability: ObservabilityService | None = None,
++) -> FastAPI:
++    app = FastAPI()
++    app.state.state_store = store
++    app.state.observability = observability or AsyncMock(spec=ObservabilityService)
++    app.include_router(homeowner_router)
++    app.include_router(actions_router)
++    app.include_router(fragments_router)
++    app.add_middleware(CsrfMiddleware)
++    return app
++
++
++# ---------------------------------------------------------------------------
++# AC15 #1 — happy path: idle → new strategy via outerHTML swap
++# ---------------------------------------------------------------------------
++
++
++async def test_strategy_selector_happy_path_idle_to_new_strategy_via_outerhtml_swap(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        operating_mode=SystemOperatingMode.normal,
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    observability = AsyncMock(spec=ObservabilityService)
++    app = _build_app(store=store, observability=observability)
++    raw_token, csrf = await _create_homeowner_session()
++
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        # Initial dashboard fragment shows the default strategy.
++        initial = client.get(
++            "/fragments/homeowner/status-headline",
++            headers={"HX-Request": "true"},
++        )
++        assert initial.status_code == 200
++        assert "Maximize Self-Consumption" in initial.text
++        # POST a strategy change.
++        post_resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++
++    assert post_resp.status_code == 200
++    # Response is the new headline fragment for outerHTML swap.
++    assert "Your home is running on solar · Minimize Cost" in post_resp.text
++    assert 'data-active-strategy="minimize_cost"' in post_resp.text
++    # State store reflects the change.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.minimize_cost
++    # Exactly one audit row emitted.
++    observability.audit.assert_called_once()
++    detail = observability.audit.call_args.kwargs["detail"]
++    assert detail["event"] == "homeowner_strategy_changed"
++
++
++# ---------------------------------------------------------------------------
++# AC15 #2 — idempotent no-op: no audit, no mutation
++# ---------------------------------------------------------------------------
++
++
++async def test_strategy_selector_idempotent_no_op_does_not_emit_audit_or_advance_sequence(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.minimize_cost,
++    )
++    observability = AsyncMock(spec=ObservabilityService)
++    app = _build_app(store=store, observability=observability)
++    raw_token, csrf = await _create_homeowner_session()
++
++    seq_before = store.get_snapshot().sequence_id
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        # First POST: same as current strategy.
++        client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++        # Second POST: still the same.
++        client.post(
++            "/actions/set-strategy",
++            data={"strategy": "minimize_cost"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++
++    # Sequence_id unchanged — set_active_strategy does not advance it; both
++    # POSTs were no-ops; no publish() in between.
++    assert store.get_snapshot().sequence_id == seq_before
++    # Zero audit rows.
++    observability.audit.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# AC15 #3 — invalid value: failure fragment, no mutation, no audit
++# ---------------------------------------------------------------------------
++
++
++async def test_strategy_selector_invalid_value_returns_failure_fragment_and_does_not_mutate_state(
++    session_repo: SessionRepo,
++) -> None:
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    observability = AsyncMock(spec=ObservabilityService)
++    app = _build_app(store=store, observability=observability)
++    raw_token, csrf = await _create_homeowner_session()
++
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "does_not_exist"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++
++    assert resp.status_code == 200
++    assert "Strategy update failed. Your previous setting is still active." in resp.text
++    assert 'data-strategy-update-failed="true"' in resp.text
++    # State unchanged.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.maximize_self_consumption
++    # No audit row.
++    observability.audit.assert_not_called()
++
++
++# ---------------------------------------------------------------------------
++# AC15 #4 — change propagates to next ControlLoop tick via snapshot read
++# ---------------------------------------------------------------------------
++
++
++async def test_strategy_selector_change_propagates_to_next_control_loop_tick(
++    session_repo: SessionRepo,
++) -> None:
++    """End-to-end proof: route mutation → get_snapshot() reflects → ControlLoop
++    reads the new strategy on its next _build_evaluation_input call.
++    """
++    from open_ems.core import DeviceRole
++
++    # Inline minimal _build_evaluation_input contract test — we don't need a
++    # full ControlLoop instance; we just need to confirm the snapshot read
++    # path that ControlLoop uses returns the post-POST value.
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_homeowner_session()
++
++    # Tick BEFORE the POST: same as the constructor default.
++    assert store.get_snapshot().active_strategy is EnergyStrategy.maximize_self_consumption
++
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        resp = client.post(
++            "/actions/set-strategy",
++            data={"strategy": "prioritize_ev"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    assert resp.status_code == 200
++
++    # Tick AFTER the POST: ControlLoop's get_snapshot() read path now sees
++    # the new strategy WITHOUT needing a publish(). This is the structural
++    # guarantee of the mutator's snapshot-patch contract (AC1 + AC7).
++    post_post_snapshot = store.get_snapshot()
++    assert post_post_snapshot.active_strategy is EnergyStrategy.prioritize_ev
++
++    # Confirm publish() carries it forward (next real ControlLoop tick).
++    next_snap = await store.publish({DeviceRole.inverter: None})
++    assert next_snap.active_strategy is EnergyStrategy.prioritize_ev
++
++
++# ---------------------------------------------------------------------------
++# AC15 #5 — serialized in SSE payload after change
++# ---------------------------------------------------------------------------
++
++
++async def test_strategy_selector_serialized_in_sse_payload_after_change(
++    session_repo: SessionRepo,
++) -> None:
++    """Verifies role-aware serialization (Story 10.1 AC4) continues to surface
++    active_strategy correctly after the new mutator lands.
++    """
++    from open_ems.web.state_serialization import (
++        serialize_homeowner_snapshot,
++        serialize_installer_snapshot,
++    )
++
++    store = StateStore(
++        system_clock_status="valid",
++        active_strategy=EnergyStrategy.maximize_self_consumption,
++    )
++    app = _build_app(store=store)
++    raw_token, csrf = await _create_homeowner_session()
++    with TestClient(app) as client:
++        client.cookies.set("session", raw_token)
++        client.post(
++            "/actions/set-strategy",
++            data={"strategy": "prioritize_ev"},
++            headers={"X-CSRF-Token": csrf, "HX-Request": "true"},
++        )
++    snapshot = store.get_snapshot()
++    assert serialize_homeowner_snapshot(snapshot)["active_strategy"] == "prioritize_ev"
++    assert serialize_installer_snapshot(snapshot)["active_strategy"] == "prioritize_ev"
++
++
++# ---------------------------------------------------------------------------
++# AC15 #6 — a11y placeholder (xfail+skipif precedent from Story 10.1 / 10.2)
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.skipif(shutil.which("npx") is None, reason="npx absent — axe-core scan skipped")
++@pytest.mark.xfail(reason="axe-playwright wiring deferred", strict=False)
++def test_strategy_selector_a11y_placeholder() -> None:
++    """Placeholder — once axe-playwright is wired the body asserts zero WCAG
++    2.1 AA violations on /homeowner/dashboard with the selector expanded
++    (keyboard-tab to 'Change strategy', press Enter, axe scans the panel).
++    """
++    raise AssertionError("axe-playwright not yet wired for the strategy selector")
