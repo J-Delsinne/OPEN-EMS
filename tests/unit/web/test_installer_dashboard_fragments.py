@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -18,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from open_ems.core import (
+    DegradedDeviceState,
     DeviceRole,
     GridMeterState,
     InverterState,
@@ -39,7 +41,10 @@ from open_ems.web.routes.fragments import router as fragments_router
 
 
 @pytest.fixture(autouse=True)
-def _clear_dismiss_state() -> None:
+def _clear_dismiss_state() -> Iterator[None]:
+    """P10 review fix — reset before AND after each test."""
+    _reset_dismiss_state_for_tests()
+    yield
     _reset_dismiss_state_for_tests()
 
 
@@ -172,6 +177,43 @@ async def test_health_indicator_exhaustive_over_system_operating_mode_enum(
     response = client.get("/fragments/installer/health-indicator", cookies={"session": raw_token})
     assert response.status_code == 200
     assert f">{expected_display}<" in response.text
+
+
+@pytest.mark.parametrize(
+    ("mode", "should_have_link"),
+    [
+        (SystemOperatingMode.normal, False),
+        (SystemOperatingMode.degraded, True),
+        (SystemOperatingMode.conservative, True),
+        (SystemOperatingMode.fail_safe, True),
+    ],
+)
+async def test_health_indicator_emits_event_log_link_when_status_not_normal(
+    session_repo: SessionRepo,
+    mode: SystemOperatingMode,
+    should_have_link: bool,
+) -> None:
+    """AC9 + P2 review fix: the health-indicator carries a "View in event log"
+    pre-filter link when status != NORMAL. Link target is
+    ``/installer/event-log?type=SYSTEM&window=24h``. AC9 listed three link
+    surfaces (anomaly notice, per-device rows, health indicator); this test
+    enforces the third.
+    """
+    store = StateStore(system_clock_status="valid", operating_mode=mode)
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get("/fragments/installer/health-indicator", cookies={"session": raw_token})
+    body = response.text
+    has_link = (
+        'href="/installer/event-log?type=SYSTEM&window=24h"' in body
+        or 'href="/installer/event-log?type=SYSTEM&amp;window=24h"' in body
+    )
+    if should_have_link:
+        assert has_link, f"expected event-log link for {mode}; body={body!r}"
+        assert "View in event log" in body
+    else:
+        assert not has_link, f"NORMAL status must not emit event-log link; body={body!r}"
 
 
 async def test_health_indicator_section_carries_self_refresh_binding(
@@ -423,16 +465,30 @@ async def test_event_log_preview_empty_renders_placeholder(
 async def test_event_log_preview_renders_5_most_recent(
     session_repo: SessionRepo,
 ) -> None:
-    """AC6: limit=5; rows ordered by timestamp DESC, id DESC."""
+    """AC6: limit=5; rows ordered by timestamp DESC, id DESC.
+
+    P17 review fix: use non-overlapping unique sentinel markers (`__EVT_AA__`
+    through `__EVT_GG__`) instead of `event-0..6` so substring assertions
+    cannot be invalidated by future fixture extension where `event-1` would
+    match both `event-1` and `event-10`.
+    """
     await _setup_db_tables()
     conn = get_connection()
     now = datetime.now(UTC)
-    # Insert 7 entries; expect only the 5 newest.
-    for i in range(7):
+    sentinels = [
+        "__EVT_AA__",  # i=0 — newest, expected present
+        "__EVT_BB__",
+        "__EVT_CC__",
+        "__EVT_DD__",
+        "__EVT_EE__",  # i=4 — boundary, expected present
+        "__EVT_FF__",  # i=5 — past limit, expected absent
+        "__EVT_GG__",  # i=6 — past limit, expected absent
+    ]
+    for i, sentinel in enumerate(sentinels):
         await conn.execute(
             "INSERT INTO event_log (schema_version, timestamp, actor, event_type, summary)"
             " VALUES (1, ?, 'system', 'SYSTEM', ?)",
-            ((now - timedelta(minutes=i)).isoformat(), f"event-{i}"),
+            ((now - timedelta(minutes=i)).isoformat(), sentinel),
         )
     await conn.commit()
 
@@ -442,12 +498,46 @@ async def test_event_log_preview_renders_5_most_recent(
 
     response = client.get("/fragments/installer/event-log-preview", cookies={"session": raw_token})
     body = response.text
-    # Newest first: event-0, event-1, event-2, event-3, event-4
-    assert body.count("event-0") == 1
-    assert body.count("event-4") == 1
-    # event-5 and event-6 should NOT appear (limit=5)
-    assert "event-5" not in body
-    assert "event-6" not in body
+    # Newest first: AA, BB, CC, DD, EE are present; FF, GG past the limit.
+    for present in sentinels[:5]:
+        assert body.count(present) == 1, f"sentinel {present} expected exactly once in body"
+    for absent in sentinels[5:]:
+        assert absent not in body, f"sentinel {absent} (past limit=5) leaked into body"
+
+
+async def test_event_log_preview_renders_utc_iso_in_data_utc_attribute_and_local_timezone_text(
+    session_repo: SessionRepo,
+) -> None:
+    """AC6 + AC12 + AC14 #36 (P14 review fix): each rendered row carries BOTH
+    the UTC ISO-8601 string in ``data-utc`` AND a server-side locally-formatted
+    display string (Europe/Brussels, the v1 default) in the visible text."""
+    await _setup_db_tables()
+    conn = get_connection()
+    # Pick a non-DST timestamp so the local-zone display is deterministic.
+    # 2026-01-15 12:34 UTC → 13:34 CET (UTC+1). Using ISO with explicit +00:00
+    # offset so SQLite stores a TZ-aware value.
+    fixed_utc = datetime(2026, 1, 15, 12, 34, 0, tzinfo=UTC)
+    await conn.execute(
+        "INSERT INTO event_log (schema_version, timestamp, actor, event_type, summary)"
+        " VALUES (1, ?, 'system', 'SYSTEM', ?)",
+        (fixed_utc.isoformat(), "__P14_FIXTURE__"),
+    )
+    await conn.commit()
+
+    store = StateStore(system_clock_status="valid")
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get("/fragments/installer/event-log-preview", cookies={"session": raw_token})
+    assert response.status_code == 200
+    body = response.text
+    # UTC ISO is rendered in the data-utc attribute (Story 11.2 will use it
+    # for client-side re-rendering with Intl.DateTimeFormat).
+    assert 'data-utc="2026-01-15T12:34:00+00:00"' in body
+    # The local-timezone display string is also rendered (server-side v1
+    # fallback) so the row is readable without JS. CET (UTC+1) is the expected
+    # Europe/Brussels offset for January.
+    assert "2026-01-15 13:34 CET / UTC+1" in body
 
 
 async def test_event_log_preview_summary_truncated_to_80_chars(
@@ -531,8 +621,15 @@ async def test_anomaly_notice_returns_empty_section_when_normal(
     # Section exists and retains its HTMX binding.
     assert 'id="installer-anomaly-notice"' in body
     assert 'hx-get="/fragments/installer/anomaly-notice"' in body
-    # But no Dismiss button or summary rendered.
+    # P13 review fix — tighten the "empty section" check: assert NONE of the
+    # render branches' content fragments appear. Naming-honesty rule: the
+    # test name promises "empty section" so the absences must cover every
+    # element the render path would emit.
     assert "Dismiss" not in body
+    assert ">FAIL<" not in body
+    assert ">WARN<" not in body
+    assert "View in event log" not in body
+    assert "installer-anomaly-notice__summary" not in body
 
 
 async def test_anomaly_notice_renders_full_notice_when_fail_safe(
@@ -574,6 +671,64 @@ async def test_anomaly_notice_renders_full_notice_when_fail_safe(
         'href="/installer/event-log?type=SYSTEM&window=24h"' in body
         or 'href="/installer/event-log?type=SYSTEM&amp;window=24h"' in body
     )
+
+
+async def test_anomaly_notice_renders_at_most_one_notice_element(
+    session_repo: SessionRepo,
+) -> None:
+    """AC12 + P16 review fix: structural assertion that the rendered anomaly
+    fragment carries AT MOST ONE ``.installer-anomaly-notice`` element. The
+    spec promises this as the structural counterpart to the function-level
+    ``AnomalySignature | None`` return contract.
+    """
+    store = StateStore(system_clock_status="valid", operating_mode=SystemOperatingMode.normal)
+    now = datetime.now(UTC)
+    await store.publish(
+        {
+            DeviceRole.inverter: InverterState(
+                device_id="inv-001",
+                pv_power_kw=3.0,
+                ac_power_kw=3.0,
+                operating_mode="normal",
+                read_at=now,
+            ),
+            DeviceRole.grid_meter: GridMeterState(
+                device_id="grid-001",
+                grid_power_kw=1.0,
+                energy_delivered_kwh=100.0,
+                energy_returned_kwh=20.0,
+                received_at=now,
+            ),
+        },
+        operating_mode=SystemOperatingMode.fail_safe,
+    )
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    response = client.get("/fragments/installer/anomaly-notice", cookies={"session": raw_token})
+    body = response.text
+    # Count BOTH the bare class fragment AND any modifier-suffixed class to
+    # catch a future refactor that switches to a class-modifier-only emission.
+    # The `installer-anomaly-notice` substring must appear as a class once
+    # on the root `<section>` (with `--fail`/`--warn` suffix when render=True).
+    # The test allows ancillary class fragments (badge, summary, link, dismiss)
+    # that begin with the same prefix; what it forbids is a SECOND `<section>`
+    # carrying the class. Counting `<section ` start tags with the class is
+    # the cleanest structural assertion.
+    section_starts = body.count('class="installer-anomaly-notice')
+    # Exactly ONE section is expected: the root. (Internal spans/buttons use
+    # different class names — `installer-anomaly-notice__badge`,
+    # `installer-anomaly-notice__summary`, etc. — which would all match the
+    # raw substring, so we tighten by anchoring to the section's class= start
+    # of the root `<section>` element.)
+    root_count = body.count('id="installer-anomaly-notice"')
+    assert root_count == 1, (
+        f"expected exactly 1 root anomaly-notice element, got {root_count}; body={body!r}"
+    )
+    # And the section's class attribute must include the base class exactly once.
+    # (Multiple internal element classes share the prefix; the root one is the
+    # only `class="installer-anomaly-notice installer-anomaly-notice--<sev>"`.)
+    assert section_starts >= 1, "root section class is missing"
 
 
 async def test_anomaly_dismiss_and_re_render_round_trip(
@@ -687,6 +842,109 @@ async def test_anomaly_dismiss_re_renders_on_severity_elevation(
     assert "Dismiss" in response.text
 
 
+async def test_get_fragment_after_dismiss_re_renders_on_new_anomaly_type(
+    session_repo: SessionRepo,
+) -> None:
+    """AC8 + R2 elevation rule + AC14 #44 (P15 review fix): when a new anomaly
+    TYPE appears (not severity elevation, but set-difference non-empty), the
+    dismissed notice must re-display.
+
+    Sequence: WARN {DEVICE_ERROR} dismissed → next snapshot adds SYSTEM_DEGRADED
+    (still WARN severity, different type set) → GET fragment must render the
+    full notice because ``current.anomaly_types`` is no longer a subset of
+    the dismissed signature's types.
+    """
+    store = StateStore(system_clock_status="valid", operating_mode=SystemOperatingMode.normal)
+    now = datetime.now(UTC)
+    # Publish a snapshot with battery in ERROR state (one DEVICE_ERROR) under
+    # operating_mode=normal so the snapshot carries only {DEVICE_ERROR}.
+    await store.publish(
+        {
+            DeviceRole.inverter: InverterState(
+                device_id="inv-001",
+                pv_power_kw=3.0,
+                ac_power_kw=3.0,
+                operating_mode="normal",
+                read_at=now,
+            ),
+            DeviceRole.grid_meter: GridMeterState(
+                device_id="grid-001",
+                grid_power_kw=1.0,
+                energy_delivered_kwh=100.0,
+                energy_returned_kwh=20.0,
+                received_at=now,
+            ),
+            DeviceRole.battery: DegradedDeviceState(
+                device_id="bat-001",
+                role=DeviceRole.battery,
+                reason="modbus_read_failed",
+                occurred_at=now,
+            ),
+        },
+        operating_mode=SystemOperatingMode.normal,
+    )
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    # Confirm initial render is the WARN+DEVICE_ERROR notice.
+    initial = client.get("/fragments/installer/anomaly-notice", cookies={"session": raw_token})
+    assert "Dismiss" in initial.text
+    assert "1 device degraded" in initial.text
+
+    # Dismiss the WARN+{DEVICE_ERROR} notice.
+    client.post(
+        "/actions/dismiss-anomaly",
+        cookies={"session": raw_token},
+        headers={"X-CSRF-Token": "test-csrf"},
+    )
+
+    # Verify the dismiss took effect (next GET is empty).
+    after_dismiss = client.get(
+        "/fragments/installer/anomaly-notice", cookies={"session": raw_token}
+    )
+    assert "Dismiss" not in after_dismiss.text
+
+    # Publish a new snapshot that adds SYSTEM_DEGRADED on top of the battery
+    # error — still WARN severity, but anomaly_types is now
+    # {DEVICE_ERROR, SYSTEM_DEGRADED} which is a SUPERSET of the dismissed
+    # {DEVICE_ERROR}.
+    await store.publish(
+        {
+            DeviceRole.inverter: InverterState(
+                device_id="inv-001",
+                pv_power_kw=3.0,
+                ac_power_kw=3.0,
+                operating_mode="normal",
+                read_at=now,
+            ),
+            DeviceRole.grid_meter: GridMeterState(
+                device_id="grid-001",
+                grid_power_kw=1.0,
+                energy_delivered_kwh=100.0,
+                energy_returned_kwh=20.0,
+                received_at=now,
+            ),
+            DeviceRole.battery: DegradedDeviceState(
+                device_id="bat-001",
+                role=DeviceRole.battery,
+                reason="modbus_read_failed",
+                occurred_at=now,
+            ),
+        },
+        operating_mode=SystemOperatingMode.degraded,
+    )
+
+    # GET must re-render because a NEW anomaly type appeared.
+    response = client.get("/fragments/installer/anomaly-notice", cookies={"session": raw_token})
+    # WARN severity (unchanged) but the new type triggered re-display.
+    assert "WARN" in response.text
+    assert "Dismiss" in response.text
+    # Both the original DEVICE_ERROR and the new SYSTEM_DEGRADED appear in
+    # the aggregated summary.
+    assert "System is operating with reduced functionality" in response.text
+    assert "1 device degraded" in response.text
+
+
 async def test_anomaly_dismiss_idempotent_when_no_anomaly_active(
     session_repo: SessionRepo,
 ) -> None:
@@ -722,3 +980,144 @@ async def test_anomaly_dismiss_idempotent_when_no_anomaly_active(
     )
     assert response.status_code == 200
     assert "Dismiss" not in response.text
+
+
+# ── AC10 #2 (P7 review fix) — per-fragment DB query-count assertions ─────────
+
+
+_DATA_SURFACE_TABLES = ("PEAK_INTERVALS", "EVENT_LOG", "DEVICE_REGISTRY")
+
+
+def _count_data_surface_queries(queries: list[str]) -> int:
+    """Return the number of intercepted SQL strings that touch a Story 11.1
+    data-surface table. Auth-side (sessions/users) reads are excluded.
+    """
+    return sum(1 for sql in queries if any(table in sql.upper() for table in _DATA_SURFACE_TABLES))
+
+
+async def test_fragment_health_indicator_triggers_zero_data_surface_queries(
+    session_repo: SessionRepo,
+) -> None:
+    """AC10 #2: ``/fragments/installer/health-indicator`` reads only the
+    StateStore snapshot — no data-surface DB queries."""
+    from tests.utils.db_query_counter import count_queries  # noqa: PLC0415
+
+    store = StateStore(system_clock_status="valid", operating_mode=SystemOperatingMode.normal)
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+    # Warm: caches one-time imports and auth lookups.
+    client.get("/fragments/installer/health-indicator", cookies={"session": raw_token})
+
+    async with count_queries() as counter:
+        response = client.get(
+            "/fragments/installer/health-indicator", cookies={"session": raw_token}
+        )
+
+    assert response.status_code == 200
+    assert _count_data_surface_queries(counter.queries) == 0, (
+        f"health-indicator should hit zero data-surface tables; got: {counter.queries}"
+    )
+
+
+async def test_fragment_device_rows_triggers_exactly_one_data_surface_query(
+    session_repo: SessionRepo,
+) -> None:
+    """AC10 #2: ``/fragments/installer/device-rows`` triggers exactly one
+    query — ``DeviceRepo.list_all`` on ``device_registry``."""
+    from tests.utils.db_query_counter import count_queries  # noqa: PLC0415
+
+    await _setup_db_tables()
+    store = StateStore(system_clock_status="valid")
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+    client.get("/fragments/installer/device-rows", cookies={"session": raw_token})
+
+    async with count_queries() as counter:
+        response = client.get("/fragments/installer/device-rows", cookies={"session": raw_token})
+
+    assert response.status_code == 200
+    data_surface_queries = [
+        sql for sql in counter.queries if any(t in sql.upper() for t in _DATA_SURFACE_TABLES)
+    ]
+    assert len(data_surface_queries) == 1, (
+        f"device-rows should hit exactly 1 data-surface table; got: {data_surface_queries}"
+    )
+    assert "DEVICE_REGISTRY" in data_surface_queries[0].upper()
+
+
+async def test_fragment_peak_tracker_triggers_exactly_one_data_surface_query(
+    session_repo: SessionRepo,
+) -> None:
+    """AC10 #2: ``/fragments/installer/peak-tracker`` triggers exactly one
+    query — ``EnergyRepo.get_current_monthly_peak_kw`` on ``peak_intervals``.
+    ``ActiveConstraintsProvider`` reads are in-memory (post-Story 9.0b
+    hydration) and do not count."""
+    from tests.utils.db_query_counter import count_queries  # noqa: PLC0415
+
+    await _setup_db_tables()
+    store = StateStore(system_clock_status="valid")
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+    client.get("/fragments/installer/peak-tracker", cookies={"session": raw_token})
+
+    async with count_queries() as counter:
+        response = client.get("/fragments/installer/peak-tracker", cookies={"session": raw_token})
+
+    assert response.status_code == 200
+    data_surface_queries = [
+        sql for sql in counter.queries if any(t in sql.upper() for t in _DATA_SURFACE_TABLES)
+    ]
+    assert len(data_surface_queries) == 1, (
+        f"peak-tracker should hit exactly 1 data-surface table; got: {data_surface_queries}"
+    )
+    assert "PEAK_INTERVALS" in data_surface_queries[0].upper()
+
+
+async def test_fragment_event_log_preview_triggers_exactly_one_data_surface_query(
+    session_repo: SessionRepo,
+) -> None:
+    """AC10 #2: ``/fragments/installer/event-log-preview`` triggers exactly
+    one query — ``EventLogRepo.list_recent`` on ``event_log``."""
+    from tests.utils.db_query_counter import count_queries  # noqa: PLC0415
+
+    await _setup_db_tables()
+    store = StateStore(system_clock_status="valid")
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+    client.get("/fragments/installer/event-log-preview", cookies={"session": raw_token})
+
+    async with count_queries() as counter:
+        response = client.get(
+            "/fragments/installer/event-log-preview", cookies={"session": raw_token}
+        )
+
+    assert response.status_code == 200
+    data_surface_queries = [
+        sql for sql in counter.queries if any(t in sql.upper() for t in _DATA_SURFACE_TABLES)
+    ]
+    assert len(data_surface_queries) == 1, (
+        f"event-log-preview should hit exactly 1 data-surface table; got: {data_surface_queries}"
+    )
+    assert "EVENT_LOG" in data_surface_queries[0].upper()
+
+
+async def test_fragment_anomaly_notice_triggers_zero_data_surface_queries(
+    session_repo: SessionRepo,
+) -> None:
+    """AC10 #2: ``/fragments/installer/anomaly-notice`` reads only the
+    StateStore snapshot + the module-level dismiss dict — no data-surface
+    DB queries."""
+    from tests.utils.db_query_counter import count_queries  # noqa: PLC0415
+
+    store = StateStore(system_clock_status="valid", operating_mode=SystemOperatingMode.normal)
+    raw_token, _ = await _create_session("installer")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+    client.get("/fragments/installer/anomaly-notice", cookies={"session": raw_token})
+
+    async with count_queries() as counter:
+        response = client.get("/fragments/installer/anomaly-notice", cookies={"session": raw_token})
+
+    assert response.status_code == 200
+    assert _count_data_surface_queries(counter.queries) == 0, (
+        f"anomaly-notice should hit zero data-surface tables; got: {counter.queries}"
+    )

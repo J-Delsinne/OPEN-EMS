@@ -4,6 +4,9 @@ import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import quote
+
+import structlog
 
 from open_ems.core import (
     BatteryState,
@@ -28,6 +31,8 @@ from open_ems.services.installer_anomaly import (
 )
 from open_ems.storage.repositories.device_repo import DeviceRegistryEntry
 from open_ems.storage.repositories.event_log_repo import EventLogEntry
+
+_serialization_logger = structlog.get_logger(__name__)
 
 OverrideRenderState = Literal["idle", "optimistic", "confirmed", "fallback"]
 
@@ -661,21 +666,41 @@ def _serialize_installer_device(state: DeviceSlot) -> dict[str, Any] | None:
 
 
 def build_installer_health_indicator_context(snapshot: SystemSnapshot) -> dict[str, object]:
-    """AC3: derive the installer-facing system health display directly from
-    ``snapshot.operating_mode`` via the four-to-three mapping.
+    """AC3 + AC9: derive the installer-facing system health display directly
+    from ``snapshot.operating_mode`` via the four-to-three mapping, and emit
+    the "View in event log" pre-filter link when the status is not NORMAL.
 
     Pure-functional. Reads ONLY ``operating_mode``. Defensive ``.get(...)``
     fallback on the display table so a future SystemOperatingMode member that
-    ships without an entry degrades gracefully instead of 500ing the route;
-    the exhaustiveness test catches the missing entry at test time.
+    ships without an entry degrades gracefully instead of 500ing the route.
+    The unmapped fallback uses the known-styled ``"degraded"`` CSS modifier
+    so the badge remains visible (P12 review fix) and emits a logger.warning
+    so the gap surfaces in production logs.
     """
     operating_mode = snapshot.operating_mode
-    display = _INSTALLER_HEALTH_DISPLAY.get(operating_mode, operating_mode.value.upper())
+    display = _INSTALLER_HEALTH_DISPLAY.get(operating_mode)
+    if display is None:
+        _serialization_logger.warning(
+            "installer_health_indicator_unmapped_operating_mode",
+            operating_mode=operating_mode.value,
+            component="state_serialization",
+        )
+        display = operating_mode.value.upper()
+        css_modifier = "degraded"  # known-styled fallback class
+    else:
+        css_modifier = display.lower()
+
+    # AC9: emit the "View in event log" link when status != NORMAL. The link
+    # query is the same shape as the anomaly-notice link target (epic AC line
+    # 2284-2285). Story 11.2 honors the contract.
+    event_log_link = "/installer/event-log?type=SYSTEM&window=24h" if display != "NORMAL" else None
+
     return {
         "operating_mode": operating_mode.value,
         "display": display,
         # CSS-class suffix: --normal / --degraded / --failed
-        "css_modifier": display.lower(),
+        "css_modifier": css_modifier,
+        "event_log_link": event_log_link,
     }
 
 
@@ -734,9 +759,13 @@ def build_installer_device_row_context(
                 "age_caption": age_caption,
                 "device_id": device_id,
                 # "View in event log" link target — emitted only when device_id
-                # is known; AC4 last-paragraph contract.
+                # is known; AC4 last-paragraph contract. P6 review fix: URL-encode
+                # the device_id so OCPP/Modbus/MQTT IDs containing & / # = space
+                # do not break the query-string contract Story 11.2 parses.
                 "event_log_link": (
-                    f"/installer/event-log?device_id={device_id}" if device_id is not None else None
+                    f"/installer/event-log?device_id={quote(device_id, safe='')}"
+                    if device_id is not None
+                    else None
                 ),
             }
         )
@@ -771,7 +800,10 @@ def build_installer_peak_tracker_context(
     peak_kw_rounded = round(current_month_peak_kw, 1)
 
     # Constraints unavailable branch — pre-installer-wizard-complete state.
-    if peak_limit_kw is None:
+    # P4 review fix: ``peak_limit_kw <= 0.0`` is treated as "not configured" too;
+    # a zero limit would otherwise hit ZeroDivisionError on the ratio compute
+    # below, and "limit = 0 kW" is meaningless to render.
+    if peak_limit_kw is None or peak_limit_kw <= 0.0:
         if peak_kw_rounded <= 0.0:
             return {
                 "peak_kw_display": "0.0",
@@ -836,9 +868,13 @@ def build_installer_event_log_preview_context(
         utc_iso = entry.timestamp.astimezone(UTC).isoformat()
 
         # Server-side fallback display string in Europe/Brussels. Uses
-        # zoneinfo (stdlib) — no new dependency.
+        # zoneinfo (stdlib) — no new dependency. P11 review fix: narrowed
+        # the except clause to zoneinfo-data-absent failures only so programming
+        # errors (AttributeError, TypeError) bubble up instead of being masked
+        # by the silent UTC fallback. Logs a warning the first time we fall
+        # back so the gap surfaces in production logs.
         try:
-            from zoneinfo import ZoneInfo  # noqa: PLC0415
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
 
             local_ts = entry.timestamp.astimezone(ZoneInfo(_EVENT_LOG_DISPLAY_TIMEZONE))
             offset = local_ts.utcoffset()
@@ -847,7 +883,13 @@ def build_installer_event_log_preview_context(
             display_timestamp = (
                 f"{local_ts.strftime('%Y-%m-%d %H:%M')} {tz_abbrev} / UTC{offset_hours:+d}"
             )
-        except Exception:  # noqa: BLE001 — zoneinfo data missing on stripped builds
+        except (ZoneInfoNotFoundError, ImportError) as exc:
+            _serialization_logger.warning(
+                "event_log_preview_zoneinfo_fallback",
+                timezone=_EVENT_LOG_DISPLAY_TIMEZONE,
+                error=str(exc),
+                component="state_serialization",
+            )
             display_timestamp = f"{entry.timestamp.astimezone(UTC).strftime('%Y-%m-%d %H:%M')} UTC"
 
         summary = entry.summary

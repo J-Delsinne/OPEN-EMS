@@ -22,6 +22,7 @@ detection.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
@@ -68,6 +69,28 @@ _SEVERITY_ORDER: Mapping[Severity, int] = {"WARN": 0, "FAIL": 1}
 # Time-window suffix for the "View in event log" pre-filter link. v1 uses a
 # fixed 24h window; Story 11.2 may extend.
 _LINK_WINDOW = "24h"
+
+# P8: _ANOMALY_SUMMARIES single-source-of-truth table for the per-part wording
+# the installer sees in the notice. Each key represents an aggregator part
+# rendered by ``_build_anomaly_summary``. Keeping the strings here (not inlined
+# at the call site) honors the spec line 220 contract.
+_ANOMALY_SUMMARIES: Mapping[str, str] = {
+    "cold_start": "System is starting up",
+    "system_failed": "System is in safe mode",
+    "system_degraded": "System is operating with reduced functionality",
+    "device_unavailable_singular": "1 required device unavailable",
+    "device_unavailable_plural": "{count} required devices unavailable",
+    "device_error_singular": "1 device degraded",
+    "device_error_plural": "{count} devices degraded",
+    "fallback": "System anomaly detected",
+}
+
+# P19 (D2 resolution): bound the per-session dismiss dict. Each fresh login
+# adds a new session_id; without a bound, a long-running process with daily
+# logouts leaks entries indefinitely. 100 entries is generous for OPEN-EMS's
+# expected deployment (single installer, 1-2 active sessions) and small enough
+# to be invisible in memory.
+_MAX_DISMISS_ENTRIES = 100
 
 
 @dataclass(frozen=True)
@@ -121,13 +144,20 @@ def detect_anomaly_from_snapshot(snapshot: SystemSnapshot) -> AnomalySignature |
     # optional-role unavailability is NOT an anomaly on its own (an EV
     # charger absent at a site without one is the normal state).
     # Any ERROR state on any role is a WARN (DEVICE_ERROR).
+    # P18 (D1 resolution): ``ComponentState.stale`` on a required role counts
+    # as DEVICE_UNAVAILABLE so the anomaly contract aligns with the device-row
+    # display contract (state_serialization._INSTALLER_COMPONENT_STATE_DISPLAY
+    # maps stale → "UNAVAILABLE"); otherwise the dashboard self-contradicts.
     device_error_count = 0
     device_unavailable_required_count = 0
     for role in DeviceRole:
         component_state = snapshot.component_states.get(role)
         if component_state is ComponentState.error:
             device_error_count += 1
-        elif component_state is ComponentState.unavailable and role in REQUIRED_DEVICE_ROLES:
+        elif (
+            component_state in (ComponentState.unavailable, ComponentState.stale)
+            and role in REQUIRED_DEVICE_ROLES
+        ):
             device_unavailable_required_count += 1
 
     if device_error_count > 0:
@@ -145,6 +175,7 @@ def detect_anomaly_from_snapshot(snapshot: SystemSnapshot) -> AnomalySignature |
 
     summary = _build_anomaly_summary(
         snapshot=snapshot,
+        severity=severity,
         active_types=active_types,
         device_error_count=device_error_count,
         device_unavailable_required_count=device_unavailable_required_count,
@@ -163,38 +194,52 @@ def detect_anomaly_from_snapshot(snapshot: SystemSnapshot) -> AnomalySignature |
 def _build_anomaly_summary(
     *,
     snapshot: SystemSnapshot,
+    severity: Severity,
     active_types: set[AnomalyType],
     device_error_count: int,
     device_unavailable_required_count: int,
 ) -> str:
     """Aggregate plain-language summary for the active anomaly types.
 
-    Cold-start special case (per R5): if sequence_id==0, the summary is
-    overridden to the calm "System is starting up" copy regardless of which
-    anomaly types are active. The default snapshot's operating_mode=degraded
-    would otherwise produce "System is operating with reduced functionality"
-    on a dashboard the installer just opened during boot — alarming and
-    incorrect.
+    Cold-start special case (per R5): if sequence_id==0 AND the severity is
+    NOT FAIL, the summary is overridden to the calm "System is starting up"
+    copy. The default snapshot's operating_mode=degraded would otherwise
+    produce "System is operating with reduced functionality" on a dashboard
+    the installer just opened during boot — alarming and incorrect.
+
+    P3 review fix: at sequence_id==0 the override is gated on
+    ``severity != "FAIL"``. If a FAIL-level anomaly is somehow active at
+    sequence_id==0 (e.g., a fail_safe boot or a required device missing on
+    the cold-start snapshot), the badge says FAIL and the summary must agree
+    — surfacing the real fact instead of soothing copy.
+
+    Wording is sourced from ``_ANOMALY_SUMMARIES`` (P8 review fix) so the
+    "single source of truth" contract from spec line 220 is honored
+    structurally; no string literal is inlined at the call site.
     """
-    if snapshot.sequence_id == 0:
-        return "System is starting up"
+    if snapshot.sequence_id == 0 and severity != "FAIL":
+        return _ANOMALY_SUMMARIES["cold_start"]
 
     parts: list[str] = []
     if "SYSTEM_FAILED" in active_types:
-        parts.append("System is in safe mode")
+        parts.append(_ANOMALY_SUMMARIES["system_failed"])
     elif "SYSTEM_DEGRADED" in active_types:
-        parts.append("System is operating with reduced functionality")
+        parts.append(_ANOMALY_SUMMARIES["system_degraded"])
     if "DEVICE_UNAVAILABLE" in active_types:
         if device_unavailable_required_count == 1:
-            parts.append("1 required device unavailable")
+            parts.append(_ANOMALY_SUMMARIES["device_unavailable_singular"])
         else:
-            parts.append(f"{device_unavailable_required_count} required devices unavailable")
+            parts.append(
+                _ANOMALY_SUMMARIES["device_unavailable_plural"].format(
+                    count=device_unavailable_required_count
+                )
+            )
     if "DEVICE_ERROR" in active_types:
         if device_error_count == 1:
-            parts.append("1 device degraded")
+            parts.append(_ANOMALY_SUMMARIES["device_error_singular"])
         else:
-            parts.append(f"{device_error_count} devices degraded")
-    return " · ".join(parts) if parts else "System anomaly detected"
+            parts.append(_ANOMALY_SUMMARIES["device_error_plural"].format(count=device_error_count))
+    return " · ".join(parts) if parts else _ANOMALY_SUMMARIES["fallback"]
 
 
 def _build_anomaly_link_query(active_types: set[AnomalyType]) -> str:
@@ -259,22 +304,35 @@ def evaluate_dismiss_state(
 # ── Per-session dismiss state ─────────────────────────────────────────────
 
 
-# Module-level dict (Q3 resolution). Process restart re-initializes the module
-# and clears all dismissals — the correct v1 semantic. Size is bounded by
-# active installer session count (typically 1-2 in OPEN-EMS's deployment
-# context). Python's GIL serializes single-key dict writes; no explicit lock
-# needed.
-_DISMISSED_ANOMALIES: dict[str, AnomalySignature] = {}
+# Module-level LRU-bounded dict (Q3 resolution; P19 review fix).
+# OrderedDict + ``move_to_end`` after every write gives O(1) LRU semantics.
+# Process restart re-initializes the module and clears all dismissals — the
+# correct v1 semantic. ``_MAX_DISMISS_ENTRIES`` caps the in-process footprint
+# regardless of session churn (fresh login on every browser visit would
+# otherwise grow the dict monotonically).
+_DISMISSED_ANOMALIES: OrderedDict[str, AnomalySignature] = OrderedDict()
 
 
 def dismiss_signature(session_id: str, signature: AnomalySignature) -> None:
     """Record the dismissed signature for the given session.
 
-    Overwrites any prior dismissed signature for the session — i.e., when an
+    Overwrites any prior dismissed signature for the session — when an
     installer dismisses an already-elevated notice, the elevation becomes
-    the new baseline for future comparisons.
+    the new baseline for future comparisons. LRU-evicts the oldest entry
+    when the dict reaches ``_MAX_DISMISS_ENTRIES`` (P19 review fix).
     """
+    if session_id in _DISMISSED_ANOMALIES:
+        _DISMISSED_ANOMALIES.move_to_end(session_id)
+    elif len(_DISMISSED_ANOMALIES) >= _MAX_DISMISS_ENTRIES:
+        evicted_session_id, _ = _DISMISSED_ANOMALIES.popitem(last=False)
+        logger.info(
+            "anomaly_dismiss_lru_eviction",
+            evicted_session_id=evicted_session_id,
+            new_session_id=session_id,
+            component="installer_dashboard",
+        )
     _DISMISSED_ANOMALIES[session_id] = signature
+    _DISMISSED_ANOMALIES.move_to_end(session_id)
     logger.info(
         "anomaly_dismissed",
         session_id=session_id,
@@ -285,8 +343,15 @@ def dismiss_signature(session_id: str, signature: AnomalySignature) -> None:
 
 
 def get_dismissed_signature(session_id: str) -> AnomalySignature | None:
-    """Return the dismissed signature for the session, or None."""
-    return _DISMISSED_ANOMALIES.get(session_id)
+    """Return the dismissed signature for the session, or None.
+
+    Touches LRU recency on hit so an actively-polling installer's entry
+    survives churn from new login sessions.
+    """
+    if session_id not in _DISMISSED_ANOMALIES:
+        return None
+    _DISMISSED_ANOMALIES.move_to_end(session_id)
+    return _DISMISSED_ANOMALIES[session_id]
 
 
 def clear_dismissed_signature(session_id: str) -> None:

@@ -10,6 +10,7 @@ Covers AC1 + AC7 + AC8 + AC9 end-to-end:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -89,7 +90,10 @@ class _StubProvider(ActiveConstraintsProvider):
 
 
 @pytest.fixture(autouse=True)
-def _clear_dismiss_state() -> None:
+def _clear_dismiss_state() -> Iterator[None]:
+    """P10 review fix — reset before AND after each test."""
+    _reset_dismiss_state_for_tests()
+    yield
     _reset_dismiss_state_for_tests()
 
 

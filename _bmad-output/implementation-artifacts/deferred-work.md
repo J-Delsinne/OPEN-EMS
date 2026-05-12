@@ -451,3 +451,45 @@ AC15 #43 (`test_weekly_summary_e2e_aggregator_writes_row_immediately_at_first_in
 - Asserts `_weekly_summary_task` is created and visible via `asyncio.all_tasks()` (or a state attribute on `app.state`) during the yield window.
 - Triggers shutdown, asserts the task is cancelled cleanly (no exception escapes the lifespan).
 - Asserts a `weekly_summary_task_died` log is emitted if the task crashes (via patched aggregator that raises a non-`Exception` once).
+
+
+## Deferred from: code review of 11-1-implement-installer-dashboard (2026-05-12)
+
+### DF1 — [MEDIUM — from R1 review of 11-1 — safe-during-epic-11] `db_query_counter` patches only `Connection.execute`, missing `executemany`/`executescript`/`Cursor.execute`
+
+**Source:** Story 11.1 review-deferred (`### Review Findings` → `#### Deferred (3)`).
+**Citation:** `tests/utils/db_query_counter.py` (introduced in Story 11.1 per Q5 resolution).
+
+**What:** The `count_queries()` async context manager patches `aiosqlite.Connection.execute` with `unittest.mock.patch.object`, but does NOT patch `aiosqlite.Connection.executemany`, `aiosqlite.Connection.executescript`, or any `aiosqlite.Cursor.execute`-style entry point. Any caller that constructs a cursor and runs SQL via the cursor's own `.execute(...)` method bypasses the counter silently. The downstream AC10 #2 structural-discipline assertions ("zero queries on shell route", "1 query on device-rows fragment", etc.) would pass even if a code path migrated to a non-`Connection.execute` execution surface in the future.
+
+**Why deferred (not patched in-cycle):** All current production code paths in `src/open_ems/storage/repositories/*` and `src/open_ems/storage/*` use `connection.execute(...)` exclusively. The gap is purely future-proofing for a coding-pattern that does not exist yet. Patching now would require duplicating the wrap-and-counter logic across four entry points and is out of scope for an 11.1 review-cycle patch. Bundles naturally with any future cursor-based query refactor.
+
+**Classification:** `safe-during-epic-11`. Epic 11 hardening sweep (or whichever future story introduces a `Cursor`-based query path).
+
+**Acceptance:** Extend `tests/utils/db_query_counter.py` to wrap `aiosqlite.Connection.execute`, `aiosqlite.Connection.executemany`, `aiosqlite.Connection.executescript`, and `aiosqlite.Cursor.execute` with the same counter-and-delegate logic. Add a regression test that triggers each entry point and asserts the counter sees the call. Update P1's fix (full SQL capture) to apply across all four wrappers.
+
+### DF2 — [LOW — from R1 review of 11-1 — acceptable-post-epic-11] Peak tracker mislabels small but real peaks as "No data yet"
+
+**Source:** Story 11.1 review-deferred (`### Review Findings` → `#### Deferred (3)`).
+**Citation:** `src/open_ems/web/state_serialization.py:775, 793` (the two `if peak_kw_rounded <= 0.0` branches in `build_installer_peak_tracker_context`).
+
+**What:** Both "no peak data" branches in the peak-tracker builder test `peak_kw_rounded <= 0.0` where `peak_kw_rounded = round(current_month_peak_kw, 1)`. A genuine peak of 0.04 kW (a 40 W reading on a perfectly-idle site, or the first import sample after a long export-dominant interval) rounds to 0.0 and produces the "Peak this month: 0.0 kW · No data yet" label — but the data IS there. The "no data" branch is semantically "no rows", not "low magnitude".
+
+**Why deferred (not patched in-cycle):** Proper fix requires `EnergyRepo.get_current_monthly_peak_kw()` (at `src/open_ems/storage/repositories/energy_repo.py:41-51`) to return `None` when no rows exist (and `0.0` only when a real `0.0` row exists), or to expose a sibling `has_rows_for_current_month()` helper. The current contract — "COALESCE-MAX returns 0.0 on empty set" — is also consumed by other surfaces (Story 10.4's weekly summary, possibly the strategy engine). Changing the return type is wider than 11.1's scope. The visual impact at 40 W is negligible in practice.
+
+**Classification:** `acceptable-post-epic-11`. Bundle with any future EnergyRepo refactor or Epic-11 hardening that touches the peak-tracker semantics.
+
+**Acceptance:** Change `EnergyRepo.get_current_monthly_peak_kw()` to return `float | None` (None when no rows exist). Update `build_installer_peak_tracker_context` to branch on `current_month_peak_kw is None` for the "no data" case. Add a regression test asserting a real 0.04 kW row renders "Peak this month: 0.0 kW · Limit: ..." (NOT "No data yet"). Audit Story 10.4 weekly-summary call sites for the same fix.
+
+### DF3 — [LOW — from R1 review of 11-1 — acceptable-post-epic-11] No negative CSRF test for `POST /actions/dismiss-anomaly`
+
+**Source:** Story 11.1 review-deferred (`### Review Findings` → `#### Deferred (3)`).
+**Citation:** `tests/unit/web/test_installer_dashboard_fragments.py` (dismiss POST test cluster).
+
+**What:** All tests of `POST /actions/dismiss-anomaly` pre-send the `X-CSRF-Token: test-csrf` header; no test asserts that omitting the header (or supplying an invalid one) results in a 403/401 rejection. CSRF protection IS enforced globally by `CsrfMiddleware` (registered first on every request at `src/open_ems/web/app.py:696`), so the dismiss POST inherits protection — the gap is purely test-coverage, not a real security regression.
+
+**Why deferred (not patched in-cycle):** The pattern is consistent with prior 10.x stories (`POST /actions/ev-override`, `POST /actions/set-strategy`), which also do not have route-specific negative CSRF tests. Fixing 11.1 in isolation creates the inconsistent state where one POST has the test and four don't. The natural fix is a single hardening sub-story that adds the negative test across all four routes at once.
+
+**Classification:** `acceptable-post-epic-11`. Bundle into the broader CSRF-coverage hardening sweep alongside `POST /actions/ev-override`, `POST /actions/set-strategy`, and any future `POST /actions/*` routes from Epic 11.x.
+
+**Acceptance:** Create `tests/unit/web/test_actions_csrf_coverage.py` that, parametrized over each `POST /actions/*` route, asserts the request is rejected (403/401) when the `X-CSRF-Token` header is missing or incorrect. Verify the `CsrfMiddleware` continues to enforce protection without route-level dependencies.

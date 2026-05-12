@@ -1,4 +1,4 @@
-{# Story 11.1 AC3 — installer system health indicator. #}
+{# Story 11.1 AC3 + AC9 — installer system health indicator with pre-filter link. #}
 {# Direct mapping from SystemOperatingMode to display label. Polls every 10s. #}
 <section
   id="installer-health-indicator"
@@ -14,4 +14,7 @@
     class="health-indicator__badge health-indicator__badge--{{ css_modifier }}"
     aria-live="polite"
   >{{ display }}</span>
+  {% if event_log_link %}
+  <a class="installer-health-indicator__link" href="{{ event_log_link }}">View in event log</a>
+  {% endif %}
 </section>

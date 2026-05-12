@@ -37,6 +37,7 @@ from open_ems.services.audit_log import ObservabilityService
 from open_ems.services.installer_anomaly import (
     detect_anomaly_from_snapshot,
     dismiss_signature,
+    get_dismissed_signature,
 )
 from open_ems.settings import Settings
 from open_ems.web.dependencies import (
@@ -481,10 +482,13 @@ async def dismiss_installer_anomaly(
     if current is not None:
         dismiss_signature(user.session_id, current)
     # Render the anomaly-notice fragment with render=False so the outerHTML
-    # swap collapses to the empty section. We pass the current snapshot +
-    # the just-recorded dismissed signature; the builder computes
-    # "suppress" and returns {"render": False, ...}.
-    context = build_installer_anomaly_notice_context(snapshot, current)
+    # swap collapses to the empty section. We read the dismissed signature
+    # back via the canonical lookup (P9 review fix) instead of passing the
+    # in-flight ``current`` directly — this keeps the POST response coupled
+    # to the actual stored state, so a silent dict-write failure (e.g.,
+    # future bounded-eviction regression) would surface here.
+    dismissed = get_dismissed_signature(user.session_id)
+    context = build_installer_anomaly_notice_context(snapshot, dismissed)
     context["csrf_token"] = user.csrf_token
     return _templates.TemplateResponse(
         request,

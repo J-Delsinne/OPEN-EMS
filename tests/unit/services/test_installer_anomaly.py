@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from unittest.mock import patch
 
@@ -69,8 +70,12 @@ def _snapshot(
 
 
 @pytest.fixture(autouse=True)
-def _clear_dismiss_state() -> None:
-    """Module-level _DISMISSED_ANOMALIES is process-wide; reset between tests."""
+def _clear_dismiss_state() -> Iterator[None]:
+    """Module-level _DISMISSED_ANOMALIES is process-wide; reset before AND
+    after each test (P10 review fix — original setup-only form left state
+    leaking until the next test fixture fired)."""
+    _reset_dismiss_state_for_tests()
+    yield
     _reset_dismiss_state_for_tests()
 
 
@@ -115,6 +120,23 @@ def test_detect_anomaly_required_role_unavailable_returns_fail_device_unavailabl
     snapshot = _snapshot(
         operating_mode=SystemOperatingMode.normal,
         inverter_state=ComponentState.unavailable,
+    )
+    sig = detect_anomaly_from_snapshot(snapshot)
+    assert sig is not None
+    assert sig.severity == "FAIL"
+    assert "DEVICE_UNAVAILABLE" in sig.anomaly_types
+
+
+def test_detect_anomaly_required_role_stale_returns_fail_device_unavailable() -> None:
+    """AC7 + D1/P18 review fix: ``ComponentState.stale`` on a required role
+    must also trigger DEVICE_UNAVAILABLE so the anomaly contract matches the
+    device-row display contract (state_serialization maps stale → "UNAVAILABLE").
+    Without this, the dashboard self-contradicts: device row reads UNAVAILABLE
+    while the anomaly notice stays silent.
+    """
+    snapshot = _snapshot(
+        operating_mode=SystemOperatingMode.normal,
+        inverter_state=ComponentState.stale,
     )
     sig = detect_anomaly_from_snapshot(snapshot)
     assert sig is not None
@@ -201,6 +223,25 @@ def test_detect_anomaly_cold_start_summary_overrides_to_starting_up() -> None:
     # The other fields still derive from operating_mode normally.
     assert sig.severity == "WARN"
     assert "SYSTEM_DEGRADED" in sig.anomaly_types
+
+
+def test_detect_anomaly_cold_start_with_fail_severity_does_not_use_starting_up_copy() -> None:
+    """P3 review fix: cold-start summary override is gated on severity != FAIL.
+
+    If sequence_id==0 AND severity is FAIL (e.g., a fail_safe boot or a
+    required-role unavailable on the cold-start snapshot), the calm "System
+    is starting up" copy would contradict the FAIL badge. The summary must
+    surface the real fact instead.
+    """
+    snapshot = _snapshot(
+        sequence_id=0,
+        operating_mode=SystemOperatingMode.fail_safe,
+    )
+    sig = detect_anomaly_from_snapshot(snapshot)
+    assert sig is not None
+    assert sig.severity == "FAIL"
+    assert sig.summary != "System is starting up"
+    assert "safe mode" in sig.summary  # the real FAIL copy
 
 
 def test_detect_anomaly_post_cold_start_uses_normal_summary() -> None:
@@ -348,6 +389,60 @@ def test_dismiss_signature_overwrites_prior_dismissal() -> None:
 def test_get_dismissed_signature_returns_none_for_unknown_session() -> None:
     """Default for a never-dismissed session is None."""
     assert get_dismissed_signature("never-seen") is None
+
+
+def test_dismiss_signature_evicts_oldest_entry_when_bound_reached() -> None:
+    """D2/P19 review fix: ``_DISMISSED_ANOMALIES`` is bounded by
+    ``_MAX_DISMISS_ENTRIES``. Writing past the bound evicts the LRU entry.
+
+    Sequence: fill the dict to capacity with N sessions, then add one more —
+    the oldest session's entry must be gone, the rest must remain.
+
+    Note: ``get_dismissed_signature`` promotes touched entries to most-recent
+    (separately tested below). This test must NOT call get on the entry it
+    expects to be evicted before the eviction trigger; doing so would refresh
+    its recency and the test would no longer measure what its name claims.
+    """
+    from open_ems.services import installer_anomaly  # noqa: PLC0415
+
+    capacity = installer_anomaly._MAX_DISMISS_ENTRIES
+    sig = _make_sig(severity="WARN", types=frozenset({"DEVICE_ERROR"}))
+
+    # Fill to capacity (no intervening get calls).
+    for i in range(capacity):
+        dismiss_signature(f"sess-{i:04d}", sig)
+    assert len(installer_anomaly._DISMISSED_ANOMALIES) == capacity
+    # Verify membership via the raw dict (avoids the LRU-touch side effect).
+    assert "sess-0000" in installer_anomaly._DISMISSED_ANOMALIES
+
+    # Add one more — oldest (sess-0000) is evicted; size stays at capacity.
+    dismiss_signature("sess-OVER", sig)
+    assert len(installer_anomaly._DISMISSED_ANOMALIES) == capacity
+    assert "sess-0000" not in installer_anomaly._DISMISSED_ANOMALIES
+    assert "sess-OVER" in installer_anomaly._DISMISSED_ANOMALIES
+    # Sanity: a middle-age entry survives.
+    assert f"sess-{capacity // 2:04d}" in installer_anomaly._DISMISSED_ANOMALIES
+
+
+def test_get_dismissed_signature_touches_lru_recency_on_hit() -> None:
+    """D2/P19: a GET on an entry promotes it to most-recently-used, so an
+    actively-polling installer's dismissal survives newer-session churn."""
+    from open_ems.services import installer_anomaly  # noqa: PLC0415
+
+    capacity = installer_anomaly._MAX_DISMISS_ENTRIES
+    sig = _make_sig(severity="WARN", types=frozenset({"DEVICE_ERROR"}))
+
+    # Fill to capacity.
+    for i in range(capacity):
+        dismiss_signature(f"sess-{i:04d}", sig)
+
+    # Touch the oldest entry — moves it to the end of the LRU order.
+    assert get_dismissed_signature("sess-0000") == sig
+
+    # Add one more — the NEXT-oldest (sess-0001) is evicted, NOT sess-0000.
+    dismiss_signature("sess-NEWEST", sig)
+    assert get_dismissed_signature("sess-0000") == sig  # survived
+    assert get_dismissed_signature("sess-0001") is None  # evicted
 
 
 # ── Structural-discipline test: anomaly detection consumes only the snapshot ──
