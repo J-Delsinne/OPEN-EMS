@@ -168,6 +168,9 @@ class RetryPolicy:
                     "command_status": "success",
                     "applied": result.applied,
                     "attempts": attempts,
+                    # Story 10.4 AC14: rule provenance for the weekly-summary
+                    # aggregator's peak-limiting-applied count query.
+                    "source_rule": command.source_rule,
                 },
             )
         except Exception as exc:  # noqa: BLE001 — audit failure must not mask successful dispatch

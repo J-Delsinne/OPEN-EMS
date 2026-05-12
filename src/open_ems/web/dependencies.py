@@ -13,6 +13,7 @@ from open_ems.core.constraints import ActiveConstraints
 from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.settings import Settings, get_settings
+from open_ems.storage.repositories.energy_repo import EnergyRepo
 from open_ems.storage.repositories.session_repo import SessionRepo, hash_token
 from open_ems.storage.repositories.user_repo import UserRepo
 
@@ -129,6 +130,16 @@ def get_settings_dep(request: Request) -> Settings:
     """Story 10.2: FastAPI dependency wrapper around the module-level get_settings()."""
     del request  # request not needed; settings is process-wide
     return get_settings()
+
+
+def get_energy_repo(request: Request) -> EnergyRepo:
+    """Story 10.4 AC8: EnergyRepo dependency for the weekly-summary fragment.
+
+    Constructs a fresh instance per request (no shared state — every EnergyRepo
+    pulls the same aiosqlite connection from the module-level pool). Mirrors the
+    EventLogRepo pattern at ``routes/installer.py``."""
+    del request
+    return EnergyRepo()
 
 
 def _next_url(request: Request) -> str:

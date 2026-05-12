@@ -122,6 +122,7 @@ def _control_loop(
         energy_repo = AsyncMock()
         energy_repo.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
         energy_repo.write_peak_interval = AsyncMock()
+        energy_repo.write_energy_flow_interval = AsyncMock()
     if loop_liveness is None:
         loop_liveness = LoopLiveness(
             missed_cycle_threshold_seconds=20.0, cycle_deadline_seconds=60.0
@@ -561,7 +562,7 @@ async def test_fail_safe_summary_lists_degraded_roles() -> None:
 
 
 async def test_fail_safe_exit_requires_recommendation_and_recovery() -> None:
-    """AC12 #23: stay while degraded; exit + dispatch only when both engine recommends normal AND device recovered."""  # noqa: E501
+    """AC12 #23: stay while degraded; exit + dispatch only when both engine recommends normal AND device recovered."""  # noqa: E501  # fmt: skip
     from open_ems.core.commands import CommandOrigin, SetBatteryChargeRateCommand
 
     cmd = SetBatteryChargeRateCommand(
@@ -999,6 +1000,7 @@ def _control_loop_with_seed(seed: float) -> ControlLoop:
     energy_repo = AsyncMock()
     energy_repo.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
     energy_repo.write_peak_interval = AsyncMock()
+    energy_repo.write_energy_flow_interval = AsyncMock()
     settings = _settings()
     return ControlLoop(
         state_store=_state_store(),
@@ -1014,3 +1016,96 @@ def _control_loop_with_seed(seed: float) -> ControlLoop:
         active_constraints=make_active_constraints_provider(settings),
         initial_monthly_peak_kw=seed,
     )
+
+
+# ── Story 10.4 AC5: peak-first / flow-second ordering invariant ────────────
+
+
+async def test_control_loop_update_tracker_writes_peak_interval_before_energy_flow_interval_on_rollover() -> None:  # noqa: E501  # fmt: skip
+    """AC5 Subtask 4.4: peak_intervals MUST be persisted BEFORE energy_flow_intervals.
+
+    A failure in the new energy-flow write must not regress the load-bearing peak
+    persistence path. The structural enforcement is the call-order assertion below.
+    """
+    from open_ems.engine.energy_flow_tracker import EnergyFlowIntervalTracker
+
+    loop = _control_loop()
+    interval_start = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
+    _set_tracker_to_boundary(loop, interval_start)
+    # Replace the energy-flow tracker to share the same boundary as the peak tracker.
+    loop._energy_flow_tracker = EnergyFlowIntervalTracker(interval_start)  # noqa: SLF001
+
+    # Capture the order of repo calls by replacing both methods with AsyncMocks
+    # attached to a shared parent — parent.mock_calls records every child call
+    # in chronological order across all child mocks.
+    parent = MagicMock()
+    parent.write_peak_interval = AsyncMock()
+    parent.write_energy_flow_interval = AsyncMock()
+    parent.get_current_monthly_peak_kw = AsyncMock(return_value=0.0)
+    loop._energy_repo = parent  # noqa: SLF001
+
+    # Prime the trackers with a tick inside the interval.
+    await loop._update_tracker(  # noqa: SLF001
+        {
+            DeviceRole.grid_meter: _grid_meter_state(power_kw=2.0),
+            DeviceRole.inverter: _inverter_state(),
+        },
+        datetime(2026, 5, 5, 12, 5, 0, tzinfo=UTC),
+    )
+    # Rollover.
+    await loop._update_tracker(  # noqa: SLF001
+        {
+            DeviceRole.grid_meter: _grid_meter_state(power_kw=2.0),
+            DeviceRole.inverter: _inverter_state(),
+        },
+        datetime(2026, 5, 5, 12, 15, 1, tzinfo=UTC),
+    )
+
+    # Both writes must have occurred exactly once.
+    assert parent.write_peak_interval.await_count == 1
+    assert parent.write_energy_flow_interval.await_count == 1
+    # Peak-first ordering: parent.mock_calls records EVERY child call in chronological
+    # order. Each entry is (name, args, kwargs); the name uses dotted child notation
+    # ("write_peak_interval", "write_energy_flow_interval", "get_current_monthly_peak_kw").
+    call_names = [c[0] for c in parent.mock_calls]
+    peak_idx = next(i for i, name in enumerate(call_names) if name == "write_peak_interval")
+    flow_idx = next(i for i, name in enumerate(call_names) if name == "write_energy_flow_interval")
+    assert peak_idx < flow_idx, (
+        f"AC5 ordering invariant violated: write_peak_interval at index {peak_idx},"
+        f" write_energy_flow_interval at index {flow_idx}; expected peak FIRST."
+        f" call_names={call_names}"
+    )
+
+
+async def test_control_loop_update_tracker_energy_flow_write_failure_does_not_crash_loop() -> None:
+    """A failed energy-flow write must be logged but must NOT raise out of
+    ``_update_tracker`` — the peak persistence already completed, and the next
+    interval rollover can re-try on its own."""
+    from open_ems.engine.energy_flow_tracker import EnergyFlowIntervalTracker
+
+    loop = _control_loop()
+    interval_start = datetime(2026, 5, 5, 12, 0, 0, tzinfo=UTC)
+    _set_tracker_to_boundary(loop, interval_start)
+    loop._energy_flow_tracker = EnergyFlowIntervalTracker(interval_start)  # noqa: SLF001
+    loop._energy_repo.write_energy_flow_interval = AsyncMock(  # noqa: SLF001
+        side_effect=RuntimeError("DB transient")
+    )
+
+    await loop._update_tracker(  # noqa: SLF001
+        {
+            DeviceRole.grid_meter: _grid_meter_state(power_kw=2.0),
+            DeviceRole.inverter: _inverter_state(),
+        },
+        datetime(2026, 5, 5, 12, 5, 0, tzinfo=UTC),
+    )
+    # Rollover — energy-flow write raises but is swallowed.
+    await loop._update_tracker(  # noqa: SLF001
+        {
+            DeviceRole.grid_meter: _grid_meter_state(power_kw=2.0),
+            DeviceRole.inverter: _inverter_state(),
+        },
+        datetime(2026, 5, 5, 12, 15, 1, tzinfo=UTC),
+    )
+    # Peak still persisted; energy-flow write attempted.
+    loop._energy_repo.write_peak_interval.assert_awaited_once()  # noqa: SLF001
+    loop._energy_repo.write_energy_flow_interval.assert_awaited_once()  # noqa: SLF001

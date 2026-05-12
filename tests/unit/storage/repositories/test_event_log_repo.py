@@ -90,6 +90,92 @@ def test_delete_raises_append_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_count_peak_limiting_applied_decisions_returns_zero_on_empty_log(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """Story 10.4 AC14: count returns 0 when no DECISION rows exist."""
+    repo, _ = repo_with_conn
+    result = await repo.count_peak_limiting_applied_decisions(
+        since=_NOW - timedelta(days=7),
+        until=_NOW,
+    )
+    assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_count_peak_limiting_applied_decisions_only_counts_source_rule_peak_limiting_with_applied_true(  # noqa: E501  # fmt: skip
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """Story 10.4 AC14: only rows with source_rule=peak_limiting AND applied=true count."""
+    repo, conn = repo_with_conn
+    # Inside the window: one matching row.
+    await repo.append(
+        schema_version=1,
+        timestamp=_NOW - timedelta(days=1),
+        actor="system",
+        event_type="DECISION",
+        summary="ok",
+        detail={
+            "source_rule": "peak_limiting",
+            "applied": True,
+            "command_type": "SetEVChargingRateCommand",
+        },
+        device_id=None,
+        config_version=None,
+    )
+    # Same source_rule but applied=false → excluded.
+    await repo.append(
+        schema_version=1,
+        timestamp=_NOW - timedelta(days=2),
+        actor="system",
+        event_type="DECISION",
+        summary="ok",
+        detail={"source_rule": "peak_limiting", "applied": False},
+        device_id=None,
+        config_version=None,
+    )
+    # Different source_rule → excluded.
+    await repo.append(
+        schema_version=1,
+        timestamp=_NOW - timedelta(days=3),
+        actor="system",
+        event_type="DECISION",
+        summary="ok",
+        detail={"source_rule": "strategy_minimize_cost", "applied": True},
+        device_id=None,
+        config_version=None,
+    )
+    # Wrong event_type → excluded.
+    await repo.append(
+        schema_version=1,
+        timestamp=_NOW - timedelta(days=4),
+        actor="system",
+        event_type="CONSTRAINT",
+        summary="ok",
+        detail={"source_rule": "peak_limiting", "applied": True},
+        device_id=None,
+        config_version=None,
+    )
+    # Outside the window (too old) → excluded.
+    await repo.append(
+        schema_version=1,
+        timestamp=_NOW - timedelta(days=8),
+        actor="system",
+        event_type="DECISION",
+        summary="ok",
+        detail={"source_rule": "peak_limiting", "applied": True},
+        device_id=None,
+        config_version=None,
+    )
+
+    result = await repo.count_peak_limiting_applied_decisions(
+        since=_NOW - timedelta(days=7),
+        until=_NOW,
+    )
+    assert result == 1
+
+
+@pytest.mark.asyncio
 async def test_prune_expired_deletes_non_critical_entry_older_than_retention(
     repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
 ) -> None:

@@ -19,6 +19,7 @@ from open_ems.core import (
     SystemSnapshot,
 )
 from open_ems.core.constraints import ActiveConstraints
+from open_ems.core.energy import WeeklyEnergySummaryRow
 from open_ems.core.state import DeviceSlot
 
 OverrideRenderState = Literal["idle", "optimistic", "confirmed", "fallback"]
@@ -320,6 +321,39 @@ def build_homeowner_headline_context(snapshot: SystemSnapshot) -> dict[str, obje
         "headline_text": headline_text,
         "explanation_text": explanation_text,
         "strategy_options": strategy_options,
+    }
+
+
+def build_homeowner_weekly_summary_context(
+    row: WeeklyEnergySummaryRow | None,
+) -> dict[str, object]:
+    """Story 10.4 AC8: build the homeowner weekly-summary fragment context.
+
+    Pure-functional over ``WeeklyEnergySummaryRow | None``. The ``None`` branch
+    handles the cold-start window before the aggregator's first pass runs.
+    Both ``None`` and ``insufficient_history=True`` rows render the same
+    "Data is still being collected" message — they are indistinguishable to the
+    homeowner.
+    """
+    if row is None or row.insufficient_history:
+        return {
+            "insufficient_history": True,
+            "data_complete_days_count": row.data_complete_days_count if row is not None else 0,
+            "computed_at": row.computed_at.isoformat() if row is not None else None,
+        }
+    # row.self_consumption_ratio is non-None when insufficient_history is False
+    # (enforced by WeeklyEnergySummaryRow._terminal_fields_iff_history_sufficient).
+    assert row.self_consumption_ratio is not None
+    assert row.estimated_cost_savings_eur is not None
+    return {
+        "insufficient_history": False,
+        "peaks_avoided_count": row.peaks_avoided_count,
+        "self_consumption_percent": round(row.self_consumption_ratio * 100),
+        "estimated_cost_savings_eur": row.estimated_cost_savings_eur,
+        "window_start_utc": row.window_start_utc.isoformat(),
+        "window_end_utc": row.window_end_utc.isoformat(),
+        "window_end_utc_date": row.window_end_utc.date().isoformat(),
+        "computed_at": row.computed_at.isoformat(),
     }
 
 

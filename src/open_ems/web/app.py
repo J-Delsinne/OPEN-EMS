@@ -236,6 +236,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _cleanup_task: asyncio.Task[None] | None = None
     _pruning_task: asyncio.Task[None] | None = None
     _control_loop_task: asyncio.Task[None] | None = None
+    _weekly_summary_task: asyncio.Task[None] | None = None
     db_initialized = False
     try:
         # Step 2: Run Alembic migrations — fatal on failure (exits with code 1).
@@ -578,6 +579,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         logger.info("control_loop_started", component="engine")
 
+        # Story 10.4: weekly energy summary aggregator. Non-blocking — if
+        # construction fails (e.g., misconfigured Settings), the dashboard MUST
+        # still come up. The aggregator is a nice-to-have secondary feature
+        # whose absence is acceptable.
+        try:
+            from open_ems.services.weekly_energy_summary import weekly_energy_summary_task
+
+            def _on_weekly_summary_done(t: asyncio.Task[None]) -> None:
+                if not t.cancelled():
+                    exc = t.exception()
+                    if exc is not None:
+                        logger.error(
+                            "weekly_summary_task_died",
+                            exc_info=exc,
+                            component="weekly_summary",
+                        )
+
+            _weekly_summary_task = asyncio.create_task(
+                weekly_energy_summary_task(
+                    energy_repo=energy_repo,
+                    event_log_repo=EventLogRepo(),
+                    settings=settings,
+                ),
+                name="weekly_summary",
+            )
+            _weekly_summary_task.add_done_callback(_on_weekly_summary_done)
+            logger.info("weekly_summary_task_started", component="weekly_summary")
+        except Exception:  # noqa: BLE001 — weekly summary failure must not block startup
+            logger.error(
+                "weekly_summary_task_start_failed",
+                exc_info=True,
+                component="weekly_summary",
+            )
+
         yield  # Application serves requests here
 
         # Shutdown: signal stopping so systemd resets the watchdog timer during WAL checkpoint
@@ -632,6 +667,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _pruning_task.cancel()
             try:
                 await _pruning_task
+            except asyncio.CancelledError:
+                pass
+
+        if _weekly_summary_task is not None:
+            _weekly_summary_task.cancel()
+            try:
+                await _weekly_summary_task
             except asyncio.CancelledError:
                 pass
     finally:

@@ -361,3 +361,178 @@ async def test_status_headline_fragment_active_strategy_uses_no_pass_green_fragm
     # for the selector's own DOM tree just to pin the design rule on this surface.
     assert "amber" not in lower
     assert "color-warn" not in lower
+
+
+# ---------------------------------------------------------------------------
+# Story 10.4 — weekly summary fragment route (AC8 / AC15 #29-#33)
+# ---------------------------------------------------------------------------
+
+
+_CREATE_WEEKLY_DDL = """
+    CREATE TABLE IF NOT EXISTS weekly_energy_summary (
+        id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+        window_start_utc TEXT NOT NULL,
+        window_end_utc TEXT NOT NULL,
+        peaks_avoided_count INTEGER,
+        self_consumption_ratio REAL,
+        estimated_cost_savings_eur REAL,
+        data_complete_days_count INTEGER NOT NULL DEFAULT 0,
+        insufficient_history INTEGER NOT NULL DEFAULT 1,
+        computed_at TEXT NOT NULL
+    )
+"""
+
+
+async def _ensure_weekly_summary_table() -> None:
+    conn = get_connection()
+    await conn.execute(_CREATE_WEEKLY_DDL)
+    await conn.commit()
+
+
+def _app_with_store_and_energy_repo(store: StateStore) -> FastAPI:
+    """Build a test app that wires the EnergyRepo dep. The weekly_energy_summary
+    table is created lazily by ``_ensure_weekly_summary_table()`` from each test
+    after the session_repo fixture has initialized the DB connection."""
+    app = FastAPI()
+    app.state.state_store = store
+    app.include_router(router)
+    return app
+
+
+async def test_fragment_weekly_summary_renders_insufficient_history_message_when_row_absent(
+    session_repo: SessionRepo,
+) -> None:
+    """AC15 #29: cold-start (no row) → "data is still being collected"."""
+    await _ensure_weekly_summary_table()
+    store = StateStore(system_clock_status="valid")
+    raw_token = await _create_session("homeowner")
+    app = _app_with_store_and_energy_repo(store)
+    with TestClient(app, base_url="https://test", follow_redirects=False) as client:
+        response = client.get(
+            "/fragments/homeowner/weekly-summary",
+            cookies={"session": raw_token},
+            headers={"HX-Request": "true"},
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Data is still being collected" in body
+    assert "0/7 days" in body
+    # Insufficient branch must NOT render the three metric labels.
+    assert "Peaks avoided" not in body
+    assert "Self-consumption" not in body
+    assert "Estimated savings" not in body
+
+
+async def test_fragment_weekly_summary_renders_three_metrics_when_history_sufficient(
+    session_repo: SessionRepo,
+) -> None:
+    """AC15 #30: sufficient history → three metric values rendered."""
+    from open_ems.core.energy import WeeklyEnergySummaryRow
+    from open_ems.storage.repositories.energy_repo import EnergyRepo
+
+    await _ensure_weekly_summary_table()
+    store = StateStore(system_clock_status="valid")
+    raw_token = await _create_session("homeowner")
+    app = _app_with_store_and_energy_repo(store)
+    with TestClient(app, base_url="https://test", follow_redirects=False) as client:
+        # Seed the table with a sufficient-history row.
+        await EnergyRepo().upsert_weekly_energy_summary(
+            WeeklyEnergySummaryRow(
+                window_start_utc=datetime(2026, 5, 5, 0, 0, tzinfo=UTC),
+                window_end_utc=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+                peaks_avoided_count=4,
+                self_consumption_ratio=0.72,
+                estimated_cost_savings_eur=18.50,
+                data_complete_days_count=7,
+                insufficient_history=False,
+                computed_at=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+            )
+        )
+        response = client.get(
+            "/fragments/homeowner/weekly-summary",
+            cookies={"session": raw_token},
+            headers={"HX-Request": "true"},
+        )
+
+    assert response.status_code == 200
+    body = response.text
+    assert "Peaks avoided" in body
+    assert ">4<" in body  # peaks_avoided_count
+    assert "Self-consumption" in body
+    assert "72%" in body
+    assert "Estimated savings" in body
+    assert "18.50" in body
+    assert "Data is still being collected" not in body
+
+
+async def test_fragment_weekly_summary_renders_within_200ms_on_pi4_proxy_using_in_memory_sqlite(
+    session_repo: SessionRepo,
+) -> None:
+    """AC15 #31: 10-iteration timing assertion (mean < 50ms CI proxy for 200ms Pi 4 budget)."""
+    import time
+
+    from open_ems.core.energy import WeeklyEnergySummaryRow
+    from open_ems.storage.repositories.energy_repo import EnergyRepo
+
+    await _ensure_weekly_summary_table()
+    store = StateStore(system_clock_status="valid")
+    raw_token = await _create_session("homeowner")
+    app = _app_with_store_and_energy_repo(store)
+    with TestClient(app, base_url="https://test", follow_redirects=False) as client:
+        await EnergyRepo().upsert_weekly_energy_summary(
+            WeeklyEnergySummaryRow(
+                window_start_utc=datetime(2026, 5, 5, 0, 0, tzinfo=UTC),
+                window_end_utc=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+                peaks_avoided_count=4,
+                self_consumption_ratio=0.72,
+                estimated_cost_savings_eur=18.50,
+                data_complete_days_count=7,
+                insufficient_history=False,
+                computed_at=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+            )
+        )
+        timings = []
+        for _ in range(10):
+            t0 = time.perf_counter()
+            response = client.get(
+                "/fragments/homeowner/weekly-summary",
+                cookies={"session": raw_token},
+                headers={"HX-Request": "true"},
+            )
+            timings.append(time.perf_counter() - t0)
+            assert response.status_code == 200
+
+    mean_ms = (sum(timings) / len(timings)) * 1000
+    # CI proxy: < 50ms mean. Hard contract on Pi 4 is < 200ms; CI is faster.
+    assert mean_ms < 50.0, f"weekly-summary mean response time {mean_ms:.1f}ms exceeds CI budget"
+
+
+async def test_fragment_weekly_summary_unauthenticated_returns_401(
+    session_repo: SessionRepo,
+) -> None:
+    """AC15 #32: unauthenticated HTMX request returns 401 (not redirect)."""
+    store = StateStore(system_clock_status="valid")
+    app = _app_with_store_and_energy_repo(store)
+    with TestClient(app, base_url="https://test", follow_redirects=False) as client:
+        response = client.get(
+            "/fragments/homeowner/weekly-summary",
+            headers={"HX-Request": "true"},
+        )
+    assert response.status_code == 401
+
+
+async def test_fragment_weekly_summary_installer_returns_403(
+    session_repo: SessionRepo,
+) -> None:
+    """AC15 #33: installer accessing the homeowner fragment returns 403."""
+    store = StateStore(system_clock_status="valid")
+    raw_token = await _create_session("installer")
+    app = _app_with_store_and_energy_repo(store)
+    with TestClient(app, base_url="https://test", follow_redirects=False) as client:
+        response = client.get(
+            "/fragments/homeowner/weekly-summary",
+            cookies={"session": raw_token},
+            headers={"HX-Request": "true"},
+        )
+    assert response.status_code == 403

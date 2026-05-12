@@ -1,0 +1,36 @@
+<section
+  id="weekly-summary-panel"
+  class="weekly-summary{% if insufficient_history %} weekly-summary--insufficient{% endif %}"
+  hx-get="/fragments/homeowner/weekly-summary"
+  hx-trigger="every 60s"
+  hx-swap="outerHTML"
+  aria-label="Weekly energy summary"
+  aria-live="polite"
+>
+  <h3 class="weekly-summary__heading">This week</h3>
+  {% if insufficient_history %}
+  <p class="weekly-summary__message">
+    Data is still being collected. Your weekly summary will appear once your system has been running for at least 7 full days
+    ({{ data_complete_days_count }}/7 days of data so far).
+  </p>
+  {% else %}
+  <dl class="weekly-summary__metrics">
+    <div class="weekly-summary__metric">
+      <dt>Peaks avoided</dt>
+      <dd>{{ peaks_avoided_count }}</dd>
+    </div>
+    <div class="weekly-summary__metric">
+      <dt>Self-consumption</dt>
+      <dd>{{ self_consumption_percent }}%</dd>
+    </div>
+    <div class="weekly-summary__metric">
+      <dt>Estimated savings</dt>
+      <dd>&euro;&nbsp;{{ "%.2f"|format(estimated_cost_savings_eur) }}</dd>
+    </div>
+  </dl>
+  <p class="weekly-summary__footnote">
+    For the 7 days ending {{ window_end_utc_date }}.
+    Estimated savings use a default tariff &mdash; check with your supplier for exact figures.
+  </p>
+  {% endif %}
+</section>

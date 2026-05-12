@@ -120,3 +120,57 @@ async def test_homeowner_dashboard_route_responds_quickly(session_repo: SessionR
     assert average_ms < 200.0, (
         f"homeowner dashboard shell route average {average_ms:.1f}ms exceeded 200ms ceiling"
     )
+
+
+# ── Story 10.4 — AC13 structural assertions (dashboard non-interference) ──
+
+
+async def test_homeowner_dashboard_shell_renders_weekly_summary_trigger_outside_dashboard_stack(
+    session_repo: SessionRepo,
+) -> None:
+    """AC13 #1 / AC15 #37: the "This week" trigger lives OUTSIDE .dashboard-stack
+    so it does NOT contribute to the five-HTMX-bound-sections count enforced by
+    test_homeowner_dashboard_shell_renders_five_htmx_bound_sections."""
+    store = StateStore(system_clock_status="valid")
+    raw_token = await _create_session("homeowner")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+    response = client.get("/homeowner/dashboard", cookies={"session": raw_token})
+    assert response.status_code == 200
+    body = response.text
+    # The trigger exists.
+    assert "weekly-summary-trigger" in body
+    assert 'hx-get="/fragments/homeowner/weekly-summary"' in body
+    # And the dashboard stack closes BEFORE the trigger opens — i.e., the trigger
+    # is a sibling of (not descendant of) .dashboard-stack. Validate by string
+    # ordering: the closing </section> of .dashboard-stack appears before the
+    # opening of .weekly-summary-trigger.
+    dashboard_stack_open = body.index("dashboard-stack")
+    trigger_open = body.index("weekly-summary-trigger")
+    assert dashboard_stack_open < trigger_open
+    # AC10 invariant: the polling-section count is exactly 5 (the trigger uses
+    # hx-trigger="click once" — distinct from the every-10s pattern).
+    assert body.count('hx-trigger="load, every 10s"') == 5
+
+
+async def test_homeowner_dashboard_render_does_not_query_weekly_summary_table(
+    session_repo: SessionRepo,
+) -> None:
+    """AC13 #2 / AC15 #38: GET /homeowner/dashboard must NOT trigger a read against
+    the weekly_energy_summary table. The trigger button is HTMX-loaded on click,
+    not server-rendered with data."""
+    from unittest.mock import patch
+
+    store = StateStore(system_clock_status="valid")
+    raw_token = await _create_session("homeowner")
+    client = TestClient(_app_with_store(store), base_url="https://test", follow_redirects=False)
+
+    with patch(
+        "open_ems.storage.repositories.energy_repo.EnergyRepo.read_weekly_energy_summary",
+        side_effect=AssertionError(
+            "weekly_energy_summary must NOT be queried at dashboard render time"
+        ),  # noqa: E501  # fmt: skip
+    ) as mock_read:
+        response = client.get("/homeowner/dashboard", cookies={"session": raw_token})
+
+    assert response.status_code == 200
+    mock_read.assert_not_called()

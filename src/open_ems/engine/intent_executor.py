@@ -69,12 +69,20 @@ class IntentExecutor:
             )
             return None
         rate_kw = intent.target_power_kw if intent.target_power_kw is not None else 0.0
+        # Story 10.4 AC14: forward source_rule from the resolved CandidateAction to
+        # the command so RetryPolicy's success-audit detail carries the rule
+        # provenance. The weekly-summary aggregator queries event_log on this field
+        # to count peak-limiting interventions.
+        source_rule = (
+            intent.source_candidate.source_rule if intent.source_candidate is not None else None
+        )
         if intent.action is BatteryIntentAction.charge:
             return SetBatteryChargeRateCommand(
                 device_id=snapshot.battery.device_id,
                 device_role=DeviceRole.battery,
                 origin=CommandOrigin.decision_engine,
                 rate_kw=rate_kw,
+                source_rule=source_rule,
             )
         if intent.action is BatteryIntentAction.discharge:
             return SetBatteryDischargeRateCommand(
@@ -82,6 +90,7 @@ class IntentExecutor:
                 device_role=DeviceRole.battery,
                 origin=CommandOrigin.decision_engine,
                 rate_kw=rate_kw,
+                source_rule=source_rule,
             )
         raise ValueError(f"Unhandled BatteryIntentAction: {intent.action!r}")
 
@@ -99,6 +108,10 @@ class IntentExecutor:
                 component="engine",
             )
             return None
+        # Story 10.4 AC14: forward source_rule from the resolved CandidateAction.
+        source_rule = (
+            intent.source_candidate.source_rule if intent.source_candidate is not None else None
+        )
         if intent.action is EVChargerIntentAction.charge:
             rate_kw = (
                 intent.target_charge_rate_kw if intent.target_charge_rate_kw is not None else 0.0
@@ -108,11 +121,13 @@ class IntentExecutor:
                 device_role=DeviceRole.ev_charger,
                 origin=CommandOrigin.decision_engine,
                 rate_kw=rate_kw,
+                source_rule=source_rule,
             )
         if intent.action is EVChargerIntentAction.stop:
             return StopEVChargingCommand(
                 device_id=snapshot.ev_charger.device_id,
                 device_role=DeviceRole.ev_charger,
                 origin=CommandOrigin.decision_engine,
+                source_rule=source_rule,
             )
         raise ValueError(f"Unhandled EVChargerIntentAction: {intent.action!r}")

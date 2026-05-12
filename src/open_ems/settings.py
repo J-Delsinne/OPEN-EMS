@@ -71,6 +71,30 @@ class Settings(BaseSettings):
     # dispatch task). Tighter than EV-override timeout because the server-side
     # path is a single StateStore write + audit + headline render (~50ms).
     strategy_update_confirmation_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    # Story 10.4 — Weekly energy summary (FR30).
+    # Cadence at which WeeklyEnergySummaryService re-aggregates the single
+    # weekly_energy_summary row. Default 1 hour: trade-off between summary
+    # freshness (homeowner sees ≤1h-stale values) and DB write load. Bounded
+    # [5 min, 24 h]. First aggregation runs immediately at startup so the
+    # absent-row window is bounded to ~seconds, not the full interval.
+    weekly_summary_aggregation_interval_seconds: int = Field(default=3600, ge=300, le=86400)
+    # Default import tariff (EUR per kWh) used to estimate self-consumption
+    # savings when no per-site tariff configuration exists. Belgian-residential
+    # 2026 reference range is roughly 0.25–0.40 EUR/kWh; default 0.30 is the
+    # midpoint. NOT a per-site value in v1 — site-specific tariffs land in
+    # Epic 13 (external optimization data) along with dynamic-tariff feeds.
+    default_import_tariff_eur_per_kwh: float = Field(default=0.30, gt=0.0, le=2.0)
+    # Default export tariff (EUR per kWh). Belgian-residential 2026 post-
+    # prosumer-reform: typically near zero; default 0.05 covers the marginal
+    # injection compensation. Bounded [0, 2.0]; SHOULD be ≤ import tariff
+    # (an export tariff above import would imply free arbitrage) but the
+    # constraint is documented rather than model-enforced for v1 simplicity.
+    default_export_tariff_eur_per_kwh: float = Field(default=0.05, ge=0.0, le=2.0)
+    # Minimum number of complete-quality 15-min intervals per UTC day for that
+    # day to count toward data_complete_days_count. 80 = ~80% of the 96 daily
+    # intervals (24h × 4); tolerates ≤19 missing/incomplete intervals/day so a
+    # transient adapter outage does not invalidate the day. Bounded [1, 96].
+    weekly_summary_min_intervals_per_complete_day: int = Field(default=80, ge=1, le=96)
 
 
 _settings: Settings | None = None

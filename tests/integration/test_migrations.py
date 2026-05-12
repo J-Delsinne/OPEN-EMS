@@ -222,6 +222,111 @@ def test_migration_0012_round_trips(tmp_path: pathlib.Path) -> None:
     """Story 9.4 AC1: migration 0012 upgrades + downgrades cleanly."""
     db_url = f"sqlite:///{tmp_path / 'roundtrip_0012.db'}"
     alembic_command.upgrade(_make_cfg(db_url), "head")
+    # Story 10.4 added 0013 on top of 0012 — go back two steps so 0012's
+    # round-trip is exercised, then re-stack on top.
+    alembic_command.downgrade(_make_cfg(db_url), "-2")
+    alembic_command.upgrade(_make_cfg(db_url), "head")
+
+
+def test_migration_0013_creates_energy_flow_intervals_and_weekly_energy_summary_tables_with_check_constraints(  # noqa: E501  # fmt: skip
+    tmp_path: pathlib.Path,
+) -> None:
+    """Story 10.4 AC1 + AC2: migration 0013 creates both tables with CHECK constraints."""
+    db_path = tmp_path / "migration_0013_test.db"
+    alembic_command.upgrade(_make_cfg(f"sqlite:///{db_path}"), "head")
+
+    with sqlite3.connect(db_path) as conn:
+        flow_columns = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(energy_flow_intervals)").fetchall()
+        }
+        flow_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(energy_flow_intervals)").fetchall()
+        }
+        summary_columns = {
+            row[1]: row[2]
+            for row in conn.execute("PRAGMA table_info(weekly_energy_summary)").fetchall()
+        }
+
+    assert flow_columns == {
+        "interval_start_utc": "TEXT",
+        "pv_kwh": "FLOAT",
+        "battery_charged_kwh": "FLOAT",
+        "battery_discharged_kwh": "FLOAT",
+        "grid_imported_kwh": "FLOAT",
+        "grid_exported_kwh": "FLOAT",
+        "ev_charged_kwh": "FLOAT",
+        "sample_count": "INTEGER",
+        "data_quality": "TEXT",
+    }
+    assert "ix_energy_flow_intervals_interval_start_utc" in flow_indexes
+
+    assert summary_columns == {
+        "id": "INTEGER",
+        "window_start_utc": "TEXT",
+        "window_end_utc": "TEXT",
+        "peaks_avoided_count": "INTEGER",
+        "self_consumption_ratio": "FLOAT",
+        "estimated_cost_savings_eur": "FLOAT",
+        "data_complete_days_count": "INTEGER",
+        "insufficient_history": "INTEGER",
+        "computed_at": "TEXT",
+    }
+
+    # Single-row CHECK on weekly_energy_summary (id=1).
+    with sqlite3.connect(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="ck_weekly_energy_summary_single_row"):
+            conn.execute(
+                "INSERT INTO weekly_energy_summary"
+                " (id, window_start_utc, window_end_utc, data_complete_days_count,"
+                "  insufficient_history, computed_at)"
+                " VALUES (2, '2026-05-05T00:00:00+00:00', '2026-05-12T00:00:00+00:00',"
+                "         0, 1, '2026-05-12T00:00:00+00:00')"
+            )
+
+    # Negative kWh rejected on energy_flow_intervals.
+    with sqlite3.connect(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="ck_energy_flow_intervals_nonneg"):
+            conn.execute(
+                "INSERT INTO energy_flow_intervals (interval_start_utc, pv_kwh) VALUES (?, ?)",
+                ("2026-05-12T00:00:00+00:00", -1.0),
+            )
+
+    # terminal-fields-iff-history-sufficient: insufficient_history=0 with NULL metrics is rejected.
+    with sqlite3.connect(db_path) as conn:
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="ck_weekly_energy_summary_terminal_fields_iff_history_sufficient",
+        ):
+            conn.execute(
+                "INSERT INTO weekly_energy_summary"
+                " (id, window_start_utc, window_end_utc, peaks_avoided_count,"
+                "  self_consumption_ratio, estimated_cost_savings_eur,"
+                "  data_complete_days_count, insufficient_history, computed_at)"
+                " VALUES (1, '2026-05-05T00:00:00+00:00', '2026-05-12T00:00:00+00:00',"
+                "         NULL, NULL, NULL, 7, 0, '2026-05-12T00:00:00+00:00')"
+            )
+
+    # self_consumption_ratio out of [0, 1] rejected.
+    with sqlite3.connect(db_path) as conn:
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="ck_weekly_energy_summary_terminal_fields_iff_history_sufficient",
+        ):
+            conn.execute(
+                "INSERT INTO weekly_energy_summary"
+                " (id, window_start_utc, window_end_utc, peaks_avoided_count,"
+                "  self_consumption_ratio, estimated_cost_savings_eur,"
+                "  data_complete_days_count, insufficient_history, computed_at)"
+                " VALUES (1, '2026-05-05T00:00:00+00:00', '2026-05-12T00:00:00+00:00',"
+                "         5, 1.5, 10.0, 7, 0, '2026-05-12T00:00:00+00:00')"
+            )
+
+
+def test_migration_0013_round_trips(tmp_path: pathlib.Path) -> None:
+    """Story 10.4 AC1: migration 0013 upgrades + downgrades cleanly."""
+    db_url = f"sqlite:///{tmp_path / 'roundtrip_0013.db'}"
+    alembic_command.upgrade(_make_cfg(db_url), "head")
     alembic_command.downgrade(_make_cfg(db_url), "-1")
     alembic_command.upgrade(_make_cfg(db_url), "head")
 

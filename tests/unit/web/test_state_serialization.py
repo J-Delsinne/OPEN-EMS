@@ -833,3 +833,82 @@ def test_resolve_failure_reason_plain_covers_every_policy_guard_rejection_reason
     )
     missing = (direct_reasons | inline_reasons | structured) - covered
     assert not missing, f"PolicyGuard rejection reasons missing from UX map: {missing}"
+
+
+# ── Story 10.4: build_homeowner_weekly_summary_context (AC8 + AC15 #34-#36) ──
+
+
+def test_build_homeowner_weekly_summary_context_returns_insufficient_history_when_row_is_None() -> None:  # noqa: E501  # fmt: skip
+    """AC15 #34: None row → insufficient-history branch with 0/7 days."""
+    from open_ems.web.state_serialization import build_homeowner_weekly_summary_context
+
+    ctx = build_homeowner_weekly_summary_context(None)
+    assert ctx["insufficient_history"] is True
+    assert ctx["data_complete_days_count"] == 0
+    assert ctx["computed_at"] is None
+
+
+def test_build_homeowner_weekly_summary_context_returns_insufficient_history_when_row_has_flag_set() -> None:  # noqa: E501  # fmt: skip
+    """AC15 #34 (variant): row with insufficient_history=True maps to insufficient-history branch."""  # noqa: E501  # fmt: skip
+    from datetime import UTC, datetime
+
+    from open_ems.core.energy import WeeklyEnergySummaryRow
+    from open_ems.web.state_serialization import build_homeowner_weekly_summary_context
+
+    row = WeeklyEnergySummaryRow(
+        window_start_utc=datetime(2026, 5, 5, 0, 0, tzinfo=UTC),
+        window_end_utc=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+        data_complete_days_count=4,
+        insufficient_history=True,
+        computed_at=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+    )
+    ctx = build_homeowner_weekly_summary_context(row)
+    assert ctx["insufficient_history"] is True
+    assert ctx["data_complete_days_count"] == 4
+    assert ctx["computed_at"] == "2026-05-12T00:00:00+00:00"
+
+
+def test_build_homeowner_weekly_summary_context_converts_ratio_to_integer_percent_for_display() -> None:  # noqa: E501  # fmt: skip
+    """AC15 #35: self_consumption_ratio (0.0-1.0) is converted to an integer percent."""
+    from datetime import UTC, datetime
+
+    from open_ems.core.energy import WeeklyEnergySummaryRow
+    from open_ems.web.state_serialization import build_homeowner_weekly_summary_context
+
+    row = WeeklyEnergySummaryRow(
+        window_start_utc=datetime(2026, 5, 5, 0, 0, tzinfo=UTC),
+        window_end_utc=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+        peaks_avoided_count=3,
+        self_consumption_ratio=0.725,
+        estimated_cost_savings_eur=15.50,
+        data_complete_days_count=7,
+        insufficient_history=False,
+        computed_at=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+    )
+    ctx = build_homeowner_weekly_summary_context(row)
+    assert ctx["insufficient_history"] is False
+    # 0.725 × 100 = 72.5 → round() to 72 (banker's rounding in Python).
+    assert ctx["self_consumption_percent"] == 72
+
+
+def test_build_homeowner_weekly_summary_context_passes_eur_through_unrounded_for_template_format() -> None:  # noqa: E501  # fmt: skip
+    """AC15 #36: estimated_cost_savings_eur is the raw float — the template formats it
+    with %.2f|format."""
+    from datetime import UTC, datetime
+
+    from open_ems.core.energy import WeeklyEnergySummaryRow
+    from open_ems.web.state_serialization import build_homeowner_weekly_summary_context
+
+    row = WeeklyEnergySummaryRow(
+        window_start_utc=datetime(2026, 5, 5, 0, 0, tzinfo=UTC),
+        window_end_utc=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+        peaks_avoided_count=3,
+        self_consumption_ratio=0.5,
+        estimated_cost_savings_eur=12.345,
+        data_complete_days_count=7,
+        insufficient_history=False,
+        computed_at=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),
+    )
+    ctx = build_homeowner_weekly_summary_context(row)
+    assert ctx["estimated_cost_savings_eur"] == 12.345  # passed unrounded; template formats
+    assert ctx["window_end_utc_date"] == "2026-05-12"

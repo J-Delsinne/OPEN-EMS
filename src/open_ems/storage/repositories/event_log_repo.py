@@ -57,6 +57,40 @@ class EventLogRepo:
     def delete(self, *args: object, **kwargs: object) -> None:
         raise RuntimeError("event_log is append-only")
 
+    async def count_peak_limiting_applied_decisions(
+        self,
+        *,
+        since: datetime,
+        until: datetime,
+    ) -> int:
+        """Story 10.4 AC14: count DECISION rows in [since, until] with
+        ``source_rule="peak_limiting"`` AND ``applied=true`` in the JSON detail.
+
+        Uses double LIKE on the JSON-serialized detail blob. Acceptable here
+        because event_log volume is bounded by retention (90 days default) and
+        this method is invoked at most once per ``weekly_summary_aggregation_interval_seconds``
+        (default 1h), not on every page render. The single weekly_energy_summary
+        row caches the result for the homeowner endpoint."""
+        if since.tzinfo is None or since.utcoffset() is None:
+            raise ValueError("since must be timezone-aware (UTC)")
+        if until.tzinfo is None or until.utcoffset() is None:
+            raise ValueError("until must be timezone-aware (UTC)")
+        async with self._conn.execute(
+            "SELECT COUNT(*) FROM event_log"
+            " WHERE event_type = 'DECISION'"
+            " AND timestamp >= ?"
+            " AND timestamp < ?"
+            ' AND detail LIKE \'%"source_rule": "peak_limiting"%\''
+            " AND detail LIKE '%\"applied\": true%'",
+            (
+                since.astimezone(UTC).isoformat(),
+                until.astimezone(UTC).isoformat(),
+            ),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        return int(row[0])
+
     async def prune_expired(self, *, retention_days: int = 90) -> int:
         """Delete non-critical entries older than retention_days. Returns count deleted."""
         if retention_days < 1:

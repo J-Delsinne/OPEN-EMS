@@ -43,14 +43,18 @@ import structlog
 from pydantic import ValidationError
 
 from open_ems.core import (
+    BatteryState,
     DegradedDeviceState,
     DeviceAdapter,
     DeviceRole,
+    EVChargerState,
     GridMeterState,
+    InverterState,
     StateStore,
     SystemOperatingMode,
     SystemSnapshot,
 )
+from open_ems.core.energy import CompletedEnergyFlowInterval as _CoreCompletedEnergyFlowInterval
 from open_ems.core.state import DeviceSlot
 from open_ems.engine import (
     BatteryControlContext,
@@ -60,6 +64,7 @@ from open_ems.engine import (
     PartialIntervalTracker,
     evaluate_cycle,
 )
+from open_ems.engine.energy_flow_tracker import EnergyFlowIntervalTracker
 from open_ems.engine.intent_executor import IntentExecutor
 from open_ems.engine.retry_policy import RetryPolicy
 from open_ems.services.active_constraints import ActiveConstraintsProvider
@@ -117,6 +122,11 @@ class ControlLoop:
         self._observability = observability
         self._active_constraints = active_constraints
         self._tracker = PartialIntervalTracker.from_current_time(at=datetime.now(UTC))
+        # Story 10.4: sibling tracker for per-15-min energy-flow accumulation.
+        # Shares the same 15-min clock-aligned boundary as ``_tracker``.
+        self._energy_flow_tracker = EnergyFlowIntervalTracker.from_current_time(
+            at=datetime.now(UTC)
+        )
         self._monthly_peak_kw = initial_monthly_peak_kw
         self._last_mode: SystemOperatingMode | None = None
         self._fail_safe_entry_degraded_roles: frozenset[DeviceRole] = frozenset()
@@ -182,8 +192,59 @@ class ControlLoop:
                 if completed.sample_count > 0 and tick_quality == "complete"
                 else "incomplete"
             )
+            # Story 10.4 AC5: peak FIRST, energy-flow SECOND — load-bearing
+            # ordering. A failure in the energy-flow write must NOT regress the
+            # peak persistence path. The PartialIntervalTracker rollover and the
+            # EnergyFlowIntervalTracker rollover SHARE the same 15-min clock
+            # boundaries by construction, so both rollovers fire on the same tick.
             await self._energy_repo.write_peak_interval(completed, data_quality=persist_quality)
             self._monthly_peak_kw = await self._energy_repo.get_current_monthly_peak_kw()
+
+        # Story 10.4 AC5: energy-flow tracker fed every tick with all four power
+        # signals + the two monotonic grid accumulators. None on any signal marks
+        # the interval data_quality='incomplete'; any role degraded does the same.
+        pv_power_kw = _extract_pv_power(device_states)
+        battery_power_kw = _extract_battery_power(device_states)
+        ev_power_kw = _extract_ev_power(device_states)
+        grid_delivered_kwh, grid_returned_kwh = _extract_grid_accumulators(device_states)
+        any_role_degraded = any(
+            (
+                isinstance(device_states.get(role), DegradedDeviceState)
+                or device_states.get(role) is None
+            )
+            for role in DeviceRole
+        )
+        flow_completed = self._energy_flow_tracker.update(
+            at=now,
+            pv_power_kw=pv_power_kw,
+            battery_power_kw=battery_power_kw,
+            ev_power_kw=ev_power_kw,
+            grid_delivered_kwh=grid_delivered_kwh,
+            grid_returned_kwh=grid_returned_kwh,
+            any_role_degraded=any_role_degraded,
+        )
+        if flow_completed is not None:
+            try:
+                await self._energy_repo.write_energy_flow_interval(
+                    _CoreCompletedEnergyFlowInterval(
+                        interval_start_utc=flow_completed.interval_start_utc,
+                        pv_kwh=flow_completed.pv_kwh,
+                        battery_charged_kwh=flow_completed.battery_charged_kwh,
+                        battery_discharged_kwh=flow_completed.battery_discharged_kwh,
+                        grid_imported_kwh=flow_completed.grid_imported_kwh,
+                        grid_exported_kwh=flow_completed.grid_exported_kwh,
+                        ev_charged_kwh=flow_completed.ev_charged_kwh,
+                        sample_count=flow_completed.sample_count,
+                        data_quality=flow_completed.data_quality,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — energy-flow write failure must not crash the loop
+                logger.error(
+                    "energy_flow_write_failed",
+                    component="engine",
+                    interval_start_utc=flow_completed.interval_start_utc.isoformat(),
+                    exc_info=True,
+                )
 
     def _build_evaluation_input(
         self,
@@ -341,6 +402,46 @@ def _extract_grid_power(
     if isinstance(slot, GridMeterState):
         return slot.grid_power_kw, "complete"
     return 0.0, "incomplete"
+
+
+def _extract_pv_power(device_states: Mapping[DeviceRole, DeviceSlot]) -> float | None:
+    """Return ``InverterState.pv_power_kw`` or ``None`` if the role is absent / degraded."""
+    slot = device_states.get(DeviceRole.inverter)
+    if isinstance(slot, InverterState):
+        return slot.pv_power_kw
+    return None
+
+
+def _extract_battery_power(device_states: Mapping[DeviceRole, DeviceSlot]) -> float | None:
+    """Return ``BatteryState.battery_power_kw`` (signed) or ``None`` if absent / degraded."""
+    slot = device_states.get(DeviceRole.battery)
+    if isinstance(slot, BatteryState):
+        return slot.battery_power_kw
+    return None
+
+
+def _extract_ev_power(device_states: Mapping[DeviceRole, DeviceSlot]) -> float | None:
+    """Return ``EVChargerState.current_power_kw`` or ``None`` if absent / degraded.
+
+    ``EVChargerState.current_power_kw`` is itself ``float | None`` (no meter-values yet);
+    a non-``None`` ``EVChargerState`` with ``current_power_kw=None`` returns ``None``
+    here so the tracker treats EV power as absent for that tick (marks interval
+    'incomplete')."""
+    slot = device_states.get(DeviceRole.ev_charger)
+    if isinstance(slot, EVChargerState):
+        return slot.current_power_kw
+    return None
+
+
+def _extract_grid_accumulators(
+    device_states: Mapping[DeviceRole, DeviceSlot],
+) -> tuple[float | None, float | None]:
+    """Return ``(energy_delivered_kwh, energy_returned_kwh)`` or ``(None, None)`` if
+    grid meter is absent / degraded."""
+    slot = device_states.get(DeviceRole.grid_meter)
+    if isinstance(slot, GridMeterState):
+        return slot.energy_delivered_kwh, slot.energy_returned_kwh
+    return None, None
 
 
 def _format_degraded_roles(roles: frozenset[DeviceRole]) -> str:

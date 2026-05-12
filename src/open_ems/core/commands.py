@@ -78,6 +78,18 @@ class DeviceCommandBase(BaseModel):
     device_role: DeviceRole
     origin: CommandOrigin
     correlation_id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    # Story 10.4 AC14: propagate the originating rule name (e.g. "peak_limiting",
+    # "strategy_minimize_cost") from the decision engine through the IntentExecutor
+    # to RetryPolicy's audit detail. Enables the weekly-summary aggregator to count
+    # peak-limiting interventions via an event_log query without inferring rule
+    # provenance from command_type alone.
+    #
+    # ``None`` is acceptable for:
+    #   - homeowner-originated commands (e.g. EV override route): no rule context.
+    #   - installer-originated commands: no rule context.
+    # The decision-engine path SHOULD populate this from the resolved
+    # ``CandidateAction.source_rule``.
+    source_rule: str | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         # Force every concrete command subtype to declare ``is_idempotent`` in its OWN

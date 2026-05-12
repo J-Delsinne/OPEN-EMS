@@ -426,3 +426,28 @@ _Four deferred items from the `bmad-code-review` run on 2026-05-12 (fifth proof-
 - **Audit row's `previous_strategy` field is stale under concurrent set-strategy POSTs (lock-free `get_snapshot()` read happens BEFORE the writer-lock-protected mutator)** [MEDIUM — from Edge Case Hunter — acceptable-post-story-10-3] [`src/open_ems/web/routes/actions.py:370-385`] — Two near-simultaneous POSTs T1 (`A→B`) and T2 (`A→C` from T2's stale read) both observe `previous=A`; T2's audit logs `previous=A, new=C` but the actual mutation moment was `B→C`. Forensic reconstruction becomes ambiguous; intermediate state B is invisible in the audit. Mitigations: either (a) change `set_active_strategy` signature to return `(mutated, previous)` as a tuple captured in-lock, or (b) accept and document the audit-interpretation. Bundle with the broader audit-trail concurrency review during Epic 11 observability work; same class as the deferred `_safe_audit` items below.
 - **`_safe_audit` runs AFTER mutator commits; process kill in the ~5ms window between mutation and audit emission leaves an un-auditable strategy change** [MEDIUM — from Blind Hunter — acceptable-post-story-10-3] [`src/open_ems/web/routes/actions.py:382-397`] — Same pattern as the 10.2 EV-override audit path; pre-existing audit-trail SLO concern that applies to every CONTROL-class audit emission in `_safe_audit` callers. Bundle with the 10.2-deferred `_safe_audit blocks on serial DB INSERTs in the homeowner hot path` item ([`src/open_ems/web/routes/actions.py:73-82, 140-154`]) during a future audit-resilience pass. The fix surface includes either (a) audit-before-mutate with idempotent semantics, (b) mutator+audit in a single SQLite transaction with state journaled to a write-ahead log, or (c) accepted-bounded-risk + monitoring on audit-row-vs-snapshot drift.
 - **`_TEMPLATES_DIR` + module-global `_templates = Jinja2Templates(...)` in `actions.py` creates a second Jinja environment disjoint from `fragments.py`'s `_templates`** [LOW — from Blind Hunter — acceptable-post-story-10-3] [`src/open_ems/web/routes/actions.py:212-213`] — Pre-existing 10.2 pattern. Two consequences: (a) future global filters / helpers registered on one env won't propagate to the other, silently 500-ing routes that depend on them; (b) memory/cache duplication. Cleaner approach is `request.app.state.templates` (single Jinja env wired up at lifespan); requires a project-wide template-init consolidation. Bundle with the broader templating singleton work during Epic 11 or Epic 12.
+
+## Carry-over sub-stories from: code review of 10-4-implement-fr30-weekly-energy-summary-as-non-blocking-pre-aggregated-secondary-feature (2026-05-12)
+
+### 10-Y-a-weekly-summary-lifespan-test-coverage [LOW — from R-Defer-1 — acceptable-post-epic-10]
+
+**Source:** Story 10.4 review-deferred (`### Review Findings` → `#### Deferred (1)`).
+**Citation:** `tests/integration/web/test_weekly_summary_lifespan.py` — file does not exist.
+
+**What:** Story 10.4 Task 7.3 (Dev Tasks) promised an integration test
+`test_weekly_summary_task_started_at_lifespan_and_cancelled_at_shutdown` to structurally verify the lifespan-level invariants for the weekly-summary aggregator task:
+1. Task is created via `asyncio.create_task(weekly_energy_summary_task(...), name="weekly_summary")` at startup.
+2. `_on_weekly_summary_done` done-callback fires on crash (mirrors `_on_pruning_done`).
+3. `_weekly_summary_task.cancel()` + `await _weekly_summary_task` in the lifespan shutdown finally-block cleanly propagates `CancelledError`.
+
+AC15 #43 (`test_weekly_summary_e2e_aggregator_writes_row_immediately_at_first_invocation`) exercises `_compute_and_upsert_weekly_summary` directly, but does NOT cover the lifespan task wiring (creation, done-callback wiring, shutdown cancel-and-await). The structural contract is in code at `web/app.py:586-615` and `web/app.py:674-679` but is not enforced by a test.
+
+**Why deferred (not patched in-cycle):** The implementation is verified by code reading and mirrors the proven `_pruning_task` / `_cleanup_task` patterns. The risk of regression is low (any future refactor that drops the task creation or shutdown cancel would also break the lifespan smoke tests for adjacent background tasks). Writing the test now would require lifespan-fixture setup that the existing integration tests have not yet generalized — out of scope for a code-review-cycle patch.
+
+**Classification:** `acceptable-post-epic-10`. Epic 11 (installer monitoring) or an Epic-10/11 hardening sweep is the natural home — bundle with the systemic polling-stops-after-outerHTML-swap fix (10-3 deferred D1) since both are HTMX-/lifespan-test-hardening concerns.
+
+**Acceptance:** Create `tests/integration/web/test_weekly_summary_lifespan.py::test_weekly_summary_task_started_at_lifespan_and_cancelled_at_shutdown` that:
+- Boots the FastAPI app via `lifespan(app)` against an in-memory SQLite.
+- Asserts `_weekly_summary_task` is created and visible via `asyncio.all_tasks()` (or a state attribute on `app.state`) during the yield window.
+- Triggers shutdown, asserts the task is cancelled cleanly (no exception escapes the lifespan).
+- Asserts a `weekly_summary_task_died` log is emitted if the task crashes (via patched aggregator that raises a non-`Exception` once).

@@ -9,9 +9,11 @@ from fastapi.templating import Jinja2Templates
 from open_ems.core import StateStore
 from open_ems.core.constraints import ActiveConstraints
 from open_ems.settings import Settings
+from open_ems.storage.repositories.energy_repo import EnergyRepo
 from open_ems.web.dependencies import (
     HomeownerUser,
     get_active_constraints_optional,
+    get_energy_repo,
     get_settings_dep,
     get_state_store,
     require_homeowner,
@@ -21,6 +23,7 @@ from open_ems.web.state_serialization import (
     build_homeowner_card_context,
     build_homeowner_ev_card_context,
     build_homeowner_headline_context,
+    build_homeowner_weekly_summary_context,
 )
 
 router = APIRouter()
@@ -126,5 +129,29 @@ async def homeowner_status_headline(
     return _templates.TemplateResponse(
         request,
         "fragments/homeowner/status-headline.html",
+        context,
+    )
+
+
+@router.get("/fragments/homeowner/weekly-summary", response_class=HTMLResponse)
+async def homeowner_weekly_summary(
+    request: Request,
+    _user: HomeownerUser = Depends(require_homeowner),  # noqa: B008
+    energy_repo: EnergyRepo = Depends(get_energy_repo),  # noqa: B008
+) -> HTMLResponse:
+    """Story 10.4 AC8: pre-aggregated weekly energy summary.
+
+    Single indexed read from ``weekly_energy_summary`` + template render. NO
+    live computation, NO heavy on-demand query — the aggregator pre-computes the
+    row periodically (``weekly_summary_aggregation_interval_seconds`` cadence).
+
+    The 200ms-on-Pi-4 budget is the AC's hard performance contract; the
+    implementation path here is one SELECT WHERE id=1 + Jinja render.
+    """
+    row = await energy_repo.read_weekly_energy_summary()
+    context = build_homeowner_weekly_summary_context(row)
+    return _templates.TemplateResponse(
+        request,
+        "fragments/homeowner/weekly-summary.html",
         context,
     )
