@@ -11,6 +11,7 @@ import pytest_asyncio
 import open_ems.storage.repositories.event_log_repo as event_log_repo_module
 from open_ems.storage.repositories.event_log_repo import (
     _CRITICAL_EVENT_TYPES,
+    EventLogEntry,
     EventLogRepo,
 )
 
@@ -273,3 +274,120 @@ async def test_prune_expired_mixed_entries_only_deletes_old_non_critical(
 
     assert deleted == 1
     assert await _event_types(conn) == ["CONSTRAINT", "SYSTEM"]
+
+
+# ── Story 11.1 AC6 — list_recent + EventLogEntry ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_recent_returns_empty_list_on_empty_table(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: empty event_log returns []."""
+    repo, _ = repo_with_conn
+    result = await repo.list_recent(limit=5)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_recent_honors_limit(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: limit caps the result set length."""
+    repo, conn = repo_with_conn
+    for i in range(10):
+        await _insert_entry(conn, event_type="SYSTEM", timestamp=_NOW - timedelta(minutes=i))
+    result = await repo.list_recent(limit=3)
+    assert len(result) == 3
+
+
+@pytest.mark.asyncio
+async def test_list_recent_orders_by_timestamp_desc(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: newest first."""
+    repo, conn = repo_with_conn
+    await _insert_entry(conn, event_type="SYSTEM", timestamp=_NOW - timedelta(minutes=3))
+    await _insert_entry(conn, event_type="DECISION", timestamp=_NOW - timedelta(minutes=1))
+    await _insert_entry(conn, event_type="DEVICE", timestamp=_NOW - timedelta(minutes=2))
+    result = await repo.list_recent(limit=5)
+    assert [entry.event_type for entry in result] == ["DECISION", "DEVICE", "SYSTEM"]
+
+
+@pytest.mark.asyncio
+async def test_list_recent_ties_broken_by_id_desc(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: same-millisecond ties broken by id DESC (load-bearing tie-breaker)."""
+    repo, conn = repo_with_conn
+    same_ts = _NOW - timedelta(minutes=1)
+    await _insert_entry(conn, event_type="FIRST", timestamp=same_ts)
+    await _insert_entry(conn, event_type="SECOND", timestamp=same_ts)
+    await _insert_entry(conn, event_type="THIRD", timestamp=same_ts)
+    result = await repo.list_recent(limit=5)
+    # Newest id (THIRD inserted last) appears first.
+    assert [entry.event_type for entry in result] == ["THIRD", "SECOND", "FIRST"]
+
+
+@pytest.mark.asyncio
+async def test_list_recent_populates_all_event_log_entry_fields(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: every column round-trips into EventLogEntry."""
+    repo, _ = repo_with_conn
+    ts = _NOW - timedelta(minutes=2)
+    await repo.append(
+        schema_version=1,
+        timestamp=ts,
+        actor="installer",
+        event_type="INSTALLER",
+        summary="Test note from installer",
+        detail={"kind": "manual"},
+        device_id="dev-1",
+        config_version="v3",
+    )
+    [entry] = await repo.list_recent(limit=1)
+    assert entry.id >= 1
+    assert entry.schema_version == 1
+    assert entry.timestamp == ts
+    assert entry.actor == "installer"
+    assert entry.event_type == "INSTALLER"
+    assert entry.summary == "Test note from installer"
+    assert entry.detail_json is not None and '"kind": "manual"' in entry.detail_json
+    assert entry.device_id == "dev-1"
+    assert entry.config_version == "v3"
+
+
+@pytest.mark.asyncio
+async def test_list_recent_returns_none_for_null_optional_columns(
+    repo_with_conn: tuple[EventLogRepo, aiosqlite.Connection],
+) -> None:
+    """AC6: NULL device_id / detail / config_version → None in the model."""
+    repo, conn = repo_with_conn
+    await _insert_entry(conn, event_type="SYSTEM", timestamp=_NOW)
+    [entry] = await repo.list_recent(limit=1)
+    assert entry.detail_json is None
+    assert entry.device_id is None
+    assert entry.config_version is None
+
+
+@pytest.mark.asyncio
+async def test_list_recent_rejects_zero_or_negative_limit() -> None:
+    """AC6: limit must be >= 1; defensive guard against caller misuse."""
+    repo = EventLogRepo(conn=MagicMock())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="limit must be"):
+        await repo.list_recent(limit=0)
+
+
+def test_event_log_entry_is_frozen() -> None:
+    """AC6: EventLogEntry follows the codebase's frozen-Pydantic pattern."""
+    entry = EventLogEntry(
+        id=1,
+        schema_version=1,
+        timestamp=_NOW,
+        actor="system",
+        event_type="SYSTEM",
+        summary="bootstrap",
+    )
+    with pytest.raises((TypeError, ValueError)):
+        entry.summary = "mutated"  # type: ignore[misc]

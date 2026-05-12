@@ -1,0 +1,25 @@
+{# Story 11.1 AC5 — current-month peak vs configured limit. #}
+{# Plain-language label suffix: "(approaching)" / "(exceeded)" / nothing. #}
+<section
+  id="installer-peak-tracker"
+  class="installer-peak-tracker installer-peak-tracker--{{ status }}"
+  aria-label="Monthly peak tracker"
+  hx-get="/fragments/installer/peak-tracker"
+  hx-trigger="every 10s"
+  hx-swap="outerHTML"
+>
+  <h2 class="installer-peak-tracker__heading">Peak tracker</h2>
+  <p class="installer-peak-tracker__label">{{ label }}</p>
+  <dl class="installer-peak-tracker__values">
+    <div class="installer-peak-tracker__pair">
+      <dt>Peak this month</dt>
+      <dd class="installer-peak-tracker__value">{{ peak_kw_display }} kW</dd>
+    </div>
+    {% if limit_display %}
+    <div class="installer-peak-tracker__pair">
+      <dt>Configured limit</dt>
+      <dd class="installer-peak-tracker__value">{{ limit_display }} kW</dd>
+    </div>
+    {% endif %}
+  </dl>
+</section>

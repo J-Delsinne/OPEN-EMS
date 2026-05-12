@@ -13,7 +13,9 @@ from open_ems.core.constraints import ActiveConstraints
 from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.services.active_constraints import ActiveConstraintsProvider
 from open_ems.settings import Settings, get_settings
+from open_ems.storage.repositories.device_repo import DeviceRepo
 from open_ems.storage.repositories.energy_repo import EnergyRepo
+from open_ems.storage.repositories.event_log_repo import EventLogRepo
 from open_ems.storage.repositories.session_repo import SessionRepo, hash_token
 from open_ems.storage.repositories.user_repo import UserRepo
 
@@ -140,6 +142,20 @@ def get_energy_repo(request: Request) -> EnergyRepo:
     EventLogRepo pattern at ``routes/installer.py``."""
     del request
     return EnergyRepo()
+
+
+def get_event_log_repo(request: Request) -> EventLogRepo:
+    """Story 11.1 AC6: EventLogRepo dependency for the event-log preview
+    fragment. Construction mirrors ``get_energy_repo`` — fresh instance per
+    request, shared aiosqlite connection from the module-level pool."""
+    del request
+    return EventLogRepo()
+
+
+def get_device_repo(request: Request) -> DeviceRepo:
+    """Story 11.1 AC4: DeviceRepo dependency for the per-device-row fragment."""
+    del request
+    return DeviceRepo()
 
 
 def _next_url(request: Request) -> str:

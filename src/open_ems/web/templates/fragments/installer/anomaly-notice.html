@@ -1,0 +1,27 @@
+{# Story 11.1 AC7 + AC8 — single deterministic anomaly notice with dismiss/elevation. #}
+{# When render=False the section is empty but retains its HTMX poll binding   #}
+{# so the next 10s tick can re-render on elevation (per 10.4 polling-after-  #}
+{# outerHTML-swap pattern).                                                   #}
+<section
+  id="installer-anomaly-notice"
+  class="installer-anomaly-notice{% if render %} installer-anomaly-notice--{{ severity_css_modifier }}{% endif %}"
+  aria-label="Anomaly notice"
+  aria-live="polite"
+  hx-get="/fragments/installer/anomaly-notice"
+  hx-trigger="every 10s"
+  hx-swap="outerHTML"
+>
+  {% if render %}
+  <span class="installer-anomaly-notice__badge installer-anomaly-notice__badge--{{ severity_css_modifier }}">{{ severity }}</span>
+  <p class="installer-anomaly-notice__summary">{{ summary }}</p>
+  <a class="installer-anomaly-notice__link" href="{{ event_log_link }}">View in event log</a>
+  <button
+    type="button"
+    class="installer-anomaly-notice__dismiss"
+    hx-post="/actions/dismiss-anomaly"
+    hx-target="#installer-anomaly-notice"
+    hx-swap="outerHTML"
+    hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+  >Dismiss</button>
+  {% endif %}
+</section>

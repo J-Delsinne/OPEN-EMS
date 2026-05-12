@@ -34,15 +34,24 @@ from open_ems.core import (
 )
 from open_ems.engine.policy_guard import PolicyGuard
 from open_ems.services.audit_log import ObservabilityService
+from open_ems.services.installer_anomaly import (
+    detect_anomaly_from_snapshot,
+    dismiss_signature,
+)
 from open_ems.settings import Settings
 from open_ems.web.dependencies import (
     HomeownerUser,
+    InstallerUser,
     get_policy_guard,
     get_settings_dep,
     get_state_store,
     require_homeowner,
+    require_installer,
 )
-from open_ems.web.state_serialization import build_homeowner_headline_context
+from open_ems.web.state_serialization import (
+    build_homeowner_headline_context,
+    build_installer_anomaly_notice_context,
+)
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -444,5 +453,41 @@ def _render_strategy_failure(
     return _templates.TemplateResponse(
         request,
         "fragments/homeowner/strategy-failure.html",
+        context,
+    )
+
+
+# ── Story 11.1 AC8 — POST /actions/dismiss-anomaly ───────────────────────────
+
+
+@router.post("/actions/dismiss-anomaly", response_class=HTMLResponse)
+async def dismiss_installer_anomaly(
+    request: Request,
+    user: InstallerUser = Depends(require_installer),  # noqa: B008
+    store: StateStore = Depends(get_state_store),  # noqa: B008
+) -> HTMLResponse:
+    """Dismiss the currently-active anomaly notice for this session.
+
+    Reads the current ``AnomalySignature`` from the snapshot and stores it in
+    the module-level ``_DISMISSED_ANOMALIES`` dict keyed by ``session_id``.
+    Returns the empty anomaly-notice section (outerHTML swap collapses it).
+
+    Idempotent: re-dismissing when no anomaly is active is a no-op that still
+    returns the empty section (the next 10s poll naturally re-renders with
+    whatever the current state is).
+    """
+    snapshot = store.get_snapshot()
+    current = detect_anomaly_from_snapshot(snapshot)
+    if current is not None:
+        dismiss_signature(user.session_id, current)
+    # Render the anomaly-notice fragment with render=False so the outerHTML
+    # swap collapses to the empty section. We pass the current snapshot +
+    # the just-recorded dismissed signature; the builder computes
+    # "suppress" and returns {"render": False, ...}.
+    context = build_installer_anomaly_notice_context(snapshot, current)
+    context["csrf_token"] = user.csrf_token
+    return _templates.TemplateResponse(
+        request,
+        "fragments/installer/anomaly-notice.html",
         context,
     )

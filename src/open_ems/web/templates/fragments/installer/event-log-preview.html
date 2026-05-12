@@ -1,0 +1,29 @@
+{# Story 11.1 AC6 — 5 most recent event_log rows + "View all" link. #}
+<section
+  id="installer-event-log-preview"
+  class="installer-event-log-preview"
+  aria-label="Recent events"
+  hx-get="/fragments/installer/event-log-preview"
+  hx-trigger="every 10s"
+  hx-swap="outerHTML"
+>
+  <h2 class="installer-event-log-preview__heading">Recent events</h2>
+  {% if is_empty %}
+  <p class="installer-event-log-preview__empty">No events yet — system is starting up.</p>
+  {% else %}
+  <ul class="installer-event-log-preview__list">
+    {% for row in rows %}
+    <li class="installer-event-log-preview__row">
+      <time
+        class="installer-event-log-preview__timestamp"
+        datetime="{{ row.utc_iso }}"
+        data-utc="{{ row.utc_iso }}"
+      >{{ row.display_timestamp }}</time>
+      <span class="event-badge event-badge--{{ row.event_type_css_modifier }}">{{ row.event_type }}</span>
+      <span class="installer-event-log-preview__summary">{{ row.summary }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <a class="installer-event-log-preview__view-all" href="{{ view_all_url }}">View all events</a>
+</section>

@@ -441,3 +441,474 @@ h1 {
   color: var(--color-text-tertiary);
   font-size: 0.75rem;
 }
+
+/*
+ * Story 11.1 — installer dashboard surface.
+ * The installer view is the data-rich "Linear-style" surface per UX spec
+ * §"Direction 1 — Calm Autopilot" line 618. New tokens for pass/warn/fail
+ * are added here (the homeowner surface deliberately avoids these — degraded
+ * stays slate). Layout uses CSS grid with a 220px sidebar.
+ */
+
+:root {
+  --color-pass: #16a34a;            /* green-600 */
+  --color-pass-bg: #f0fdf4;         /* green-50 */
+  --color-warn: #b45309;            /* amber-700 */
+  --color-warn-bg: #fffbeb;         /* amber-50 */
+  --color-fail: #b91c1c;            /* red-700 */
+  --color-fail-bg: #fef2f2;         /* red-50 */
+  --color-accent-subtle: #ecfeff;   /* cyan-50 — active sidebar item background */
+}
+
+.installer-dashboard {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 1.5rem;
+  max-width: none;
+  width: 100%;
+}
+
+@media (max-width: 640px) {
+  .installer-dashboard {
+    grid-template-columns: 1fr;
+  }
+}
+
+.installer-sidebar {
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  padding: 1rem;
+  min-height: 100vh;
+}
+
+.installer-sidebar__site-name {
+  font-weight: 600;
+  font-size: 1rem;
+  display: block;
+  margin-bottom: 1rem;
+}
+
+.installer-sidebar__items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.installer-sidebar__item {
+  display: block;
+  padding: 0.5rem 0.75rem;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  border-left: 4px solid transparent;
+  border-radius: 0.25rem;
+}
+
+.installer-sidebar__item:hover {
+  color: var(--color-text-primary);
+}
+
+.installer-sidebar__item--active {
+  background: var(--color-accent-subtle);
+  border-left-color: var(--color-accent);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.installer-sidebar__item[aria-disabled="true"] {
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.installer-sidebar__hamburger {
+  display: none;
+  background: none;
+  border: 1px solid var(--color-border);
+  padding: 0.5rem 0.75rem;
+  font-size: 1.25rem;
+  cursor: pointer;
+  border-radius: 0.25rem;
+}
+
+@media (max-width: 640px) {
+  .installer-sidebar__hamburger {
+    display: inline-block;
+  }
+  .installer-sidebar {
+    display: none;
+    min-height: 0;
+  }
+  .installer-sidebar--open {
+    display: block;
+  }
+}
+
+.installer-dashboard__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-stack);
+}
+
+/* ── Health indicator ─────────────────────────────────────────────────── */
+
+.installer-health-indicator {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: var(--space-card-pad);
+}
+
+.installer-health-indicator__heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.health-indicator__badge {
+  display: inline-block;
+  padding: 0.375rem 0.75rem;
+  border-radius: 0.25rem;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.health-indicator__badge--normal {
+  background: var(--color-pass-bg);
+  color: var(--color-pass);
+}
+
+.health-indicator__badge--degraded {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+
+.health-indicator__badge--failed {
+  background: var(--color-fail-bg);
+  color: var(--color-fail);
+}
+
+/* ── Device rows ──────────────────────────────────────────────────────── */
+
+.installer-device-rows {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: var(--space-card-pad);
+}
+
+.installer-device-rows__heading {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.device-row {
+  display: grid;
+  grid-template-columns: 8rem 6rem 6rem 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.device-row:last-child {
+  border-bottom: none;
+}
+
+.device-row__role-label {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/*
+ * AC4 invariant: component-state and capability-badge are TWO DISTINCT
+ * CSS classes on TWO DISTINCT DOM elements. Each styles independently
+ * — no class merges them.
+ */
+
+.device-row__component-state {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.device-row__component-state--active {
+  background: var(--color-pass-bg);
+  color: var(--color-pass);
+}
+
+.device-row__component-state--degraded {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+
+.device-row__component-state--unavailable {
+  background: var(--color-degraded-bg);
+  color: var(--color-text-secondary);
+}
+
+.device-row__capability-badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+  color: var(--color-text-primary);
+  background: var(--color-page-bg);
+}
+
+.device-row__capability-badge--full {
+  border-color: var(--color-pass);
+  color: var(--color-pass);
+}
+
+.device-row__capability-badge--reduced {
+  border-color: var(--color-warn);
+  color: var(--color-warn);
+}
+
+.device-row__capability-badge--unsupported {
+  border-color: var(--color-fail);
+  color: var(--color-fail);
+}
+
+.device-row__capability-badge--unknown {
+  border-color: var(--color-border);
+  color: var(--color-text-tertiary);
+}
+
+.device-row__age-caption {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+
+.device-row__event-log-link {
+  font-size: 0.75rem;
+  color: var(--color-accent);
+}
+
+/* ── Peak tracker ─────────────────────────────────────────────────────── */
+
+.installer-peak-tracker {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: var(--space-card-pad);
+}
+
+.installer-peak-tracker--approaching {
+  border-color: var(--color-warn);
+}
+
+.installer-peak-tracker--exceeded {
+  border-color: var(--color-fail);
+}
+
+.installer-peak-tracker__heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.installer-peak-tracker__label {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  color: var(--color-text-primary);
+}
+
+.installer-peak-tracker__values {
+  display: flex;
+  gap: 1.5rem;
+  margin: 0;
+}
+
+.installer-peak-tracker__pair dt {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+}
+
+.installer-peak-tracker__pair dd {
+  margin: 0;
+  font-family: ui-monospace, "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.installer-peak-tracker__value {
+  /* monospace handled by parent <dd> rule */
+}
+
+/* ── Event log preview ────────────────────────────────────────────────── */
+
+.installer-event-log-preview {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: var(--space-card-pad);
+}
+
+.installer-event-log-preview__heading {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.installer-event-log-preview__empty {
+  margin: 0 0 0.75rem;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+
+.installer-event-log-preview__list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.installer-event-log-preview__row {
+  display: grid;
+  grid-template-columns: 14rem 6rem 1fr;
+  gap: 0.75rem;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+.installer-event-log-preview__timestamp {
+  font-family: ui-monospace, "SF Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.event-badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-align: center;
+  background: var(--color-degraded-bg);
+  color: var(--color-text-secondary);
+}
+
+.event-badge--decision {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.event-badge--device {
+  background: var(--color-degraded-bg);
+  color: var(--color-text-primary);
+}
+
+.event-badge--system {
+  background: var(--color-degraded-bg);
+  color: var(--color-text-secondary);
+}
+
+.event-badge--constraint {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+
+.event-badge--installer {
+  background: var(--color-pass-bg);
+  color: var(--color-pass);
+}
+
+.installer-event-log-preview__summary {
+  color: var(--color-text-primary);
+}
+
+.installer-event-log-preview__view-all {
+  font-size: 0.875rem;
+  color: var(--color-accent);
+}
+
+/* ── Anomaly notice ───────────────────────────────────────────────────── */
+
+.installer-anomaly-notice {
+  /* Empty section retains the HTMX poll binding but renders no visual element. */
+}
+
+.installer-anomaly-notice--warn,
+.installer-anomaly-notice--fail {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-radius: var(--radius-card);
+  padding: 1rem var(--space-card-pad);
+  border-left: 4px solid var(--color-warn);
+}
+
+.installer-anomaly-notice--warn {
+  background: var(--color-warn-bg);
+  border-left-color: var(--color-warn);
+}
+
+.installer-anomaly-notice--fail {
+  background: var(--color-fail-bg);
+  border-left-color: var(--color-fail);
+}
+
+.installer-anomaly-notice__badge {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  font-weight: 700;
+  font-size: 0.75rem;
+}
+
+.installer-anomaly-notice__badge--warn {
+  background: var(--color-warn);
+  color: white;
+}
+
+.installer-anomaly-notice__badge--fail {
+  background: var(--color-fail);
+  color: white;
+}
+
+.installer-anomaly-notice__summary {
+  flex: 1;
+  margin: 0;
+  color: var(--color-text-primary);
+}
+
+.installer-anomaly-notice__link {
+  color: var(--color-accent);
+  font-size: 0.875rem;
+}
+
+.installer-anomaly-notice__dismiss {
+  background: none;
+  border: 1px solid var(--color-border);
+  padding: 0.375rem 0.75rem;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+}

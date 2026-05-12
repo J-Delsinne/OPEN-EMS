@@ -1,0 +1,17 @@
+{# Story 11.1 AC3 — installer system health indicator. #}
+{# Direct mapping from SystemOperatingMode to display label. Polls every 10s. #}
+<section
+  id="installer-health-indicator"
+  class="installer-health-indicator"
+  data-operating-mode="{{ operating_mode }}"
+  aria-label="System health: {{ display }}"
+  hx-get="/fragments/installer/health-indicator"
+  hx-trigger="every 10s"
+  hx-swap="outerHTML"
+>
+  <h2 class="installer-health-indicator__heading">System health</h2>
+  <span
+    class="health-indicator__badge health-indicator__badge--{{ css_modifier }}"
+    aria-live="polite"
+  >{{ display }}</span>
+</section>

@@ -1,0 +1,31 @@
+{# Story 11.1 AC4 — per-device rows.                                          #}
+{# Component state and capability badge MUST render as TWO DISTINCT DOM       #}
+{# elements with DISTINCT CSS classes (epic AC line 2276-2279, "never         #}
+{# conflated"). The test_device_rows_render_component_state_and_capability_   #}
+{# badge_as_distinct_dom_elements parses this HTML and asserts both classes   #}
+{# appear on separate elements per row.                                       #}
+<section
+  id="installer-device-rows"
+  class="installer-device-rows"
+  aria-label="Per-device connectivity status"
+  hx-get="/fragments/installer/device-rows"
+  hx-trigger="every 10s"
+  hx-swap="outerHTML"
+>
+  <h2 class="installer-device-rows__heading">Devices</h2>
+  {% for row in rows %}
+  <div class="device-row" data-role="{{ row.role }}">
+    <span class="device-row__role-label">{{ row.role_label }}</span>
+    <span
+      class="device-row__component-state device-row__component-state--{{ row.component_state_css_modifier }}"
+    >{{ row.component_state_display }}</span>
+    <span
+      class="device-row__capability-badge device-row__capability-badge--{{ row.capability_badge_css_modifier }}"
+    >{{ row.capability_badge_display }}</span>
+    <span class="device-row__age-caption">{{ row.age_caption }}</span>
+    {% if row.event_log_link %}
+    <a class="device-row__event-log-link" href="{{ row.event_log_link }}">View in event log</a>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>

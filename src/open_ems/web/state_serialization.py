@@ -21,10 +21,79 @@ from open_ems.core import (
 from open_ems.core.constraints import ActiveConstraints
 from open_ems.core.energy import WeeklyEnergySummaryRow
 from open_ems.core.state import DeviceSlot
+from open_ems.services.installer_anomaly import (
+    AnomalySignature,
+    detect_anomaly_from_snapshot,
+    evaluate_dismiss_state,
+)
+from open_ems.storage.repositories.device_repo import DeviceRegistryEntry
+from open_ems.storage.repositories.event_log_repo import EventLogEntry
 
 OverrideRenderState = Literal["idle", "optimistic", "confirmed", "fallback"]
 
 HomeownerCard = Literal["battery", "solar", "grid", "ev"]
+
+# Story 11.1 — installer dashboard surface.
+
+# AC3: SystemOperatingMode → installer-facing health display label. Direct
+# mapping with no interpretation layer. Three distinct display strings cover
+# the four enum members (degraded + conservative both → DEGRADED).
+_INSTALLER_HEALTH_DISPLAY: Mapping[SystemOperatingMode, str] = {
+    SystemOperatingMode.normal: "NORMAL",
+    SystemOperatingMode.degraded: "DEGRADED",
+    SystemOperatingMode.conservative: "DEGRADED",
+    SystemOperatingMode.fail_safe: "FAILED",
+}
+
+# AC4 / Q1: ComponentState → installer-facing per-device-row display label.
+# The engine-internal enum name `error` stays; the installer surface presents
+# it as DEGRADED (the existing `derive_component_state` function maps any
+# DegradedDeviceState with reason != "unavailable" to ComponentState.error,
+# which is exactly the "device is reachable but reporting trouble" surface
+# epic AC line 2278-2279 calls DEGRADED).
+_INSTALLER_COMPONENT_STATE_DISPLAY: Mapping[ComponentState, str] = {
+    ComponentState.active: "ACTIVE",
+    ComponentState.error: "DEGRADED",
+    ComponentState.unavailable: "UNAVAILABLE",
+    ComponentState.stale: "UNAVAILABLE",  # stale treated as unavailable for installer
+    ComponentState.pending: "UNAVAILABLE",
+    ComponentState.idle: "UNAVAILABLE",
+}
+
+# AC4: device_registry.last_capability_status → installer-facing badge label.
+_INSTALLER_CAPABILITY_BADGE_DISPLAY: Mapping[str, str] = {
+    "full": "FULL",
+    "reduced": "REDUCED",
+    "unsupported": "UNSUPPORTED",
+}
+
+# AC4: device-row display order. Required roles first (grid_meter, inverter),
+# then optional roles (battery, ev_charger).
+_INSTALLER_DEVICE_ROW_ORDER: tuple[DeviceRole, ...] = (
+    DeviceRole.grid_meter,
+    DeviceRole.inverter,
+    DeviceRole.battery,
+    DeviceRole.ev_charger,
+)
+
+# AC4: friendly role labels for the leftmost column of each device row.
+_INSTALLER_DEVICE_ROLE_LABELS: Mapping[DeviceRole, str] = {
+    DeviceRole.grid_meter: "Grid meter",
+    DeviceRole.inverter: "Inverter",
+    DeviceRole.battery: "Battery",
+    DeviceRole.ev_charger: "EV charger",
+}
+
+# AC5: peak tracker thresholds — single source of truth.
+_PEAK_APPROACH_RATIO = 0.9
+
+# AC6: event-log preview summary truncation length.
+_EVENT_LOG_PREVIEW_SUMMARY_MAX = 80
+
+# AC6: server-side fallback timezone for the event-log preview. Story 11.2
+# will replace with client-side Intl.DateTimeFormat. The DST-aware Brussels
+# zone is the deployment target for OPEN-EMS v1.
+_EVENT_LOG_DISPLAY_TIMEZONE = "Europe/Brussels"
 
 # AC5 / AC14 — plain-language labels mapped 1:1 from EnergyStrategy enum values.
 # Per the structural contract, the headline reads ONLY from operating_mode +
@@ -586,3 +655,250 @@ def _serialize_installer_device(state: DeviceSlot) -> dict[str, Any] | None:
             "occurred_at": _datetime_to_iso(state.occurred_at),
         }
     return state.model_dump(mode="json")
+
+
+# ── Story 11.1 — installer dashboard fragment builders ───────────────────────
+
+
+def build_installer_health_indicator_context(snapshot: SystemSnapshot) -> dict[str, object]:
+    """AC3: derive the installer-facing system health display directly from
+    ``snapshot.operating_mode`` via the four-to-three mapping.
+
+    Pure-functional. Reads ONLY ``operating_mode``. Defensive ``.get(...)``
+    fallback on the display table so a future SystemOperatingMode member that
+    ships without an entry degrades gracefully instead of 500ing the route;
+    the exhaustiveness test catches the missing entry at test time.
+    """
+    operating_mode = snapshot.operating_mode
+    display = _INSTALLER_HEALTH_DISPLAY.get(operating_mode, operating_mode.value.upper())
+    return {
+        "operating_mode": operating_mode.value,
+        "display": display,
+        # CSS-class suffix: --normal / --degraded / --failed
+        "css_modifier": display.lower(),
+    }
+
+
+def build_installer_device_row_context(
+    snapshot: SystemSnapshot,
+    registry_entries: list[DeviceRegistryEntry],
+) -> dict[str, object]:
+    """AC4: build one row per role with component_state + capability_badge as
+    independently-derived fields.
+
+    The two values are kept STRUCTURALLY DISTINCT — they live in different
+    dict keys (``component_state_display`` and ``capability_badge_display``)
+    so the template renders them as separate DOM elements. The "never
+    conflated" invariant (epic AC line 2276-2279) is enforced both by the
+    builder's output shape and by the template's class names.
+    """
+    # Build a role-keyed map of registry entries (one per role). For roles
+    # with multiple entries (shouldn't happen in v1 single-device-per-role
+    # contract; defensive), prefer the validated one.
+    role_to_entry: dict[DeviceRole, DeviceRegistryEntry] = {}
+    for entry in registry_entries:
+        if entry.role is None:
+            continue
+        existing = role_to_entry.get(entry.role)
+        if existing is None or (entry.validated and not existing.validated):
+            role_to_entry[entry.role] = entry
+
+    rows: list[dict[str, object]] = []
+    for role in _INSTALLER_DEVICE_ROW_ORDER:
+        component_state = snapshot.component_states.get(role, ComponentState.unavailable)
+        component_state_display = _INSTALLER_COMPONENT_STATE_DISPLAY.get(
+            component_state, "UNAVAILABLE"
+        )
+
+        row_entry = role_to_entry.get(role)
+        if row_entry is not None and row_entry.last_capability_status is not None:
+            capability_badge_display = _INSTALLER_CAPABILITY_BADGE_DISPLAY.get(
+                row_entry.last_capability_status, "UNKNOWN"
+            )
+            device_id: str | None = row_entry.device_id
+        else:
+            capability_badge_display = "UNKNOWN"
+            device_id = None
+
+        age_seconds = snapshot.data_age_seconds.get(role)
+        age_caption = _device_row_age_caption(age_seconds)
+
+        rows.append(
+            {
+                "role": role.value,
+                "role_label": _INSTALLER_DEVICE_ROLE_LABELS[role],
+                "component_state_display": component_state_display,
+                "component_state_css_modifier": component_state_display.lower(),
+                "capability_badge_display": capability_badge_display,
+                "capability_badge_css_modifier": capability_badge_display.lower(),
+                "age_caption": age_caption,
+                "device_id": device_id,
+                # "View in event log" link target — emitted only when device_id
+                # is known; AC4 last-paragraph contract.
+                "event_log_link": (
+                    f"/installer/event-log?device_id={device_id}" if device_id is not None else None
+                ),
+            }
+        )
+
+    return {"rows": rows}
+
+
+def _device_row_age_caption(age_seconds: int | None) -> str:
+    """Renders ``data_age_seconds[role]`` as a short caption under each device
+    row. Reused homeowner-card pattern (state_serialization.py:_stale_caption)
+    but with installer-tuned copy ("Updated" instead of "data last updated")."""
+    if age_seconds is None:
+        return "Updated long ago"
+    if age_seconds < 60:
+        return f"Updated {age_seconds}s ago"
+    return f"Updated {age_seconds // 60} min ago"
+
+
+def build_installer_peak_tracker_context(
+    current_month_peak_kw: float,
+    peak_limit_kw: float | None,
+) -> dict[str, object]:
+    """AC5: build the peak tracker context with magnitude + plain-language label.
+
+    Branches:
+    - no peak data yet (peak_kw == 0.0 AND no rows ever written) → "no data"
+    - constraints unavailable (peak_limit_kw is None) → "not configured"
+    - peak_kw / limit ratio < 0.9 → simple label
+    - 0.9 <= ratio < 1.0 → "(approaching)" suffix
+    - ratio >= 1.0 → "(exceeded)" suffix
+    """
+    peak_kw_rounded = round(current_month_peak_kw, 1)
+
+    # Constraints unavailable branch — pre-installer-wizard-complete state.
+    if peak_limit_kw is None:
+        if peak_kw_rounded <= 0.0:
+            return {
+                "peak_kw_display": "0.0",
+                "limit_display": None,
+                "label": "Peak this month: 0.0 kW · No data yet",
+                "status": "no_data",
+            }
+        return {
+            "peak_kw_display": f"{peak_kw_rounded:.1f}",
+            "limit_display": None,
+            "label": f"Peak this month: {peak_kw_rounded:.1f} kW · Limit: not configured",
+            "status": "not_configured",
+        }
+
+    limit_kw_rounded = round(peak_limit_kw, 1)
+
+    # No peak data yet — peak_kw is exactly 0.0 because no peak_intervals rows
+    # exist for the current UTC month (COALESCE-MAX returns 0.0 on empty set).
+    if peak_kw_rounded <= 0.0:
+        return {
+            "peak_kw_display": "0.0",
+            "limit_display": f"{limit_kw_rounded:.1f}",
+            "label": "Peak this month: 0.0 kW · No data yet",
+            "status": "no_data",
+        }
+
+    ratio = current_month_peak_kw / peak_limit_kw
+
+    if ratio >= 1.0:
+        status = "exceeded"
+        suffix = " (exceeded)"
+    elif ratio >= _PEAK_APPROACH_RATIO:
+        status = "approaching"
+        suffix = " (approaching)"
+    else:
+        status = "under_limit"
+        suffix = ""
+
+    return {
+        "peak_kw_display": f"{peak_kw_rounded:.1f}",
+        "limit_display": f"{limit_kw_rounded:.1f}",
+        "label": (
+            f"Peak this month: {peak_kw_rounded:.1f} kW · Limit: {limit_kw_rounded:.1f} kW{suffix}"
+        ),
+        "status": status,
+    }
+
+
+def build_installer_event_log_preview_context(
+    entries: list[EventLogEntry],
+) -> dict[str, object]:
+    """AC6: build the 5-row event-log preview context.
+
+    Each row carries UTC ISO-8601 in ``data_utc`` and a server-side
+    locally-formatted display string in ``display_timestamp``. The summary is
+    truncated to ``_EVENT_LOG_PREVIEW_SUMMARY_MAX`` chars with ellipsis.
+    """
+    rows: list[dict[str, object]] = []
+    for entry in entries:
+        # UTC ISO for client-side re-rendering (Story 11.2 will replace the
+        # server-side fallback with Intl.DateTimeFormat).
+        utc_iso = entry.timestamp.astimezone(UTC).isoformat()
+
+        # Server-side fallback display string in Europe/Brussels. Uses
+        # zoneinfo (stdlib) — no new dependency.
+        try:
+            from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+            local_ts = entry.timestamp.astimezone(ZoneInfo(_EVENT_LOG_DISPLAY_TIMEZONE))
+            offset = local_ts.utcoffset()
+            offset_hours = int(offset.total_seconds() // 3600) if offset is not None else 0
+            tz_abbrev = local_ts.tzname() or "UTC"
+            display_timestamp = (
+                f"{local_ts.strftime('%Y-%m-%d %H:%M')} {tz_abbrev} / UTC{offset_hours:+d}"
+            )
+        except Exception:  # noqa: BLE001 — zoneinfo data missing on stripped builds
+            display_timestamp = f"{entry.timestamp.astimezone(UTC).strftime('%Y-%m-%d %H:%M')} UTC"
+
+        summary = entry.summary
+        if len(summary) > _EVENT_LOG_PREVIEW_SUMMARY_MAX:
+            summary = summary[: _EVENT_LOG_PREVIEW_SUMMARY_MAX - 1] + "…"
+
+        rows.append(
+            {
+                "id": entry.id,
+                "utc_iso": utc_iso,
+                "display_timestamp": display_timestamp,
+                "event_type": entry.event_type,
+                "event_type_css_modifier": entry.event_type.lower(),
+                "summary": summary,
+                "device_id": entry.device_id,
+            }
+        )
+
+    return {
+        "rows": rows,
+        "view_all_url": "/installer/event-log",
+        "is_empty": len(rows) == 0,
+    }
+
+
+def build_installer_anomaly_notice_context(
+    snapshot: SystemSnapshot,
+    dismissed: AnomalySignature | None,
+) -> dict[str, object]:
+    """AC7 + AC8: build the anomaly-notice context.
+
+    Pure-functional over ``SystemSnapshot`` + dismissed signature. Calls
+    ``detect_anomaly_from_snapshot`` and ``evaluate_dismiss_state``. The
+    function signature encodes the "no I/O" structural contract.
+
+    Returns:
+        - ``{"render": False, ...}`` when the notice should NOT show
+          (no anomaly OR dismissed signature covers current)
+        - ``{"render": True, "severity": ..., "summary": ..., "link": ...}``
+          when the full notice should display
+    """
+    current = detect_anomaly_from_snapshot(snapshot)
+    decision = evaluate_dismiss_state(current, dismissed)
+    if decision in ("no_anomaly", "suppress") or current is None:
+        return {"render": False, "signature": None}
+    return {
+        "render": True,
+        "signature": current,
+        "severity": current.severity,
+        "severity_css_modifier": current.severity.lower(),
+        "summary": current.summary,
+        "event_log_link": f"/installer/event-log{current.link_query}",
+        "anomaly_types_sorted": sorted(current.anomaly_types),
+    }

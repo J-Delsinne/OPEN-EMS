@@ -4,10 +4,33 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import aiosqlite
+from pydantic import BaseModel, ConfigDict, Field
 
 from open_ems.storage.database import get_connection, get_write_lock
 
 _CRITICAL_EVENT_TYPES: frozenset[str] = frozenset({"CONSTRAINT"})
+
+
+class EventLogEntry(BaseModel):
+    """Story 11.1 AC6: immutable view of one ``event_log`` row, used by the
+    read path (installer dashboard preview + Story 11.2 paginated list).
+
+    Fields mirror the ``event_log`` table columns. ``detail_json`` is the raw
+    JSON string from the DB column (None if the column is NULL); callers parse
+    on demand to keep the constructor cheap for high-cardinality reads.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: int = Field(ge=1)
+    schema_version: int = Field(ge=1)
+    timestamp: datetime
+    actor: str
+    event_type: str
+    summary: str
+    detail_json: str | None = None
+    device_id: str | None = None
+    config_version: str | None = None
 
 
 class EventLogRepo:
@@ -56,6 +79,40 @@ class EventLogRepo:
 
     def delete(self, *args: object, **kwargs: object) -> None:
         raise RuntimeError("event_log is append-only")
+
+    async def list_recent(self, *, limit: int = 5) -> list[EventLogEntry]:
+        """Story 11.1 AC6: return the N most recent event_log rows.
+
+        Ordered by ``timestamp DESC, id DESC`` — the secondary ``id`` sort is
+        load-bearing for ties (two events emitted in the same millisecond under
+        fast adapter polling). Without it row order would be undefined and the
+        ordering test would be flaky.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        async with self._conn.execute(
+            "SELECT id, schema_version, timestamp, actor, event_type,"
+            "       summary, detail, device_id, config_version"
+            " FROM event_log"
+            " ORDER BY timestamp DESC, id DESC"
+            " LIMIT ?",
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            EventLogEntry(
+                id=int(row[0]),
+                schema_version=int(row[1]),
+                timestamp=datetime.fromisoformat(str(row[2])),
+                actor=str(row[3]),
+                event_type=str(row[4]),
+                summary=str(row[5]),
+                detail_json=str(row[6]) if row[6] is not None else None,
+                device_id=str(row[7]) if row[7] is not None else None,
+                config_version=str(row[8]) if row[8] is not None else None,
+            )
+            for row in rows
+        ]
 
     async def count_peak_limiting_applied_decisions(
         self,

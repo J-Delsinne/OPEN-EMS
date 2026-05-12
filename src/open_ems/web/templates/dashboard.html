@@ -53,8 +53,69 @@
     >This week</button>
     <section id="weekly-summary-panel" x-show="expanded" x-cloak></section>
   </section>
-  {% else %}
-  <p>Full dashboard UI implemented in Epic 11.</p>
+  {% elif dashboard_role == "installer" %}
+  <section class="installer-dashboard" x-data="installerSidebar()">
+    <button
+      type="button"
+      class="installer-sidebar__hamburger"
+      aria-controls="installer-sidebar"
+      aria-label="Toggle navigation"
+      x-on:click="open = !open"
+    >☰</button>
+    <nav
+      id="installer-sidebar"
+      class="installer-sidebar"
+      x-bind:class="open ? 'installer-sidebar--open' : ''"
+    >
+      <span class="installer-sidebar__site-name">OPEN-EMS</span>
+      <ul class="installer-sidebar__items">
+        <li><a class="installer-sidebar__item installer-sidebar__item--active" href="/installer/dashboard" aria-current="page">Dashboard</a></li>
+        <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Devices</a></li>
+        <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Event Log</a></li>
+        <li><a class="installer-sidebar__item" href="#" aria-disabled="true" tabindex="-1">Settings</a></li>
+        <li><a class="installer-sidebar__item" href="/installer/setup/discovery">Setup</a></li>
+      </ul>
+    </nav>
+    <section class="installer-dashboard__main" aria-label="Live system state">
+      <section
+        id="installer-anomaly-notice"
+        class="installer-anomaly-notice"
+        hx-get="/fragments/installer/anomaly-notice"
+        hx-trigger="load, every 10s"
+        hx-swap="outerHTML"
+        aria-label="Anomaly notice"
+        aria-live="polite"
+      ></section>
+      <section
+        id="installer-health-indicator"
+        class="installer-health-indicator"
+        hx-get="/fragments/installer/health-indicator"
+        hx-trigger="load, every 10s"
+        hx-swap="outerHTML"
+      >Loading system health...</section>
+      <section
+        id="installer-device-rows"
+        class="installer-device-rows"
+        hx-get="/fragments/installer/device-rows"
+        hx-trigger="load, every 10s"
+        hx-swap="outerHTML"
+      >Loading devices...</section>
+      <section
+        id="installer-peak-tracker"
+        class="installer-peak-tracker"
+        hx-get="/fragments/installer/peak-tracker"
+        hx-trigger="load, every 10s"
+        hx-swap="outerHTML"
+      >Loading peak tracker...</section>
+      <section
+        id="installer-event-log-preview"
+        class="installer-event-log-preview"
+        hx-get="/fragments/installer/event-log-preview"
+        hx-trigger="load, every 10s"
+        hx-swap="outerHTML"
+      >Loading recent events...</section>
+    </section>
+  </section>
   {% endif %}
 </main>
 {% endblock %}
@@ -198,6 +259,14 @@
     // the first click; ``x-show="expanded"`` reveals the loaded panel.
     Alpine.data('weeklySummaryTrigger', () => ({
       expanded: false,
+    }));
+
+    // Story 11.1 AC2 — Installer sidebar mobile-collapse factory.
+    // Single ``open`` boolean drives the hamburger toggle on ≤640px. On
+    // desktop the CSS media query overrides the Alpine binding so the sidebar
+    // is always visible.
+    Alpine.data('installerSidebar', () => ({
+      open: false,
     }));
   });
 </script>
