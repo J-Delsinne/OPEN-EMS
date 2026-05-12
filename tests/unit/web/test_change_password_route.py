@@ -321,6 +321,52 @@ async def test_post_change_password_emits_audit_event(
     assert "Password changed" in summaries
 
 
+# ── Regression: form-body csrf_token (no header) works end-to-end ────────────
+
+
+@pytest.mark.asyncio
+async def test_post_change_password_with_form_body_csrf_token_succeeds(
+    authenticated_session: tuple[str, str],
+) -> None:
+    """Regression for the production bug filed against Story 11.3:
+
+    A non-HTMX browser form submit on ``/change-password`` sends the CSRF
+    token in the FORM BODY (the hidden ``<input name="csrf_token">`` field),
+    NOT in the ``X-CSRF-Token`` header. The CSRF middleware previously called
+    ``await request.form()`` to read the token, which consumed the ASGI
+    receive stream — leaving FastAPI's ``Form()`` parameters as their default
+    empty strings on the downstream route. ``verify_password("", admin_hash)``
+    returned False, surfacing "Current password is incorrect" even when the
+    user typed the password that had just succeeded at ``/login``.
+
+    The other change-password POST tests (#52–#59) all bypass this code path
+    by sending the token via ``X-CSRF-Token`` header, so the bug slipped
+    through unit coverage.
+
+    This test sends the token via the form body, no header.
+    """
+    raw, user_id = authenticated_session
+
+    resp = _client().post(
+        "/change-password",
+        cookies={"session": raw},
+        # No X-CSRF-Token header — middleware MUST find the token in the form body.
+        data={
+            "csrf_token": _CSRF_TOKEN,
+            "current_password": _CURRENT_PASSWORD,
+            "new_password": _NEW_PASSWORD,
+            "confirm_new_password": _NEW_PASSWORD,
+        },
+    )
+    assert resp.status_code == 303, resp.text
+    assert resp.headers["location"] == "/login"
+
+    # The password actually rotated, proving the route saw the form body.
+    row = await UserRepo(get_connection()).get_by_id(user_id)
+    assert row is not None
+    assert verify_password(_NEW_PASSWORD, row["hashed_password"]) is True
+
+
 # ── AC22 #59: CSRF token missing returns 403 ─────────────────────────────────
 
 

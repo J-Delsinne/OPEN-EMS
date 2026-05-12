@@ -23,7 +23,7 @@ from open_ems.storage.repositories.session_repo import (
     generate_session_token,
     hash_token,
 )
-from open_ems.storage.repositories.user_repo import UserRepo, hash_password
+from open_ems.storage.repositories.user_repo import UserRepo, hash_password, verify_password
 from open_ems.web.csrf import CsrfMiddleware
 from open_ems.web.must_change_password_middleware import MustChangePasswordMiddleware
 from open_ems.web.routes.actions import router as actions_router
@@ -204,6 +204,111 @@ async def test_e2e_homeowner_completes_change_password_then_accesses_dashboard(
     assert refreshed_user["must_change_password"] == 0
 
 
+# ── Regression: full bootstrap-admin → forced-change → re-login flow ─────────
+
+
+async def test_e2e_bootstrap_admin_forced_change_with_form_body_csrf_full_flow(
+    session_repo: SessionRepo,
+) -> None:
+    """Regression for the Story 11.3 production bug: an installer admin
+    bootstrapped with ``must_change_password=True`` logs in successfully, is
+    redirected to ``/change-password`` by the middleware, submits the
+    change-password form (which carries ``csrf_token`` in the FORM BODY because
+    it is a traditional non-HTMX ``<form>``), and the route mistakenly returned
+    "Current password is incorrect" because the CSRF middleware consumed the
+    ASGI stream and FastAPI's ``Form()`` parameters arrived empty.
+
+    Asserts the full contract:
+      1. Bootstrap admin login succeeds (303 → /installer/dashboard).
+      2. Middleware redirects every non-allow-listed path to /change-password.
+      3. POST /change-password with form-body csrf (no header) succeeds (303 → /login).
+      4. ``must_change_password`` is cleared on the user row.
+      5. The original session is invalidated.
+      6. Login with the new password succeeds.
+      7. The new session is unflagged so the middleware no longer redirects.
+    """
+    del session_repo
+    await _ensure_event_log_table()
+
+    bootstrap_username = "admin"
+    bootstrap_password = "BootstrapAdmin12!"  # noqa: S105 — test fixture
+    new_password = "RotatedPass34!"  # noqa: S105 — test fixture
+
+    admin_uid = await UserRepo(get_connection()).create(
+        username=bootstrap_username,
+        hashed_password=hash_password(bootstrap_password),
+        role="installer",
+        must_change_password=True,
+    )
+
+    # Step 1 — bootstrap admin login succeeds.
+    login_resp = _client().post(
+        "/login",
+        data={"username": bootstrap_username, "password": bootstrap_password},
+    )
+    assert login_resp.status_code == 303, login_resp.text
+    assert login_resp.headers["location"] == "/installer/dashboard"
+    initial_cookie = login_resp.cookies.get("session")
+    assert initial_cookie is not None
+
+    # Step 2 — middleware redirects any non-allow-listed path to /change-password.
+    blocked_resp = _client().get("/installer/dashboard", cookies={"session": initial_cookie})
+    assert blocked_resp.status_code == 303
+    assert blocked_resp.headers["location"] == "/change-password"
+
+    # Step 3 — POST /change-password with csrf_token IN FORM BODY (no header,
+    # mirroring the real browser submission of the standalone change-password
+    # page). This is the path that previously failed with "Current password is
+    # incorrect" because CsrfMiddleware drained the ASGI body before the route
+    # could read it.
+    session_row = await SessionRepo(get_connection()).get_by_token_hash(hash_token(initial_cookie))
+    assert session_row is not None
+    csrf_token = str(session_row["csrf_token"])
+
+    change_resp = _client().post(
+        "/change-password",
+        cookies={"session": initial_cookie},
+        data={
+            "csrf_token": csrf_token,
+            "current_password": bootstrap_password,
+            "new_password": new_password,
+            "confirm_new_password": new_password,
+        },
+    )
+    assert change_resp.status_code == 303, change_resp.text
+    assert change_resp.headers["location"] == "/login"
+
+    # Step 4 — must_change_password cleared.
+    user_row_after = await UserRepo(get_connection()).get_by_id(admin_uid)
+    assert user_row_after is not None
+    assert user_row_after["must_change_password"] == 0
+    # Hash actually rotated to the new password (sanity check).
+    assert verify_password(new_password, user_row_after["hashed_password"]) is True
+    assert verify_password(bootstrap_password, user_row_after["hashed_password"]) is False
+
+    # Step 5 — original session invalidated.
+    assert await SessionRepo(get_connection()).get_by_token_hash(hash_token(initial_cookie)) is None
+
+    # Step 6 — login with the NEW password succeeds.
+    relogin_resp = _client().post(
+        "/login",
+        data={"username": bootstrap_username, "password": new_password},
+    )
+    assert relogin_resp.status_code == 303
+    assert relogin_resp.headers["location"] == "/installer/dashboard"
+    new_cookie = relogin_resp.cookies.get("session")
+    assert new_cookie is not None and new_cookie != initial_cookie
+
+    # Step 7 — new session resolves to an unflagged user; middleware no longer
+    # intercepts. We verify this by inspecting the user row instead of GETting
+    # the dashboard (which would require state_store wiring this test does not
+    # set up). The unflagged invariant is what the middleware reads on each
+    # request, so this is the load-bearing assertion.
+    refreshed = await UserRepo(get_connection()).get_by_id(admin_uid)
+    assert refreshed is not None
+    assert refreshed["must_change_password"] == 0
+
+
 # ── AC22 #62: installer reset → homeowner session terminated ─────────────────
 
 
@@ -287,6 +392,75 @@ async def test_e2e_installer_sidebar_settings_link_navigates_to_settings_page(
     # Settings is the active item (aria-current=page on that link).
     settings_link_block = resp.text.split('href="/installer/settings"')[1].split("</a>")[0]
     assert 'aria-current="page"' in settings_link_block
+
+
+# ── Bugfix regression: settings page surfaces the homeowner credentials form ──
+
+
+async def test_settings_page_renders_create_form_when_no_homeowner_exists(
+    session_repo: SessionRepo,
+) -> None:
+    """Regression: the installer Settings page must visibly expose the
+    create-homeowner form when no homeowner account exists.
+
+    The original wiring bug was visual — the sidebar's ``min-height: 100vh``
+    pushed the unstyled main section below the viewport, so the form WAS in
+    the response HTML but invisible. This test guards the response markup;
+    the accompanying CSS for ``.installer-settings-page`` keeps the form on
+    screen at desktop and mobile.
+    """
+    del session_repo
+    await _ensure_event_log_table()
+    installer_token, _ = await _create_session("installer")
+
+    # Pre-condition: no homeowner exists.
+    assert await UserRepo(get_connection()).get_homeowner() is None
+
+    resp = _client().get("/installer/settings", cookies={"session": installer_token})
+    assert resp.status_code == 200
+    assert 'id="homeowner-credentials-section"' in resp.text
+    # Create-form action + required inputs are visible.
+    assert 'action="/actions/create-homeowner"' in resp.text
+    assert 'name="username"' in resp.text
+    assert 'name="password"' in resp.text
+    # Reset-form action MUST NOT appear when no homeowner exists.
+    assert 'action="/actions/reset-homeowner-password"' not in resp.text
+    # Layout wrapper is grid-scoped and Alpine-bound so the mobile sidebar
+    # toggle works (the bug-fix wiring — without these, the form scrolled
+    # off-screen on desktop).
+    assert 'class="installer-settings-page"' in resp.text
+    assert 'x-data="installerSidebar()"' in resp.text
+
+
+async def test_settings_page_renders_reset_form_when_homeowner_exists(
+    session_repo: SessionRepo,
+) -> None:
+    """Regression: the installer Settings page must visibly expose the
+    reset-password trigger (which loads the reset form) when a homeowner
+    already exists.
+    """
+    del session_repo
+    await _ensure_event_log_table()
+    installer_token, _ = await _create_session("installer")
+    # Seed a homeowner row so the section renders its "exists" branch.
+    await UserRepo(get_connection()).create(
+        username="homeowner_seed",
+        hashed_password=hash_password("password1234"),
+        role="homeowner",
+        must_change_password=False,
+    )
+
+    resp = _client().get("/installer/settings", cookies={"session": installer_token})
+    assert resp.status_code == 200
+    assert 'id="homeowner-credentials-section"' in resp.text
+    # Read-only summary appears.
+    assert "homeowner_seed" in resp.text
+    # Reset-password trigger button (the hx-get loads the inline form into
+    # #homeowner-reset-slot on click).
+    assert 'id="homeowner-reset-slot"' in resp.text
+    assert 'hx-get="/fragments/installer/homeowner-reset-form"' in resp.text
+    # Create-form action MUST NOT appear once a homeowner exists.
+    assert 'action="/actions/create-homeowner"' not in resp.text
 
 
 # ── AC22 #65: XSS in homeowner username renders escaped ──────────────────────

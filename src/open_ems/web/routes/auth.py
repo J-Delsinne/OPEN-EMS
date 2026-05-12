@@ -268,8 +268,22 @@ async def change_password_submit(
         return _unauth_change_password_response(request, post=True)
     is_forced = bool(user_row["must_change_password"])
 
-    # Step 2 — current_password verifies
+    # Step 2 — current_password verifies. Debug-level structured log captures
+    # the byte length of the submitted current_password (NOT the value) so a
+    # recurrence of the body-consumption bug (where the field arrives empty
+    # because middleware consumed the ASGI stream) is trivially diagnosable
+    # from logs: a byte-length of 0 paired with a wrong-password failure is
+    # the smoking gun.
     if not verify_password(current_password, str(user_row["hashed_password"])):
+        logger.debug(
+            "change_password_current_verify_failed",
+            user_id=user.user_id,
+            username=user.username,
+            role=user.role,
+            is_forced=is_forced,
+            current_password_byte_length=len(current_password.encode("utf-8")),
+            component="auth",
+        )
         return _render_change_password_error(
             request,
             username=user.username,

@@ -13,11 +13,24 @@
 <main>
   <h1>{{ title }}</h1>
   {% set active = "settings" %}
-  <section class="installer-settings-page">
+  <section class="installer-settings-page" x-data="installerSidebar()">
     {% include "installer/_sidebar.html" %}
     <section class="installer-settings-page__main" aria-label="Settings">
       {% include "installer/_homeowner_credentials_section.html" %}
     </section>
   </section>
 </main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Story 11.1 AC2 — Installer sidebar mobile-collapse factory. Mirrors the
+  // registration in dashboard.html / event_log.html so the hamburger toggle
+  // works on ≤640px without an Alpine "data factory not defined" error.
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('installerSidebar', () => ({
+      open: false,
+    }));
+  });
+</script>
 {% endblock %}
